@@ -9,6 +9,7 @@ from tools.project_lint import (
     check_no_adapter_reexport_at_layer_root,
     check_no_cast_in_src,
     check_no_cross_layer_internal_monkeypatch,
+    check_no_direct_logging,
     check_no_docstrings,
     check_no_exception_result_errors,
     check_no_global_environ_mutation,
@@ -781,3 +782,68 @@ def test_pl019_flags_exception_subclasses_in_src(tmp_path: Path) -> None:
     assert "BadDomainError" in messages
     assert "BadDerivedError" in messages
     assert "GoodDomainError" not in messages
+
+
+def test_pl020_restricts_direct_logging_imports_and_global_apis(
+    tmp_path: Path,
+) -> None:
+    src = tmp_path / "src" / "my_agents"
+    _write(
+        src / "usecases" / "bad_usecase.py",
+        ("import logging\nfrom logging import Formatter\n"),
+    )
+    _write(
+        src / "composition.py",
+        "import logging.handlers\n",
+    )
+    _write(
+        src / "infrastructure" / "bad_infra.py",
+        (
+            "import logging\n"
+            "import logging as lg\n"
+            "import logging.handlers\n"
+            "import logging.config\n"
+            "from logging import config, getLogger\n"
+            "from logging.config import dictConfig\n"
+            "from logging import *\n"
+            "from logging.handlers import *\n"
+            "logger = logging.getLogger(__name__)\n"
+            "lg.basicConfig()\n"
+            "logging.error('oops')\n"
+            "logging.config.dictConfig({})\n"
+            "handler.emit(record)\n"
+        ),
+    )
+    _write(
+        src / "infrastructure" / "good_infra.py",
+        (
+            "from logging import ERROR, Formatter, LogRecord\n"
+            "from logging.handlers import RotatingFileHandler\n"
+            "import logging.handlers as lh\n"
+            "class CustomHandler(RotatingFileHandler):\n"
+            "    def emit(self, record: LogRecord) -> None:\n"
+            "        super().emit(record)\n"
+            "formatter = Formatter('%(message)s')\n"
+            "handler.handle(record)\n"
+        ),
+    )
+    _write(
+        src / "infrastructure" / "non_logging_infra.py",
+        "bus.emit('event')\n",
+    )
+
+    findings = check_no_direct_logging(src)
+
+    assert len(findings) == 14
+    assert {f.rule for f in findings} == {"PL020"}
+    assert all(
+        f.path.name not in {"good_infra.py", "non_logging_infra.py"} for f in findings
+    )
+    messages = " ".join(f.message for f in findings)
+    assert "logging.getLogger" in messages
+    assert "lg.basicConfig" in messages
+    assert "logging.error" in messages
+    assert "logging.config" in messages
+    assert "wildcard-import" in messages
+    assert ".emit()" in messages
+    assert "logging.handlers" in messages

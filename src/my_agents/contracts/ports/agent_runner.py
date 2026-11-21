@@ -19,6 +19,7 @@ class AgentRunnerErrorType(Enum):
 class AgentRunnerError:
     type: AgentRunnerErrorType
     message: str
+    detail: str | None = None
 
 
 class IAgentRunner(ABC):

@@ -1,3 +1,4 @@
+import traceback
 from collections.abc import Sequence
 from typing import assert_never
 
@@ -26,7 +27,24 @@ from my_agents.contracts.ports.agent_runner import (
     AgentRunnerErrorType,
     IAgentRunner,
 )
+from my_agents.contracts.secret import SecretStr
 from my_agents.infrastructure.settings import AppSettings
+
+
+def _format_exception(exc: Exception) -> str:
+    text = str(exc).strip()
+    if text:
+        return f"{type(exc).__name__}: {text}"
+    return type(exc).__name__
+
+
+def _redact_secret(text: str, secret: SecretStr | None) -> str:
+    if secret is None:
+        return text
+    raw = secret.get_secret_value()
+    if not raw:
+        return text
+    return text.replace(raw, "***")
 
 
 def _to_model_messages(history: Sequence[ChatMessage]) -> list[ModelMessage]:
@@ -43,12 +61,18 @@ def _to_model_messages(history: Sequence[ChatMessage]) -> list[ModelMessage]:
 
 
 class PydanticAIAgentRunner(IAgentRunner):
-    def __init__(self, model_or_agent: Model | Agent[None, str]) -> None:
+    def __init__(
+        self,
+        model_or_agent: Model | Agent[None, str],
+        *,
+        api_key: SecretStr | None = None,
+    ) -> None:
         self._agent: Agent[None, str]
         if isinstance(model_or_agent, Agent):
             self._agent = model_or_agent
         else:
             self._agent = Agent(model_or_agent)
+        self._api_key = api_key
 
     @classmethod
     def from_settings(cls, settings: AppSettings) -> PydanticAIAgentRunner:
@@ -60,7 +84,7 @@ class PydanticAIAgentRunner(IAgentRunner):
                 api_key=settings.api_key.get_secret_value(),
             ),
         )
-        return cls(model)
+        return cls(model, api_key=settings.api_key)
 
     async def run(
         self,
@@ -80,28 +104,29 @@ class PydanticAIAgentRunner(IAgentRunner):
             return Err(
                 AgentRunnerError(
                     type=AgentRunnerErrorType.API_ERROR,
-                    message=str(exc),
+                    message=_redact_secret(_format_exception(exc), self._api_key),
                 )
             )
         except UnexpectedModelBehavior as exc:
             return Err(
                 AgentRunnerError(
                     type=AgentRunnerErrorType.UNEXPECTED_BEHAVIOR,
-                    message=str(exc),
+                    message=_redact_secret(_format_exception(exc), self._api_key),
                 )
             )
         except UsageLimitExceeded as exc:
             return Err(
                 AgentRunnerError(
                     type=AgentRunnerErrorType.USAGE_LIMIT_EXCEEDED,
-                    message=str(exc),
+                    message=_redact_secret(_format_exception(exc), self._api_key),
                 )
             )
         except Exception as exc:
             return Err(
                 AgentRunnerError(
                     type=AgentRunnerErrorType.UNEXPECTED,
-                    message=str(exc),
+                    message=_redact_secret(_format_exception(exc), self._api_key),
+                    detail=_redact_secret(traceback.format_exc(), self._api_key),
                 )
             )
         return Ok(AgentReply(content=result.output))

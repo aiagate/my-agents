@@ -8,6 +8,7 @@ from my_agents.contracts.ports.agent_runner import (
     AgentRunnerError,
     IAgentRunner,
 )
+from my_agents.contracts.ports.logger import IAppLogger, LogEntry, LogLevel
 from my_agents.presentation.cli import CliRepl, SendMessageUseCase
 from my_agents.usecases.send_message import (
     DEFAULT_INSTRUCTIONS,
@@ -67,6 +68,14 @@ class FakeAgentRunner(IAgentRunner):
         return Ok(AgentReply(content=self._reply))
 
 
+class RecordingLogger(IAppLogger):
+    def __init__(self) -> None:
+        self.entries: list[LogEntry] = []
+
+    def log(self, entry: LogEntry, /) -> None:
+        self.entries.append(entry)
+
+
 def _read_inputs(inputs: list[str]) -> Callable[[str], str]:
     def read_input(_prompt: str) -> str:
         return inputs.pop(0)
@@ -77,6 +86,9 @@ def _read_inputs(inputs: list[str]) -> Callable[[str], str]:
 def _run_repl(
     use_case: SendMessageUseCase,
     inputs: list[str],
+    *,
+    debug: bool = False,
+    logger: IAppLogger | None = None,
 ) -> tuple[list[str], list[str], list[str]]:
     prompts: list[str] = []
     outputs: list[str] = []
@@ -86,12 +98,23 @@ def _run_repl(
         prompts.append(prompt)
         return inputs.pop(0)
 
-    CliRepl(
-        use_case,
-        read_input=read_input,
-        write_output=outputs.append,
-        write_error=errors.append,
-    ).run()
+    if logger is None:
+        CliRepl(
+            use_case,
+            read_input=read_input,
+            write_output=outputs.append,
+            write_error=errors.append,
+            debug=debug,
+        ).run()
+    else:
+        CliRepl(
+            use_case,
+            read_input=read_input,
+            write_output=outputs.append,
+            write_error=errors.append,
+            debug=debug,
+            logger=logger,
+        ).run()
     return prompts, outputs, errors
 
 
@@ -200,9 +223,11 @@ def test_error_result_keeps_history_and_continues() -> None:
         ]
     )
 
+    recorder = RecordingLogger()
     prompts, outputs, errors = _run_repl(
         fake,
         ["こんにちは", "失敗する入力", "次の入力", "exit"],
+        logger=recorder,
     )
 
     assert prompts == ["\nYou > ", "\nYou > ", "\nYou > ", "\nYou > "]
@@ -213,9 +238,66 @@ def test_error_result_keeps_history_and_continues() -> None:
         _END_BANNER,
     ]
     assert errors == ["\nError: 一時的なエラーです。"]
+    assert recorder.entries == [
+        LogEntry(
+            level=LogLevel.ERROR,
+            event="send_message_failed",
+            error_type="UNEXPECTED",
+            message="internal detail",
+            detail=None,
+        )
+    ]
     assert fake.requests[0].history == ()
     assert fake.requests[1].history == first_history
     assert fake.requests[2].history == first_history
+
+
+def test_debug_mode_writes_error_message_and_optional_detail() -> None:
+    error_without_detail = SendMessageError(
+        type=SendMessageErrorType.API_ERROR,
+        message="ModelAPIError: status 502",
+        display_message="APIとの通信でエラーが発生しました。",
+    )
+    error_with_detail = SendMessageError(
+        type=SendMessageErrorType.UNEXPECTED,
+        message="RuntimeError: boom",
+        display_message="予期しないエラーが発生しました。",
+        detail="Traceback (most recent call last):\nRuntimeError: boom\n",
+    )
+    fake = FakeSendMessageUseCase([Err(error_without_detail), Err(error_with_detail)])
+    recorder = RecordingLogger()
+
+    _prompts, outputs, errors = _run_repl(
+        fake,
+        ["一回目", "二回目", "exit"],
+        debug=True,
+        logger=recorder,
+    )
+
+    assert outputs == [_START_BANNER, _END_BANNER]
+    assert errors == [
+        "\nError: APIとの通信でエラーが発生しました。",
+        "Debug [API_ERROR]: ModelAPIError: status 502",
+        "\nError: 予期しないエラーが発生しました。",
+        "Debug [UNEXPECTED]: RuntimeError: boom",
+        "Traceback (most recent call last):\nRuntimeError: boom",
+    ]
+    assert recorder.entries == [
+        LogEntry(
+            level=LogLevel.ERROR,
+            event="send_message_failed",
+            error_type="API_ERROR",
+            message="ModelAPIError: status 502",
+            detail=None,
+        ),
+        LogEntry(
+            level=LogLevel.ERROR,
+            event="send_message_failed",
+            error_type="UNEXPECTED",
+            message="RuntimeError: boom",
+            detail="Traceback (most recent call last):\nRuntimeError: boom\n",
+        ),
+    ]
 
 
 def test_keyboard_interrupt_during_execute_exits_cleanly() -> None:
