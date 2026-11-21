@@ -11,8 +11,14 @@ from my_agents.contracts.ports.agent_runner import (
     AgentRunnerErrorType,
     IAgentRunner,
 )
+from my_agents.domain.context_assembler import assemble_instructions
+from my_agents.domain.core_profile import CoreProfile
+from my_agents.usecases.get_core_profile import (
+    GetCoreProfileError,
+    GetCoreProfileErrorType,
+    GetCoreProfileResponse,
+)
 from my_agents.usecases.send_message import (
-    DEFAULT_INSTRUCTIONS,
     SendMessageError,
     SendMessageErrorType,
     SendMessageHandler,
@@ -51,10 +57,40 @@ class FakeAgentRunner(IAgentRunner):
         return self.result
 
 
+class FakeGetCoreProfile:
+    def __init__(
+        self,
+        result: Result[GetCoreProfileResponse, GetCoreProfileError],
+    ) -> None:
+        self.result = result
+        self.calls = 0
+
+    def execute(self) -> Result[GetCoreProfileResponse, GetCoreProfileError]:
+        self.calls += 1
+        return self.result
+
+
+def _profile_response(profile: CoreProfile) -> GetCoreProfileResponse:
+    return GetCoreProfileResponse(
+        profile=profile,
+        location="memory/core.md",
+        max_chars=4096,
+    )
+
+
 @pytest.mark.anyio
 async def test_execute_returns_reply_and_appends_history() -> None:
-    runner = FakeAgentRunner(Ok(AgentReply(content="こんにちは")))
-    handler = SendMessageHandler(runner)
+    profile = CoreProfile(content="## 価値観\n- 誠実さ")
+    runner = FakeAgentRunner(
+        Ok(
+            AgentReply(
+                content="こんにちは",
+                core_memory_updates=("価値観を記録",),
+            )
+        )
+    )
+    get_core_profile = FakeGetCoreProfile(Ok(_profile_response(profile)))
+    handler = SendMessageHandler(runner, get_core_profile)
     previous = ChatMessage(role="user", content="前回の質問")
     request = SendMessageRequest(
         user_input="  今日は？  ",
@@ -71,45 +107,49 @@ async def test_execute_returns_reply_and_appends_history() -> None:
             ChatMessage(role="user", content="今日は？"),
             ChatMessage(role="assistant", content="こんにちは"),
         ),
+        core_memory_updates=("価値観を記録",),
     )
     assert hash(request) == hash(
         SendMessageRequest(user_input="  今日は？  ", history=(previous,))
     )
+    assert get_core_profile.calls == 1
     assert runner.runs == [
         RecordedRun(
             user_input="今日は？",
             history=(previous,),
-            instructions=DEFAULT_INSTRUCTIONS,
+            instructions=assemble_instructions(profile),
         )
     ]
 
 
 @pytest.mark.anyio
-async def test_execute_uses_custom_instructions_and_empty_history_by_default() -> None:
+async def test_execute_uses_empty_profile_without_core_memory_updates() -> None:
     runner = FakeAgentRunner(Ok(AgentReply(content="ok")))
-    handler = SendMessageHandler(runner, instructions="関西弁で答えてください。")
+    get_core_profile = FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty())))
+    handler = SendMessageHandler(runner, get_core_profile)
 
     result = await handler.execute(SendMessageRequest(user_input="hello"))
 
     assert is_ok(result)
-    assert result.unwrap().history == (
-        ChatMessage(role="user", content="hello"),
-        ChatMessage(role="assistant", content="ok"),
+    assert result.unwrap() == SendMessageResponse(
+        reply="ok",
+        history=(
+            ChatMessage(role="user", content="hello"),
+            ChatMessage(role="assistant", content="ok"),
+        ),
+        core_memory_updates=(),
     )
-    assert runner.runs == [
-        RecordedRun(
-            user_input="hello",
-            history=(),
-            instructions="関西弁で答えてください。",
-        )
-    ]
+    instructions = runner.runs[0].instructions
+    assert instructions == assemble_instructions(CoreProfile.empty())
+    assert "まだ何も記録されていません。" in instructions
 
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("user_input", ["", "   ", "\n\t "])
 async def test_execute_rejects_empty_input(user_input: str) -> None:
     runner = FakeAgentRunner(Ok(AgentReply(content="ok")))
-    handler = SendMessageHandler(runner)
+    get_core_profile = FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty())))
+    handler = SendMessageHandler(runner, get_core_profile)
 
     result = await handler.execute(SendMessageRequest(user_input=user_input))
 
@@ -126,6 +166,37 @@ async def test_execute_rejects_empty_input(user_input: str) -> None:
     assert not isinstance(error, Exception)
     assert error.display_message == "メッセージを入力してください。"
     assert error.detail is None
+    assert get_core_profile.calls == 0
+    assert runner.runs == []
+
+
+@pytest.mark.anyio
+async def test_execute_maps_core_profile_error() -> None:
+    profile_error = GetCoreProfileError(
+        type=GetCoreProfileErrorType.INVALID_PROFILE,
+        message="profile too large",
+        display_message="Core Memory の内容が不正です。",
+    )
+    runner = FakeAgentRunner(Ok(AgentReply(content="ok")))
+    get_core_profile = FakeGetCoreProfile(Err(profile_error))
+    handler = SendMessageHandler(runner, get_core_profile)
+
+    result = await handler.execute(SendMessageRequest(user_input="hello"))
+
+    error = assert_err(
+        result,
+        expected_type=SendMessageErrorType.CORE_PROFILE_ERROR,
+        message_contains="profile too large",
+        display_message_contains="Core Memory の内容が不正です。",
+    )
+    assert isinstance(error, SendMessageError)
+    assert isinstance(error, AppError)
+    assert isinstance(error, TypedError)
+    assert isinstance(error, DisplayableError)
+    assert error.message == "profile too large"
+    assert error.display_message == "Core Memory の内容が不正です。"
+    assert error.detail is None
+    assert get_core_profile.calls == 1
     assert runner.runs == []
 
 
@@ -170,7 +241,8 @@ async def test_maps_runner_errors(
         detail="traceback detail",
     )
     runner = FakeAgentRunner(Err(runner_error))
-    handler = SendMessageHandler(runner)
+    get_core_profile = FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty())))
+    handler = SendMessageHandler(runner, get_core_profile)
 
     result = await handler.execute(SendMessageRequest(user_input="hello"))
 

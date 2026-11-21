@@ -21,6 +21,8 @@ from tools.project_lint import (
     check_strict_coverage_config,
     check_strict_pyright_config,
     check_thin_entrypoint,
+    check_tool_descriptions,
+    check_usecase_protocol_ownership,
 )
 
 
@@ -847,3 +849,144 @@ def test_pl020_restricts_direct_logging_imports_and_global_apis(
     assert "wildcard-import" in messages
     assert ".emit()" in messages
     assert "logging.handlers" in messages
+
+
+def test_pl002_requires_expected_type_for_typed_error(tmp_path: Path) -> None:
+    src = tmp_path / "src" / "my_agents"
+    tests_dir = tmp_path / "tests"
+    _write(
+        src / "usecases" / "errors.py",
+        (
+            "from dataclasses import dataclass\n"
+            "from enum import Enum, auto\n"
+            "\n"
+            "class UseCaseErrorType(Enum):\n"
+            "    INVALID = auto()\n"
+            "\n"
+            "@dataclass(frozen=True, slots=True)\n"
+            "class UseCaseError:\n"
+            "    type: UseCaseErrorType\n"
+            "    message: str\n"
+            "\n"
+            "@dataclass(frozen=True, slots=True)\n"
+            "class SettingsError:\n"
+            "    message: str\n"
+        ),
+    )
+    _write(
+        tests_dir / "test_sample.py",
+        (
+            "def test_bad_missing_expected_type() -> None:\n"
+            "    error = UseCaseError(type=UseCaseErrorType.INVALID, message='bad')\n"
+            "    assert isinstance(error, UseCaseError)\n"
+            "    assert_err(object(), message_contains='bad')\n"
+            "\n"
+            "def test_good_with_expected_type() -> None:\n"
+            "    assert_err(\n"
+            "        object(),\n"
+            "        expected_type=UseCaseErrorType.INVALID,\n"
+            "        message_contains='bad',\n"
+            "    )\n"
+            "\n"
+            "def test_allows_untyped_app_error() -> None:\n"
+            "    assert_err(object(), message_contains='missing')\n"
+        ),
+    )
+
+    findings = check_assert_error_message(tests_dir)
+
+    assert len(findings) == 1
+    assert findings[0].rule == "PL002"
+    assert "test_bad_missing_expected_type" in findings[0].message
+    assert "expected_type" in findings[0].hint
+
+
+def test_pl021_requires_usecase_protocol_to_match_module_name(tmp_path: Path) -> None:
+    src = tmp_path / "src" / "my_agents"
+    _write(
+        src / "usecases" / "send_message.py",
+        (
+            "from typing import Protocol\n"
+            "\n"
+            "class SendMessageUseCase(Protocol):\n"
+            "    def execute(self) -> None: ...\n"
+            "\n"
+            "class _LocalUseCase(Protocol):\n"
+            "    def execute(self) -> None: ...\n"
+            "\n"
+            "class SendMessageHandler(Protocol):\n"
+            "    def execute(self) -> None: ...\n"
+        ),
+    )
+    _write(
+        src / "usecases" / "get_core_profile.py",
+        (
+            "from typing import Protocol\n"
+            "\n"
+            "class GetCoreProfileUseCase(Protocol):\n"
+            "    def execute(self) -> None: ...\n"
+            "\n"
+            "class SendMessageUseCase(Protocol):\n"
+            "    def execute(self) -> None: ...\n"
+        ),
+    )
+
+    findings = check_usecase_protocol_ownership(src)
+
+    assert len(findings) == 1
+    assert findings[0].rule == "PL021"
+    assert "SendMessageUseCase" in findings[0].message
+    assert "get_core_profile" in findings[0].message
+    assert findings[0].hint
+
+
+def test_pl022_requires_tool_and_parameter_descriptions(tmp_path: Path) -> None:
+    src = tmp_path / "src" / "my_agents"
+    _write(
+        src / "infrastructure" / "tools.py",
+        (
+            "from typing import Annotated\n"
+            "from pydantic import Field\n"
+            "from pydantic_ai import RunContext, Tool\n"
+            "\n"
+            "def described(value: Annotated[str, Field(description='ok')]) -> str:\n"
+            "    return value\n"
+            "\n"
+            "def bad_param(bad_value: str) -> str:\n"
+            "    return bad_value\n"
+            "\n"
+            "def empty_field(\n"
+            "    empty_value: Annotated[str, Field(description='   ')],\n"
+            ") -> str:\n"
+            "    return empty_value\n"
+            "\n"
+            "def build() -> object:\n"
+            "    def nested(nested_value: str) -> str:\n"
+            "        return nested_value\n"
+            "    return Tool(nested, description='nested tool')\n"
+            "\n"
+            "async def valid(\n"
+            "    ctx: RunContext[None],\n"
+            "    value: Annotated[str, Field(description='ok')],\n"
+            ") -> str:\n"
+            "    return value\n"
+            "\n"
+            "tool_missing = Tool(described)\n"
+            "tool_empty = Tool(described, description='   ')\n"
+            "tool_bad_param = Tool(bad_param, description='does things')\n"
+            "tool_empty_field = Tool(empty_field, description='does things')\n"
+            "tool_valid = Tool(valid, description='valid')\n"
+            "tool_none = Tool(described, description=None)\n"
+        ),
+    )
+
+    findings = check_tool_descriptions(src)
+
+    assert len(findings) == 6
+    assert {finding.rule for finding in findings} == {"PL022"}
+    messages = " ".join(finding.message for finding in findings)
+    assert "description=" in messages
+    assert "bad_value" in messages
+    assert "empty_value" in messages
+    assert "nested_value" in messages
+    assert "valid" not in messages

@@ -10,16 +10,19 @@ from pydantic_ai.messages import (
     ModelRequest,
     ModelResponse,
     TextPart,
+    ToolCallPart,
     UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from my_agents.composition import build_cli, run_cli
+from my_agents.contracts.ports.core_profile_updater import ICoreProfileUpdater
 from my_agents.contracts.ports.logger import NOOP_LOGGER
 from my_agents.contracts.secret import SecretStr
+from my_agents.domain.context_assembler import assemble_instructions
+from my_agents.domain.core_profile import CoreProfile
 from my_agents.infrastructure.pydantic_ai_runner import PydanticAIAgentRunner
 from my_agents.infrastructure.settings import AppSettings, SettingsError
-from my_agents.usecases.send_message import DEFAULT_INSTRUCTIONS
 from tests.helpers import assert_err
 
 _VALID_ENV = {
@@ -45,11 +48,64 @@ def _patch_runner(
 
     class StubRunner:
         @classmethod
-        def from_settings(cls, settings: AppSettings) -> PydanticAIAgentRunner:
+        def from_settings(
+            cls,
+            settings: AppSettings,
+            *,
+            core_profile_updater: ICoreProfileUpdater | None = None,
+        ) -> PydanticAIAgentRunner:
             captured["model_name"] = settings.model_name
             captured["base_url"] = settings.base_url
             captured["api_key"] = settings.api_key
-            return PydanticAIAgentRunner(FunctionModel(respond))
+            captured["memory_dir"] = settings.memory_dir
+            captured["updater"] = core_profile_updater
+            return PydanticAIAgentRunner(
+                FunctionModel(respond),
+                core_profile_updater=core_profile_updater,
+            )
+
+    monkeypatch.setattr("my_agents.composition.PydanticAIAgentRunner", StubRunner)
+
+
+def _patch_core_memory_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    captured: dict[str, object],
+    instructions_log: list[str | None],
+) -> None:
+    tool_calls_remaining = [1]
+
+    def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        instructions_log.append(info.instructions)
+        if tool_calls_remaining[0] > 0:
+            tool_calls_remaining[0] -= 1
+            return ModelResponse(
+                [
+                    ToolCallPart(
+                        "update_core_memory",
+                        {
+                            "action": "append",
+                            "reason": "新しい価値観",
+                            "content": "## 価値観・判断軸\n- 誠実さ",
+                        },
+                    )
+                ]
+            )
+        return ModelResponse([TextPart("了解しました")])
+
+    class StubRunner:
+        @classmethod
+        def from_settings(
+            cls,
+            settings: AppSettings,
+            *,
+            core_profile_updater: ICoreProfileUpdater | None = None,
+        ) -> PydanticAIAgentRunner:
+            captured["memory_dir"] = settings.memory_dir
+            captured["updater"] = core_profile_updater
+            return PydanticAIAgentRunner(
+                FunctionModel(respond),
+                core_profile_updater=core_profile_updater,
+            )
 
     monkeypatch.setattr("my_agents.composition.PydanticAIAgentRunner", StubRunner)
 
@@ -79,9 +135,10 @@ def test_build_cli_wires_runner_into_cli(
     captured: dict[str, object] = {}
     _patch_runner(monkeypatch, captured, "配線済み")
     outputs: list[str] = []
+    env = {**_VALID_ENV, "MEMORY_PATH": str(tmp_path / "agent-memory")}
 
     result = build_cli(
-        env=_VALID_ENV,
+        env=env,
         env_path=tmp_path / ".env",
         read_input=_read_inputs(["こんにちは", "exit"]),
         write_output=outputs.append,
@@ -92,9 +149,54 @@ def test_build_cli_wires_runner_into_cli(
     assert captured["model_name"] == "test-model"
     assert captured["base_url"] == "https://example.com/v1"
     assert captured["api_key"] == SecretStr("secret")
-    assert captured["instructions"] == DEFAULT_INSTRUCTIONS
+    assert captured["memory_dir"] == tmp_path / "agent-memory"
+    assert captured["updater"] is not None
+    assert captured["instructions"] == assemble_instructions(CoreProfile.empty())
     assert captured["prompt"] == "こんにちは"
     assert "\nAI > 配線済み" in outputs
+
+
+def test_build_cli_persists_core_memory_and_uses_it_on_next_turn(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    instructions_log: list[str | None] = []
+    _patch_core_memory_runner(monkeypatch, captured, instructions_log)
+    outputs: list[str] = []
+    memory_dir = tmp_path / "memory"
+    env = {**_VALID_ENV, "MEMORY_PATH": str(memory_dir)}
+
+    result = build_cli(
+        env=env,
+        env_path=tmp_path / ".env",
+        read_input=_read_inputs(["価値観を覚えて", "ありがとう", "/core", "exit"]),
+        write_output=outputs.append,
+    )
+
+    assert is_ok(result)
+    result.unwrap().run()
+
+    assert (memory_dir / "core.md").read_text(encoding="utf-8") == (
+        "## 価値観・判断軸\n- 誠実さ\n"
+    )
+    assert captured["memory_dir"] == memory_dir
+    assert len(instructions_log) == 3
+    assert instructions_log[0] is not None
+    assert "まだ何も記録されていません。" in instructions_log[0]
+    assert instructions_log[2] is not None
+    assert "文字数: 16 / 4096" in instructions_log[2]
+    assert "## 価値観・判断軸\n- 誠実さ" in instructions_log[2]
+    assert outputs[0] == "会話を開始します。コマンド: /help  終了: exit / quit"
+    assert outputs[1] == "\n[Core Memory updated: 新しい価値観]"
+    assert outputs[2] == "\nAI > 了解しました"
+    assert outputs[3] == "\nAI > 了解しました"
+    assert outputs[4] == (
+        f"\nCore Memory: {memory_dir / 'core.md'}"
+        "\n使用量: 16 / 4096"
+        "\n## 価値観・判断軸\n- 誠実さ"
+    )
+    assert outputs[5] == "\n会話を終了しました。"
 
 
 def test_run_cli_returns_zero_and_uses_default_env_path(
@@ -123,7 +225,8 @@ def test_run_cli_returns_zero_and_uses_default_env_path(
     assert captured["model_name"] == "file-model"
     assert captured["base_url"] == "https://file.example.com/v1"
     assert captured["api_key"] == SecretStr("file-secret")
-    assert captured["instructions"] == DEFAULT_INSTRUCTIONS
+    assert captured["memory_dir"] == tmp_path / "memory"
+    assert captured["instructions"] == assemble_instructions(CoreProfile.empty())
     assert captured["prompt"] == "質問"
     assert "\nAI > 応答" in outputs
 
@@ -219,10 +322,16 @@ def test_run_cli_debug_and_explicit_log_file_record_runtime_errors(
 
     class FailingStubRunner:
         @classmethod
-        def from_settings(cls, settings: AppSettings) -> PydanticAIAgentRunner:
+        def from_settings(
+            cls,
+            settings: AppSettings,
+            *,
+            core_profile_updater: ICoreProfileUpdater | None = None,
+        ) -> PydanticAIAgentRunner:
             return PydanticAIAgentRunner(
                 FunctionModel(failing_respond),
                 api_key=settings.api_key,
+                core_profile_updater=core_profile_updater,
             )
 
     monkeypatch.setattr(

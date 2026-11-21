@@ -13,6 +13,9 @@ from my_agents.contracts.ports.logger import (
     LogLevel,
 )
 from my_agents.infrastructure.file_logger import JsonlFileLogger, resolve_log_path
+from my_agents.infrastructure.markdown_core_profile_store import (
+    MarkdownCoreProfileStore,
+)
 from my_agents.infrastructure.pydantic_ai_runner import PydanticAIAgentRunner
 from my_agents.infrastructure.settings import SettingsError, load_app_settings
 from my_agents.presentation.cli.args import (
@@ -22,7 +25,9 @@ from my_agents.presentation.cli.args import (
     parse_cli_args,
 )
 from my_agents.presentation.cli.repl import CliRepl, write_stderr
+from my_agents.usecases.get_core_profile import GetCoreProfileHandler
 from my_agents.usecases.send_message import SendMessageHandler
+from my_agents.usecases.update_core_profile import UpdateCoreProfileHandler
 
 
 def build_cli(
@@ -41,11 +46,19 @@ def build_cli(
     if is_err(settings_result):
         return Err(settings_result.error)
 
-    agent_runner = PydanticAIAgentRunner.from_settings(settings_result.value)
-    send_message = SendMessageHandler(agent_runner)
+    settings = settings_result.value
+    store = MarkdownCoreProfileStore.from_memory_dir(settings.memory_dir)
+    get_core_profile = GetCoreProfileHandler(store)
+    update_core_profile = UpdateCoreProfileHandler(store)
+    agent_runner = PydanticAIAgentRunner.from_settings(
+        settings,
+        core_profile_updater=update_core_profile,
+    )
+    send_message = SendMessageHandler(agent_runner, get_core_profile)
     return Ok(
         CliRepl(
             send_message,
+            get_core_profile,
             read_input=read_input,
             write_output=write_output,
             write_error=write_error,

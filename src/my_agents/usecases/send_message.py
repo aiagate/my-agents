@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import assert_never
+from typing import Protocol, assert_never
 
 from flow_res import Err, Ok, Result, is_err
 
@@ -10,12 +10,15 @@ from my_agents.contracts.ports.agent_runner import (
     AgentRunnerErrorType,
     IAgentRunner,
 )
-
-DEFAULT_INSTRUCTIONS = "日本語で簡潔に応答してください。"
+from my_agents.domain.context_assembler import assemble_instructions
+from my_agents.usecases.get_core_profile import (
+    GetCoreProfileUseCase,
+)
 
 
 class SendMessageErrorType(Enum):
     EMPTY_INPUT = auto()
+    CORE_PROFILE_ERROR = auto()
     API_ERROR = auto()
     UNEXPECTED_BEHAVIOR = auto()
     USAGE_LIMIT_EXCEEDED = auto()
@@ -40,6 +43,14 @@ class SendMessageRequest:
 class SendMessageResponse:
     reply: str
     history: tuple[ChatMessage, ...]
+    core_memory_updates: tuple[str, ...] = ()
+
+
+class SendMessageUseCase(Protocol):
+    async def execute(
+        self,
+        request: SendMessageRequest,
+    ) -> Result[SendMessageResponse, SendMessageError]: ...
 
 
 def _to_send_message_error(error: AgentRunnerError) -> SendMessageError:
@@ -85,11 +96,10 @@ class SendMessageHandler:
     def __init__(
         self,
         agent_runner: IAgentRunner,
-        *,
-        instructions: str = DEFAULT_INSTRUCTIONS,
+        get_core_profile: GetCoreProfileUseCase,
     ) -> None:
         self._agent_runner = agent_runner
-        self._instructions = instructions
+        self._get_core_profile = get_core_profile
 
     async def execute(
         self,
@@ -105,10 +115,20 @@ class SendMessageHandler:
                 )
             )
 
+        profile_result = self._get_core_profile.execute()
+        if is_err(profile_result):
+            return Err(
+                SendMessageError(
+                    type=SendMessageErrorType.CORE_PROFILE_ERROR,
+                    message=profile_result.error.message,
+                    display_message=profile_result.error.display_message,
+                )
+            )
+
         result = await self._agent_runner.run(
             normalized_input,
             history=request.history,
-            instructions=self._instructions,
+            instructions=assemble_instructions(profile_result.value.profile),
         )
         if is_err(result):
             return Err(_to_send_message_error(result.error))
@@ -122,5 +142,6 @@ class SendMessageHandler:
                     ChatMessage(role="user", content=normalized_input),
                     ChatMessage(role="assistant", content=reply.content),
                 ),
+                core_memory_updates=reply.core_memory_updates,
             )
         )

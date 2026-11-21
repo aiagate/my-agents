@@ -9,6 +9,7 @@ from flow_res import Err, Ok, Result
 from my_agents.contracts.secret import SecretStr
 
 _SETTING_NAMES = ("MAGPIE_MODEL", "MAGPIE_BASE_URL", "MAGPIE_API_KEY")
+DEFAULT_MEMORY_DIR_NAME = "memory"
 
 
 @dataclass(frozen=True, slots=True)
@@ -21,6 +22,14 @@ class AppSettings:
     model_name: str
     base_url: str
     api_key: SecretStr
+    memory_dir: Path
+
+
+def _resolve_memory_dir(source: Mapping[str, str | None]) -> Path:
+    value = source.get("MEMORY_PATH")
+    if value is None or not value.strip():
+        return Path.cwd() / DEFAULT_MEMORY_DIR_NAME
+    return Path(value.strip()).expanduser()
 
 
 def load_app_settings(
@@ -55,5 +64,6 @@ def load_app_settings(
             model_name=collected["MAGPIE_MODEL"],
             base_url=collected["MAGPIE_BASE_URL"],
             api_key=SecretStr(collected["MAGPIE_API_KEY"]),
+            memory_dir=_resolve_memory_dir(source),
         )
     )

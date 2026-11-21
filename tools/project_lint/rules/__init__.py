@@ -42,6 +42,10 @@ from tools.project_lint.rules.pl019_no_exception_errors import (
     check_no_exception_result_errors,
 )
 from tools.project_lint.rules.pl020_no_direct_logging import check_no_direct_logging
+from tools.project_lint.rules.pl021_usecase_protocol_ownership import (
+    check_usecase_protocol_ownership,
+)
+from tools.project_lint.rules.pl022_tool_descriptions import check_tool_descriptions
 
 
 def _src_rule(
@@ -141,6 +145,12 @@ RULES: tuple[LintRule, ...] = (
         "no_direct_logging",
         check_no_direct_logging,
     ),
+    _src_rule(
+        "PL021",
+        "usecase_protocol_ownership",
+        check_usecase_protocol_ownership,
+    ),
+    _src_rule("PL022", "tool_descriptions", check_tool_descriptions),
 )
 
 __all__ = [
@@ -165,4 +175,6 @@ __all__ = [
     "check_strict_coverage_config",
     "check_strict_pyright_config",
     "check_thin_entrypoint",
+    "check_tool_descriptions",
+    "check_usecase_protocol_ownership",
 ]

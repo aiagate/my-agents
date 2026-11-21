@@ -74,6 +74,37 @@ def _collect_displayable_error_symbols(
     return displayable_classes, displayable_error_types
 
 
+def _collect_typed_error_symbols(
+    src_dir: Path,
+) -> tuple[set[str], set[str]]:
+    typed_classes: set[str] = set()
+    typed_error_types: set[str] = set()
+    for path in iter_python_files(src_dir):
+        tree = parse_file(path)
+        for node in walk(tree):
+            if not isinstance(node, ClassDef) or _is_protocol_class(node):
+                continue
+            has_message = False
+            error_type_name: str | None = None
+            for stmt in node.body:
+                if isinstance(stmt, AnnAssign) and isinstance(stmt.target, Name):
+                    if stmt.target.id == "message":
+                        has_message = True
+                    elif stmt.target.id == "type":
+                        error_type_name = _annotation_leaf_name(stmt.annotation)
+                elif isinstance(
+                    stmt, FunctionDef | AsyncFunctionDef
+                ) and has_decorator_name(stmt, frozenset({"property"})):
+                    if stmt.name == "message":
+                        has_message = True
+                    elif stmt.name == "type":
+                        error_type_name = _annotation_leaf_name(stmt.returns)
+            if has_message and error_type_name is not None:
+                typed_classes.add(node.name)
+                typed_error_types.add(error_type_name)
+    return typed_classes, typed_error_types
+
+
 def _is_error_assert_helper_call(node: AST) -> TypeIs[Call]:
     if not isinstance(node, Call):
         return False
@@ -90,6 +121,13 @@ def _assert_checks_error_type(assert_node: Assert) -> bool:
     for node in walk(assert_node.test):
         if isinstance(node, Attribute) and node.attr == "type":
             return True
+    return False
+
+
+def _helper_has_expected_type(call: Call) -> bool:
+    for kw in call.keywords:
+        if kw.arg == "expected_type":
+            return not (isinstance(kw.value, Constant) and kw.value.value is None)
     return False
 
 
@@ -154,6 +192,8 @@ def check_assert_error_message(
         resolved_src_dir
     )
     displayable_symbols = displayable_classes | displayable_error_types
+    typed_classes, typed_error_types = _collect_typed_error_symbols(resolved_src_dir)
+    typed_symbols = typed_classes | typed_error_types
 
     findings: list[LintFinding] = []
     for path in iter_python_files(tests_dir):
@@ -190,6 +230,29 @@ def check_assert_error_message(
                             "Also assert 'error.message' or 'error.display_message', "
                             "or use an assert_err(..., message_contains=...) helper so "
                             "message propagation is always checked."
+                        ),
+                    )
+                )
+                continue
+
+            missing_expected_type = [
+                call for call in helper_calls if not _helper_has_expected_type(call)
+            ]
+            if missing_expected_type and _references_any_symbol(node, typed_symbols):
+                anchor_call = missing_expected_type[0]
+                findings.append(
+                    LintFinding(
+                        rule="PL002",
+                        path=path,
+                        line=anchor_call.lineno,
+                        col=anchor_call.col_offset + 1,
+                        message=(
+                            f"Test '{node.name}' asserts a TypedError without a "
+                            "non-None 'expected_type' in assert_err(...)."
+                        ),
+                        hint=(
+                            "Pass expected_type=<ErrorType.VALUE> to assert_err(...) "
+                            "so the error type is verified by the helper itself."
                         ),
                     )
                 )

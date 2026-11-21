@@ -5,7 +5,9 @@ from my_agents.presentation.cli.args import (
     CliParseResult,
     parse_cli_args,
 )
-from my_agents.presentation.cli.repl import CliRepl, SendMessageUseCase, write_stderr
+from my_agents.presentation.cli.repl import CliRepl, write_stderr
+from my_agents.usecases.get_core_profile import GetCoreProfileUseCase
+from my_agents.usecases.send_message import SendMessageUseCase
 
 __all__ = [
     "CliArgsError",
@@ -13,6 +15,7 @@ __all__ = [
     "CliOptions",
     "CliParseResult",
     "CliRepl",
+    "GetCoreProfileUseCase",
     "SendMessageUseCase",
     "parse_cli_args",
     "write_stderr",

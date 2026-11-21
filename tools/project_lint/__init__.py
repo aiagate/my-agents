@@ -30,6 +30,8 @@ from tools.project_lint.rules import (
     check_strict_coverage_config,
     check_strict_pyright_config,
     check_thin_entrypoint,
+    check_tool_descriptions,
+    check_usecase_protocol_ownership,
 )
 
 
@@ -80,6 +82,8 @@ __all__ = [
     "check_strict_coverage_config",
     "check_strict_pyright_config",
     "check_thin_entrypoint",
+    "check_tool_descriptions",
+    "check_usecase_protocol_ownership",
     "main",
     "run_all_checks",
 ]

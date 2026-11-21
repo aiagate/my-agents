@@ -11,3 +11,4 @@ class ChatMessage:
 @dataclass(frozen=True, slots=True)
 class AgentReply:
     content: str
+    core_memory_updates: tuple[str, ...] = ()
