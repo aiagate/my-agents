@@ -1,0 +1,222 @@
+from ast import (
+    AST,
+    AnnAssign,
+    Assert,
+    AsyncFunctionDef,
+    Attribute,
+    Call,
+    ClassDef,
+    Constant,
+    FunctionDef,
+    Name,
+    Subscript,
+    walk,
+)
+from pathlib import Path
+from typing import TypeIs
+
+from tools.project_lint.common import (
+    TESTS_DIR,
+    LintFinding,
+    has_decorator_name,
+    iter_python_files,
+    parse_file,
+)
+
+
+def _is_protocol_class(node: ClassDef) -> bool:
+    for base in node.bases:
+        target = base.value if isinstance(base, Subscript) else base
+        if isinstance(target, Name) and target.id == "Protocol":
+            return True
+        if isinstance(target, Attribute) and target.attr == "Protocol":
+            return True
+    return False
+
+
+def _annotation_leaf_name(annotation: AST | None) -> str | None:
+    if isinstance(annotation, Name):
+        return annotation.id
+    if isinstance(annotation, Attribute):
+        return annotation.attr
+    return None
+
+
+def _collect_displayable_error_symbols(
+    src_dir: Path,
+) -> tuple[set[str], set[str]]:
+    displayable_classes: set[str] = set()
+    displayable_error_types: set[str] = set()
+    for path in iter_python_files(src_dir):
+        tree = parse_file(path)
+        for node in walk(tree):
+            if not isinstance(node, ClassDef) or _is_protocol_class(node):
+                continue
+            has_display_message = False
+            error_type_name: str | None = None
+            for stmt in node.body:
+                if isinstance(stmt, AnnAssign) and isinstance(stmt.target, Name):
+                    if stmt.target.id == "display_message":
+                        has_display_message = True
+                    elif stmt.target.id == "type":
+                        error_type_name = _annotation_leaf_name(stmt.annotation)
+                elif isinstance(
+                    stmt, FunctionDef | AsyncFunctionDef
+                ) and has_decorator_name(stmt, frozenset({"property"})):
+                    if stmt.name == "display_message":
+                        has_display_message = True
+                    elif stmt.name == "type":
+                        error_type_name = _annotation_leaf_name(stmt.returns)
+            if has_display_message:
+                displayable_classes.add(node.name)
+                if error_type_name is not None:
+                    displayable_error_types.add(error_type_name)
+    return displayable_classes, displayable_error_types
+
+
+def _is_error_assert_helper_call(node: AST) -> TypeIs[Call]:
+    if not isinstance(node, Call):
+        return False
+    callee = node.func
+    if isinstance(callee, Name) and callee.id in {"assert_err", "assert_error"}:
+        return True
+    return isinstance(callee, Attribute) and callee.attr in {
+        "assert_err",
+        "assert_error",
+    }
+
+
+def _assert_checks_error_type(assert_node: Assert) -> bool:
+    for node in walk(assert_node.test):
+        if isinstance(node, Attribute) and node.attr == "type":
+            return True
+    return False
+
+
+def _test_verifies_error_message(func: FunctionDef | AsyncFunctionDef) -> bool:
+    for node in walk(func):
+        if _is_error_assert_helper_call(node):
+            return True
+        if isinstance(node, Assert):
+            for child in walk(node.test):
+                if isinstance(child, Attribute) and child.attr in {
+                    "message",
+                    "display_message",
+                }:
+                    return True
+                if (
+                    isinstance(child, Call)
+                    and isinstance(child.func, Name)
+                    and child.func.id == "str"
+                ):
+                    return True
+    return False
+
+
+def _test_verifies_display_message(func: FunctionDef | AsyncFunctionDef) -> bool:
+    for node in walk(func):
+        if isinstance(node, Call) and _is_error_assert_helper_call(node):
+            for kw in node.keywords:
+                if kw.arg == "display_message_contains" and not (
+                    isinstance(kw.value, Constant) and kw.value.value is None
+                ):
+                    return True
+        if isinstance(node, Assert):
+            for child in walk(node.test):
+                if isinstance(child, Attribute) and child.attr == "display_message":
+                    return True
+    return False
+
+
+def _references_any_symbol(
+    func: FunctionDef | AsyncFunctionDef,
+    symbols: set[str],
+) -> bool:
+    if not symbols:
+        return False
+    for node in walk(func):
+        if isinstance(node, Name) and node.id in symbols:
+            return True
+        if isinstance(node, Attribute) and node.attr in symbols:
+            return True
+    return False
+
+
+def check_assert_error_message(
+    tests_dir: Path = TESTS_DIR,
+    *,
+    src_dir: Path | None = None,
+) -> list[LintFinding]:
+    resolved_src_dir = (
+        tests_dir.parent / "src" / "my_agents" if src_dir is None else src_dir
+    )
+    displayable_classes, displayable_error_types = _collect_displayable_error_symbols(
+        resolved_src_dir
+    )
+    displayable_symbols = displayable_classes | displayable_error_types
+
+    findings: list[LintFinding] = []
+    for path in iter_python_files(tests_dir):
+        if not path.name.startswith("test_"):
+            continue
+        tree = parse_file(path)
+        for node in walk(tree):
+            if not isinstance(node, FunctionDef | AsyncFunctionDef):
+                continue
+            if not node.name.startswith("test_"):
+                continue
+            type_asserts = [
+                child
+                for child in walk(node)
+                if isinstance(child, Assert) and _assert_checks_error_type(child)
+            ]
+            helper_calls = [
+                child for child in walk(node) if _is_error_assert_helper_call(child)
+            ]
+
+            if type_asserts and not _test_verifies_error_message(node):
+                first = type_asserts[0]
+                findings.append(
+                    LintFinding(
+                        rule="PL002",
+                        path=path,
+                        line=first.lineno,
+                        col=first.col_offset + 1,
+                        message=(
+                            f"Test '{node.name}' asserts '.type' without verifying "
+                            "the error message."
+                        ),
+                        hint=(
+                            "Also assert 'error.message' or 'error.display_message', "
+                            "or use an assert_err(..., message_contains=...) helper so "
+                            "message propagation is always checked."
+                        ),
+                    )
+                )
+                continue
+
+            if (
+                (type_asserts or helper_calls)
+                and _references_any_symbol(node, displayable_symbols)
+                and not _test_verifies_display_message(node)
+            ):
+                anchor: Call | Assert = (
+                    helper_calls[0] if helper_calls else type_asserts[0]
+                )
+                findings.append(
+                    LintFinding(
+                        rule="PL002",
+                        path=path,
+                        line=anchor.lineno,
+                        col=anchor.col_offset + 1,
+                        message=(
+                            f"Test '{node.name}' asserts a DisplayableError without "
+                            "verifying '.display_message'."
+                        ),
+                        hint=(
+                            "Also assert 'error.display_message' or pass "
+                            "'display_message_contains=...' to assert_err(...)."
+                        ),
+                    )
+                )
+    return findings
