@@ -6,6 +6,12 @@ from typing import Protocol
 from flow_res import Result, is_ok
 
 from my_agents.contracts.messages import ChatMessage
+from my_agents.contracts.ports.logger import (
+    NOOP_LOGGER,
+    IAppLogger,
+    LogEntry,
+    LogLevel,
+)
 from my_agents.usecases.send_message import (
     SendMessageError,
     SendMessageRequest,
@@ -32,11 +38,15 @@ class CliRepl:
         read_input: Callable[[str], str] = input,
         write_output: Callable[[str], None] = print,
         write_error: Callable[[str], None] = write_stderr,
+        debug: bool = False,
+        logger: IAppLogger = NOOP_LOGGER,
     ) -> None:
         self._send_message = send_message
         self._read_input = read_input
         self._write_output = write_output
         self._write_error = write_error
+        self._debug = debug
+        self._logger = logger
 
     def run(self) -> None:
         history: tuple[ChatMessage, ...] = ()
@@ -67,6 +77,20 @@ class CliRepl:
                     history = result.value.history
                     self._write_output(f"\nAI > {result.value.reply}")
                 else:
-                    self._write_error(f"\nError: {result.error.display_message}")
+                    error = result.error
+                    self._logger.log(
+                        LogEntry(
+                            level=LogLevel.ERROR,
+                            event="send_message_failed",
+                            error_type=error.type.name,
+                            message=error.message,
+                            detail=error.detail,
+                        )
+                    )
+                    self._write_error(f"\nError: {error.display_message}")
+                    if self._debug:
+                        self._write_error(f"Debug [{error.type.name}]: {error.message}")
+                        if error.detail is not None:
+                            self._write_error(error.detail.rstrip("\n"))
 
         self._write_output("\n会話を終了しました。")

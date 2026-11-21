@@ -41,6 +41,7 @@ from tools.project_lint.rules.pl018_cross_layer_monkeypatch import (
 from tools.project_lint.rules.pl019_no_exception_errors import (
     check_no_exception_result_errors,
 )
+from tools.project_lint.rules.pl020_no_direct_logging import check_no_direct_logging
 
 
 def _src_rule(
@@ -135,6 +136,11 @@ RULES: tuple[LintRule, ...] = (
         "no_exception_result_errors",
         check_no_exception_result_errors,
     ),
+    _src_rule(
+        "PL020",
+        "no_direct_logging",
+        check_no_direct_logging,
+    ),
 )
 
 __all__ = [
@@ -147,6 +153,7 @@ __all__ = [
     "check_no_adapter_reexport_at_layer_root",
     "check_no_cast_in_src",
     "check_no_cross_layer_internal_monkeypatch",
+    "check_no_direct_logging",
     "check_no_docstrings",
     "check_no_exception_result_errors",
     "check_no_global_environ_mutation",

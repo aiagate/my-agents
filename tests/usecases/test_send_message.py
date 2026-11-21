@@ -125,6 +125,7 @@ async def test_execute_rejects_empty_input(user_input: str) -> None:
     assert isinstance(error, DisplayableError)
     assert not isinstance(error, Exception)
     assert error.display_message == "メッセージを入力してください。"
+    assert error.detail is None
     assert runner.runs == []
 
 
@@ -166,6 +167,7 @@ async def test_maps_runner_errors(
     runner_error = AgentRunnerError(
         type=runner_error_type,
         message="runner detail",
+        detail="traceback detail",
     )
     runner = FakeAgentRunner(Err(runner_error))
     handler = SendMessageHandler(runner)
@@ -186,3 +188,4 @@ async def test_maps_runner_errors(
     assert error.message == "runner detail"
     assert error.type is expected_type
     assert error.display_message == expected_display_message
+    assert error.detail == "traceback detail"

@@ -106,31 +106,42 @@ async def test_propagates_instructions() -> None:
 
 @pytest.mark.anyio
 @pytest.mark.parametrize(
-    ("exc", "expected_type", "expected_message"),
+    ("exc", "expected_type", "expected_message", "expect_detail"),
     [
         pytest.param(
             ModelAPIError("test", "API is unavailable"),
             AgentRunnerErrorType.API_ERROR,
-            "API is unavailable",
+            "ModelAPIError: API is unavailable",
+            False,
             id="api-error",
         ),
         pytest.param(
             UnexpectedModelBehavior("unexpected model output"),
             AgentRunnerErrorType.UNEXPECTED_BEHAVIOR,
-            "unexpected model output",
+            "UnexpectedModelBehavior: unexpected model output",
+            False,
             id="unexpected-behavior",
         ),
         pytest.param(
             UsageLimitExceeded("usage limit exceeded"),
             AgentRunnerErrorType.USAGE_LIMIT_EXCEEDED,
-            "usage limit exceeded",
+            "UsageLimitExceeded: usage limit exceeded",
+            False,
             id="usage-limit-exceeded",
         ),
         pytest.param(
             RuntimeError("boom"),
             AgentRunnerErrorType.UNEXPECTED,
-            "boom",
+            "RuntimeError: boom",
+            True,
             id="unexpected-exception",
+        ),
+        pytest.param(
+            TimeoutError(),
+            AgentRunnerErrorType.UNEXPECTED,
+            "TimeoutError",
+            True,
+            id="empty-message-exception",
         ),
     ],
 )
@@ -138,6 +149,7 @@ async def test_maps_model_errors_to_port_errors(
     exc: Exception,
     expected_type: AgentRunnerErrorType,
     expected_message: str,
+    expect_detail: bool,
 ) -> None:
     runner = PydanticAIAgentRunner(_raising_function_model(exc))
 
@@ -150,6 +162,52 @@ async def test_maps_model_errors_to_port_errors(
     )
     assert isinstance(error, AgentRunnerError)
     assert not isinstance(error, Exception)
+    if expect_detail:
+        assert error.detail is not None
+        assert "Traceback" in error.detail
+        assert type(exc).__name__ in error.detail
+    else:
+        assert error.detail is None
+
+
+@pytest.mark.anyio
+async def test_redacts_api_key_in_error_message_and_detail() -> None:
+    secret_key = SecretStr("sk-super-secret-value")
+    runner = PydanticAIAgentRunner(
+        _raising_function_model(
+            RuntimeError("upstream failure using key sk-super-secret-value")
+        ),
+        api_key=secret_key,
+    )
+
+    result = await runner.run("hello", history=[], instructions="")
+
+    error = assert_err(
+        result,
+        expected_type=AgentRunnerErrorType.UNEXPECTED,
+        message_contains="RuntimeError: upstream failure using key ***",
+    )
+    assert "sk-super-secret-value" not in error.message
+    assert error.detail is not None
+    assert "sk-super-secret-value" not in error.detail
+    assert "***" in error.detail
+
+
+@pytest.mark.anyio
+async def test_empty_secret_does_not_corrupt_error_message() -> None:
+    runner = PydanticAIAgentRunner(
+        _raising_function_model(ModelAPIError("test", "plain failure")),
+        api_key=SecretStr(""),
+    )
+
+    result = await runner.run("hello", history=[], instructions="")
+
+    error = assert_err(
+        result,
+        expected_type=AgentRunnerErrorType.API_ERROR,
+        message_contains="ModelAPIError: plain failure",
+    )
+    assert "***" not in error.message
 
 
 @pytest.mark.anyio
