@@ -203,14 +203,23 @@ def test_pl004_enforces_clean_architecture_layer_boundaries(tmp_path: Path) -> N
         ),
     )
     _write(
+        src / "domain" / "bad.py",
+        "from my_agents.contracts.messages import ChatMessage\n",
+    )
+    _write(
         src / "infrastructure" / "ok.py",
         ("import pydantic_ai\nfrom my_agents.contracts.messages import ChatMessage\n"),
     )
 
     findings = check_layer_boundaries(src)
 
-    assert len(findings) == 2
+    assert len(findings) == 3
     assert {f.rule for f in findings} == {"PL004"}
+    assert any(
+        finding.path == src / "domain" / "bad.py"
+        and "must not import from 'contracts'" in finding.message
+        for finding in findings
+    )
 
 
 def test_pl005_flags_weakened_pyright_config(tmp_path: Path) -> None:

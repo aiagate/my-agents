@@ -13,7 +13,9 @@ _FORBIDDEN_INTERNAL_LAYERS: dict[str, frozenset[str]] = {
     "contracts": frozenset(
         {"domain", "usecases", "infrastructure", "presentation", "composition"}
     ),
-    "domain": frozenset({"usecases", "infrastructure", "presentation", "composition"}),
+    "domain": frozenset(
+        {"contracts", "usecases", "infrastructure", "presentation", "composition"}
+    ),
     "usecases": frozenset({"infrastructure", "presentation", "composition"}),
     "infrastructure": frozenset({"usecases", "presentation", "composition"}),
     "presentation": frozenset({"infrastructure", "composition"}),

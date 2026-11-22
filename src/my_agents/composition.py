@@ -6,6 +6,7 @@ from typing import assert_never
 
 from flow_res import Err, Ok, Result, is_err
 
+from my_agents.contracts.ports.association_expander import IAssociationExpander
 from my_agents.contracts.ports.logger import (
     NOOP_LOGGER,
     IAppLogger,
@@ -13,6 +14,7 @@ from my_agents.contracts.ports.logger import (
     LogLevel,
 )
 from my_agents.infrastructure.file_logger import JsonlFileLogger, resolve_log_path
+from my_agents.infrastructure.gemini_embedding_client import GeminiEmbeddingClient
 from my_agents.infrastructure.markdown_core_profile_store import (
     MarkdownCoreProfileStore,
 )
@@ -25,6 +27,9 @@ from my_agents.presentation.cli.args import (
     parse_cli_args,
 )
 from my_agents.presentation.cli.repl import CliRepl, write_stderr
+from my_agents.usecases.expand_embedding_associations import (
+    ExpandEmbeddingAssociationsHandler,
+)
 from my_agents.usecases.get_core_profile import GetCoreProfileHandler
 from my_agents.usecases.send_message import SendMessageHandler
 from my_agents.usecases.update_core_profile import UpdateCoreProfileHandler
@@ -50,9 +55,17 @@ def build_cli(
     store = MarkdownCoreProfileStore.from_memory_dir(settings.memory_dir)
     get_core_profile = GetCoreProfileHandler(store)
     update_core_profile = UpdateCoreProfileHandler(store)
+    association_expander: IAssociationExpander | None = None
+    if settings.gemini_api_key is not None:
+        embedding_client = GeminiEmbeddingClient.from_settings(
+            settings.embedding_model,
+            settings.gemini_api_key,
+        )
+        association_expander = ExpandEmbeddingAssociationsHandler(embedding_client)
     agent_runner = PydanticAIAgentRunner.from_settings(
         settings,
         core_profile_updater=update_core_profile,
+        association_expander=association_expander,
     )
     send_message = SendMessageHandler(agent_runner, get_core_profile)
     return Ok(

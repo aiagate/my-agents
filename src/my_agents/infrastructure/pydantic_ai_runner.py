@@ -28,6 +28,12 @@ from my_agents.contracts.ports.agent_runner import (
     AgentRunnerErrorType,
     IAgentRunner,
 )
+from my_agents.contracts.ports.association_expander import (
+    AssociationExpandError,
+    AssociationExpandErrorType,
+    AssociationExpandRequest,
+    IAssociationExpander,
+)
 from my_agents.contracts.ports.core_profile_updater import (
     CoreMemoryUpdateAction,
     CoreMemoryUpdateCommand,
@@ -36,30 +42,15 @@ from my_agents.contracts.ports.core_profile_updater import (
     ICoreProfileUpdater,
 )
 from my_agents.contracts.secret import SecretStr
+from my_agents.infrastructure.error_formatting import format_exception, redact_secret
 from my_agents.infrastructure.settings import AppSettings
 
-DEFAULT_REQUEST_LIMIT = 4
-DEFAULT_TOOL_CALLS_LIMIT = 3
+DEFAULT_REQUEST_LIMIT = 6
+DEFAULT_TOOL_CALLS_LIMIT = 4
 DEFAULT_USAGE_LIMITS = UsageLimits(
     request_limit=DEFAULT_REQUEST_LIMIT,
     tool_calls_limit=DEFAULT_TOOL_CALLS_LIMIT,
 )
-
-
-def _format_exception(exc: Exception) -> str:
-    text = str(exc).strip()
-    if text:
-        return f"{type(exc).__name__}: {text}"
-    return type(exc).__name__
-
-
-def _redact_secret(text: str, secret: SecretStr | None) -> str:
-    if secret is None:
-        return text
-    raw = secret.get_secret_value()
-    if not raw:
-        return text
-    return text.replace(raw, "***")
 
 
 def _to_model_messages(history: Sequence[ChatMessage]) -> list[ModelMessage]:
@@ -177,6 +168,71 @@ def _build_core_memory_toolset(
     return FunctionToolset(tools=[tool])
 
 
+def _format_association_error(error: AssociationExpandError) -> str:
+    match error.type:
+        case AssociationExpandErrorType.INVALID_INPUT:
+            return (
+                f"Association expansion input was invalid: {error.message} "
+                "Provide a non-empty topic and retry."
+            )
+        case AssociationExpandErrorType.EMBEDDING_ERROR:
+            return (
+                "Association expansion failed while computing embeddings: "
+                f"{error.message} Answer without this tool instead."
+            )
+        case _:
+            assert_never(error.type)
+
+
+def _build_association_toolset(
+    expander: IAssociationExpander,
+) -> FunctionToolset[None]:
+    async def expand_associations(
+        topic: Annotated[
+            str,
+            Field(
+                description=(
+                    "Concrete object, place, problem, or theme to explore, such as "
+                    "a shopping item, an everyday annoyance, or a trip idea."
+                )
+            ),
+        ],
+        context: Annotated[
+            str,
+            Field(
+                description=(
+                    "Optional constraints, preferences, or current situation that "
+                    "should steer the associations. Leave empty when irrelevant."
+                )
+            ),
+        ] = "",
+    ) -> str:
+        result = await expander.expand(
+            AssociationExpandRequest(topic=topic, context=context)
+        )
+        if is_err(result):
+            return _format_association_error(result.error)
+        outcome = result.value
+        ideas = "\n".join(f"- {idea}" for idea in outcome.lateral_ideas)
+        return (
+            f"3-level Magical Banana association tree for {outcome.root}:\n"
+            f"{outcome.tree_summary}\n\n"
+            f"Lateral ideas:\n{ideas}"
+        )
+
+    tool: Tool[None] = Tool(
+        expand_associations,
+        name="expand_associations",
+        description=(
+            "Compute a 3-level cross-category association tree in embedding space "
+            "for a consultation, shopping, lifestyle, planning, or brainstorming "
+            "topic."
+        ),
+        takes_ctx=False,
+    )
+    return FunctionToolset(tools=[tool])
+
+
 class PydanticAIAgentRunner(IAgentRunner):
     def __init__(
         self,
@@ -184,6 +240,7 @@ class PydanticAIAgentRunner(IAgentRunner):
         *,
         api_key: SecretStr | None = None,
         core_profile_updater: ICoreProfileUpdater | None = None,
+        association_expander: IAssociationExpander | None = None,
         usage_limits: UsageLimits = DEFAULT_USAGE_LIMITS,
     ) -> None:
         self._agent: Agent[None, str]
@@ -193,6 +250,7 @@ class PydanticAIAgentRunner(IAgentRunner):
             self._agent = Agent(model_or_agent)
         self._api_key = api_key
         self._core_profile_updater = core_profile_updater
+        self._association_expander = association_expander
         self._usage_limits = usage_limits
 
     @classmethod
@@ -201,6 +259,7 @@ class PydanticAIAgentRunner(IAgentRunner):
         settings: AppSettings,
         *,
         core_profile_updater: ICoreProfileUpdater | None = None,
+        association_expander: IAssociationExpander | None = None,
         usage_limits: UsageLimits = DEFAULT_USAGE_LIMITS,
     ) -> PydanticAIAgentRunner:
         pydantic_ai.BANNER_ENABLED = False
@@ -215,6 +274,7 @@ class PydanticAIAgentRunner(IAgentRunner):
             model,
             api_key=settings.api_key,
             core_profile_updater=core_profile_updater,
+            association_expander=association_expander,
             usage_limits=usage_limits,
         )
 
@@ -227,54 +287,51 @@ class PydanticAIAgentRunner(IAgentRunner):
     ) -> Result[AgentReply, AgentRunnerError]:
         message_history = _to_model_messages(history)
         recorded_updates: list[str] = []
+        toolsets: list[FunctionToolset[None]] = []
+        if self._core_profile_updater is not None:
+            toolsets.append(
+                _build_core_memory_toolset(
+                    self._core_profile_updater,
+                    recorded_updates,
+                )
+            )
+        if self._association_expander is not None:
+            toolsets.append(_build_association_toolset(self._association_expander))
         try:
-            if self._core_profile_updater is None:
-                result = await self._agent.run(
-                    user_input,
-                    message_history=message_history,
-                    instructions=instructions,
-                    usage_limits=self._usage_limits,
-                )
-            else:
-                result = await self._agent.run(
-                    user_input,
-                    message_history=message_history,
-                    instructions=instructions,
-                    toolsets=[
-                        _build_core_memory_toolset(
-                            self._core_profile_updater,
-                            recorded_updates,
-                        )
-                    ],
-                    usage_limits=self._usage_limits,
-                )
+            result = await self._agent.run(
+                user_input,
+                message_history=message_history,
+                instructions=instructions,
+                toolsets=toolsets if toolsets else None,
+                usage_limits=self._usage_limits,
+            )
         except ModelAPIError as exc:
             return Err(
                 AgentRunnerError(
                     type=AgentRunnerErrorType.API_ERROR,
-                    message=_redact_secret(_format_exception(exc), self._api_key),
+                    message=redact_secret(format_exception(exc), self._api_key),
                 )
             )
         except UnexpectedModelBehavior as exc:
             return Err(
                 AgentRunnerError(
                     type=AgentRunnerErrorType.UNEXPECTED_BEHAVIOR,
-                    message=_redact_secret(_format_exception(exc), self._api_key),
+                    message=redact_secret(format_exception(exc), self._api_key),
                 )
             )
         except UsageLimitExceeded as exc:
             return Err(
                 AgentRunnerError(
                     type=AgentRunnerErrorType.USAGE_LIMIT_EXCEEDED,
-                    message=_redact_secret(_format_exception(exc), self._api_key),
+                    message=redact_secret(format_exception(exc), self._api_key),
                 )
             )
         except Exception as exc:
             return Err(
                 AgentRunnerError(
                     type=AgentRunnerErrorType.UNEXPECTED,
-                    message=_redact_secret(_format_exception(exc), self._api_key),
-                    detail=_redact_secret(traceback.format_exc(), self._api_key),
+                    message=redact_secret(format_exception(exc), self._api_key),
+                    detail=redact_secret(traceback.format_exc(), self._api_key),
                 )
             )
         return Ok(

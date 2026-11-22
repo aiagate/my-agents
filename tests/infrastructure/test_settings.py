@@ -124,3 +124,49 @@ def test_injected_env_overrides_env_file(tmp_path: Path) -> None:
     assert is_ok(result)
     assert result.unwrap().model_name == "process-model"
     assert result.unwrap().memory_dir == Path("/process/memory")
+
+
+def test_optional_gemini_settings_default_when_unset() -> None:
+    result = load_app_settings(
+        env={
+            "MAGPIE_MODEL": "test-model",
+            "MAGPIE_BASE_URL": "https://example.com/v1",
+            "MAGPIE_API_KEY": "secret",
+        }
+    )
+
+    assert is_ok(result)
+    assert result.unwrap().gemini_api_key is None
+    assert result.unwrap().embedding_model == "gemini-embedding-001"
+
+
+def test_loads_gemini_key_and_custom_embedding_model() -> None:
+    result = load_app_settings(
+        env={
+            "MAGPIE_MODEL": "test-model",
+            "MAGPIE_BASE_URL": "https://example.com/v1",
+            "MAGPIE_API_KEY": "secret",
+            "GEMINI_API_KEY": "  gemini-secret  ",
+            "GEMINI_EMBEDDING_MODEL": "  custom-embedding  ",
+        }
+    )
+
+    assert is_ok(result)
+    assert result.unwrap().gemini_api_key == SecretStr("gemini-secret")
+    assert result.unwrap().embedding_model == "custom-embedding"
+
+
+def test_whitespace_gemini_settings_fall_back_to_defaults() -> None:
+    result = load_app_settings(
+        env={
+            "MAGPIE_MODEL": "test-model",
+            "MAGPIE_BASE_URL": "https://example.com/v1",
+            "MAGPIE_API_KEY": "secret",
+            "GEMINI_API_KEY": "   ",
+            "GEMINI_EMBEDDING_MODEL": "   ",
+        }
+    )
+
+    assert is_ok(result)
+    assert result.unwrap().gemini_api_key is None
+    assert result.unwrap().embedding_model == "gemini-embedding-001"

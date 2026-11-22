@@ -16,6 +16,7 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from my_agents.composition import build_cli, run_cli
+from my_agents.contracts.ports.association_expander import IAssociationExpander
 from my_agents.contracts.ports.core_profile_updater import ICoreProfileUpdater
 from my_agents.contracts.ports.logger import NOOP_LOGGER
 from my_agents.contracts.secret import SecretStr
@@ -53,15 +54,18 @@ def _patch_runner(
             settings: AppSettings,
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
+            association_expander: IAssociationExpander | None = None,
         ) -> PydanticAIAgentRunner:
             captured["model_name"] = settings.model_name
             captured["base_url"] = settings.base_url
             captured["api_key"] = settings.api_key
             captured["memory_dir"] = settings.memory_dir
             captured["updater"] = core_profile_updater
+            captured["association_expander"] = association_expander
             return PydanticAIAgentRunner(
                 FunctionModel(respond),
                 core_profile_updater=core_profile_updater,
+                association_expander=association_expander,
             )
 
     monkeypatch.setattr("my_agents.composition.PydanticAIAgentRunner", StubRunner)
@@ -99,12 +103,15 @@ def _patch_core_memory_runner(
             settings: AppSettings,
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
+            association_expander: IAssociationExpander | None = None,
         ) -> PydanticAIAgentRunner:
             captured["memory_dir"] = settings.memory_dir
             captured["updater"] = core_profile_updater
+            captured["association_expander"] = association_expander
             return PydanticAIAgentRunner(
                 FunctionModel(respond),
                 core_profile_updater=core_profile_updater,
+                association_expander=association_expander,
             )
 
     monkeypatch.setattr("my_agents.composition.PydanticAIAgentRunner", StubRunner)
@@ -151,6 +158,7 @@ def test_build_cli_wires_runner_into_cli(
     assert captured["api_key"] == SecretStr("secret")
     assert captured["memory_dir"] == tmp_path / "agent-memory"
     assert captured["updater"] is not None
+    assert captured["association_expander"] is None
     assert captured["instructions"] == assemble_instructions(CoreProfile.empty())
     assert captured["prompt"] == "こんにちは"
     assert "\nAI > 配線済み" in outputs
@@ -327,11 +335,13 @@ def test_run_cli_debug_and_explicit_log_file_record_runtime_errors(
             settings: AppSettings,
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
+            association_expander: IAssociationExpander | None = None,
         ) -> PydanticAIAgentRunner:
             return PydanticAIAgentRunner(
                 FunctionModel(failing_respond),
                 api_key=settings.api_key,
                 core_profile_updater=core_profile_updater,
+                association_expander=association_expander,
             )
 
     monkeypatch.setattr(
@@ -454,3 +464,51 @@ def test_run_cli_warns_and_continues_when_default_log_path_unwritable(
     assert len(errors) == 1
     assert errors[0].startswith("Warning: Failed to open log file")
     assert "\nAI > 続行できた" in outputs
+
+
+def test_build_cli_wires_gemini_embedding_association_pipeline(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    sentinel_client = object()
+    sentinel_expander = object()
+
+    class StubGeminiEmbeddingClient:
+        @classmethod
+        def from_settings(
+            cls,
+            model_name: str,
+            api_key: SecretStr,
+        ) -> object:
+            captured["embedding_model"] = model_name
+            captured["gemini_api_key"] = api_key
+            return sentinel_client
+
+    def fake_expander_factory(embedding_client: object) -> object:
+        captured["embedding_client"] = embedding_client
+        return sentinel_expander
+
+    _patch_runner(monkeypatch, captured, "配線済み")
+    monkeypatch.setattr(
+        "my_agents.composition.GeminiEmbeddingClient",
+        StubGeminiEmbeddingClient,
+    )
+    monkeypatch.setattr(
+        "my_agents.composition.ExpandEmbeddingAssociationsHandler",
+        fake_expander_factory,
+    )
+    env = {
+        **_VALID_ENV,
+        "GEMINI_API_KEY": "gemini-secret",
+        "GEMINI_EMBEDDING_MODEL": "custom-embedding",
+        "MEMORY_PATH": str(tmp_path / "memory"),
+    }
+
+    result = build_cli(env=env, env_path=tmp_path / ".env")
+
+    assert is_ok(result)
+    assert captured["embedding_model"] == "custom-embedding"
+    assert captured["gemini_api_key"] == SecretStr("gemini-secret")
+    assert captured["embedding_client"] is sentinel_client
+    assert captured["association_expander"] is sentinel_expander
