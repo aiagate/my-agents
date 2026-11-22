@@ -175,9 +175,9 @@ def _format_association_error(error: AssociationExpandError) -> str:
                 f"Association expansion input was invalid: {error.message} "
                 "Provide a non-empty topic and retry."
             )
-        case AssociationExpandErrorType.EMBEDDING_ERROR:
+        case AssociationExpandErrorType.GENERATION_ERROR:
             return (
-                "Association expansion failed while computing embeddings: "
+                "Association expansion failed while generating associations: "
                 f"{error.message} Answer without this tool instead."
             )
         case _:
@@ -224,7 +224,7 @@ def _build_association_toolset(
         expand_associations,
         name="expand_associations",
         description=(
-            "Compute a 3-level cross-category association tree in embedding space "
+            "Compute a 3-level cross-category Magical Banana association tree "
             "for a consultation, shopping, lifestyle, planning, or brainstorming "
             "topic."
         ),

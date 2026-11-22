@@ -466,49 +466,87 @@ def test_run_cli_warns_and_continues_when_default_log_path_unwritable(
     assert "\nAI > 続行できた" in outputs
 
 
-def test_build_cli_wires_gemini_embedding_association_pipeline(
+def test_build_cli_wires_mlx_lora_association_pipeline(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     captured: dict[str, object] = {}
-    sentinel_client = object()
+    sentinel_generator = object()
     sentinel_expander = object()
+    adapter_dir = tmp_path / "adapters"
 
-    class StubGeminiEmbeddingClient:
+    class StubMlxLoraGenerator:
+        @staticmethod
+        def is_available(adapter_path: Path) -> bool:
+            captured["checked_adapter_path"] = adapter_path
+            return True
+
         @classmethod
         def from_settings(
             cls,
             model_name: str,
-            api_key: SecretStr,
+            adapter_path: Path,
         ) -> object:
-            captured["embedding_model"] = model_name
-            captured["gemini_api_key"] = api_key
-            return sentinel_client
+            captured["mlx_lora_model"] = model_name
+            captured["mlx_lora_adapter_path"] = adapter_path
+            return sentinel_generator
 
-    def fake_expander_factory(embedding_client: object) -> object:
-        captured["embedding_client"] = embedding_client
+    def fake_expander_factory(generator: object) -> object:
+        captured["generator"] = generator
         return sentinel_expander
 
     _patch_runner(monkeypatch, captured, "配線済み")
     monkeypatch.setattr(
-        "my_agents.composition.GeminiEmbeddingClient",
-        StubGeminiEmbeddingClient,
+        "my_agents.composition.MlxLoraAssociationGenerator",
+        StubMlxLoraGenerator,
     )
     monkeypatch.setattr(
-        "my_agents.composition.ExpandEmbeddingAssociationsHandler",
+        "my_agents.composition.ExpandAssociationsHandler",
         fake_expander_factory,
     )
     env = {
         **_VALID_ENV,
-        "GEMINI_API_KEY": "gemini-secret",
-        "GEMINI_EMBEDDING_MODEL": "custom-embedding",
+        "MLX_LORA_MODEL": "custom-mlx-model",
+        "MLX_LORA_ADAPTER_PATH": str(adapter_dir),
         "MEMORY_PATH": str(tmp_path / "memory"),
     }
 
     result = build_cli(env=env, env_path=tmp_path / ".env")
 
     assert is_ok(result)
-    assert captured["embedding_model"] == "custom-embedding"
-    assert captured["gemini_api_key"] == SecretStr("gemini-secret")
-    assert captured["embedding_client"] is sentinel_client
+    assert captured["checked_adapter_path"] == adapter_dir
+    assert captured["mlx_lora_model"] == "custom-mlx-model"
+    assert captured["mlx_lora_adapter_path"] == adapter_dir
+    assert captured["generator"] is sentinel_generator
     assert captured["association_expander"] is sentinel_expander
+
+
+def test_build_cli_skips_mlx_lora_association_when_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+    adapter_dir = tmp_path / "missing-adapters"
+
+    class UnavailableMlxLoraGenerator:
+        @staticmethod
+        def is_available(adapter_path: Path) -> bool:
+            captured["checked_adapter_path"] = adapter_path
+            return False
+
+    _patch_runner(monkeypatch, captured, "フォールバック")
+    monkeypatch.setattr(
+        "my_agents.composition.MlxLoraAssociationGenerator",
+        UnavailableMlxLoraGenerator,
+    )
+    env = {
+        **_VALID_ENV,
+        "MLX_LORA_ADAPTER_PATH": str(adapter_dir),
+        "MEMORY_PATH": str(tmp_path / "memory"),
+    }
+
+    result = build_cli(env=env, env_path=tmp_path / ".env")
+
+    assert is_ok(result)
+    assert captured["checked_adapter_path"] == adapter_dir
+    assert captured["association_expander"] is None

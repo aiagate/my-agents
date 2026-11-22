@@ -829,7 +829,7 @@ async def test_accepts_agent_instance() -> None:
 
 
 _ASSOCIATION_TOOL_DESCRIPTION = (
-    "Compute a 3-level cross-category association tree in embedding space "
+    "Compute a 3-level cross-category Magical Banana association tree "
     "for a consultation, shopping, lifestyle, planning, or brainstorming "
     "topic."
 )
@@ -907,12 +907,12 @@ async def test_association_tool_returns_tree_and_lateral_ideas_to_model() -> Non
         ),
         pytest.param(
             AssociationExpandError(
-                type=AssociationExpandErrorType.EMBEDDING_ERROR,
+                type=AssociationExpandErrorType.GENERATION_ERROR,
                 message="upstream timeout",
             ),
-            "Association expansion failed while computing embeddings: "
+            "Association expansion failed while generating associations: "
             "upstream timeout Answer without this tool instead.",
-            id="embedding-error",
+            id="generation-error",
         ),
     ],
 )

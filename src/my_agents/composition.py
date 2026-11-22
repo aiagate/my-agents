@@ -14,9 +14,11 @@ from my_agents.contracts.ports.logger import (
     LogLevel,
 )
 from my_agents.infrastructure.file_logger import JsonlFileLogger, resolve_log_path
-from my_agents.infrastructure.gemini_embedding_client import GeminiEmbeddingClient
 from my_agents.infrastructure.markdown_core_profile_store import (
     MarkdownCoreProfileStore,
+)
+from my_agents.infrastructure.mlx_lora_association_generator import (
+    MlxLoraAssociationGenerator,
 )
 from my_agents.infrastructure.pydantic_ai_runner import PydanticAIAgentRunner
 from my_agents.infrastructure.settings import SettingsError, load_app_settings
@@ -27,9 +29,7 @@ from my_agents.presentation.cli.args import (
     parse_cli_args,
 )
 from my_agents.presentation.cli.repl import CliRepl, write_stderr
-from my_agents.usecases.expand_embedding_associations import (
-    ExpandEmbeddingAssociationsHandler,
-)
+from my_agents.usecases.expand_associations import ExpandAssociationsHandler
 from my_agents.usecases.get_core_profile import GetCoreProfileHandler
 from my_agents.usecases.send_message import SendMessageHandler
 from my_agents.usecases.update_core_profile import UpdateCoreProfileHandler
@@ -56,12 +56,15 @@ def build_cli(
     get_core_profile = GetCoreProfileHandler(store)
     update_core_profile = UpdateCoreProfileHandler(store)
     association_expander: IAssociationExpander | None = None
-    if settings.gemini_api_key is not None:
-        embedding_client = GeminiEmbeddingClient.from_settings(
-            settings.embedding_model,
-            settings.gemini_api_key,
+    if (
+        settings.mlx_lora_adapter_path is not None
+        and MlxLoraAssociationGenerator.is_available(settings.mlx_lora_adapter_path)
+    ):
+        generator = MlxLoraAssociationGenerator.from_settings(
+            settings.mlx_lora_model,
+            settings.mlx_lora_adapter_path,
         )
-        association_expander = ExpandEmbeddingAssociationsHandler(embedding_client)
+        association_expander = ExpandAssociationsHandler(generator)
     agent_runner = PydanticAIAgentRunner.from_settings(
         settings,
         core_profile_updater=update_core_profile,

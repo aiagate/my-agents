@@ -126,7 +126,7 @@ def test_injected_env_overrides_env_file(tmp_path: Path) -> None:
     assert result.unwrap().memory_dir == Path("/process/memory")
 
 
-def test_optional_gemini_settings_default_when_unset() -> None:
+def test_optional_mlx_lora_settings_default_when_unset() -> None:
     result = load_app_settings(
         env={
             "MAGPIE_MODEL": "test-model",
@@ -136,37 +136,37 @@ def test_optional_gemini_settings_default_when_unset() -> None:
     )
 
     assert is_ok(result)
-    assert result.unwrap().gemini_api_key is None
-    assert result.unwrap().embedding_model == "gemini-embedding-001"
+    assert result.unwrap().mlx_lora_model == "mlx-community/Qwen2.5-3B-Instruct-4bit"
+    assert result.unwrap().mlx_lora_adapter_path is None
 
 
-def test_loads_gemini_key_and_custom_embedding_model() -> None:
+def test_loads_custom_mlx_lora_model_and_expands_adapter_path() -> None:
     result = load_app_settings(
         env={
             "MAGPIE_MODEL": "test-model",
             "MAGPIE_BASE_URL": "https://example.com/v1",
             "MAGPIE_API_KEY": "secret",
-            "GEMINI_API_KEY": "  gemini-secret  ",
-            "GEMINI_EMBEDDING_MODEL": "  custom-embedding  ",
+            "MLX_LORA_MODEL": "  /models/custom-3b  ",
+            "MLX_LORA_ADAPTER_PATH": "  ~/my-adapters  ",
         }
     )
 
     assert is_ok(result)
-    assert result.unwrap().gemini_api_key == SecretStr("gemini-secret")
-    assert result.unwrap().embedding_model == "custom-embedding"
+    assert result.unwrap().mlx_lora_model == "/models/custom-3b"
+    assert result.unwrap().mlx_lora_adapter_path == Path("~/my-adapters").expanduser()
 
 
-def test_whitespace_gemini_settings_fall_back_to_defaults() -> None:
+def test_whitespace_mlx_lora_settings_fall_back_to_defaults() -> None:
     result = load_app_settings(
         env={
             "MAGPIE_MODEL": "test-model",
             "MAGPIE_BASE_URL": "https://example.com/v1",
             "MAGPIE_API_KEY": "secret",
-            "GEMINI_API_KEY": "   ",
-            "GEMINI_EMBEDDING_MODEL": "   ",
+            "MLX_LORA_MODEL": "   ",
+            "MLX_LORA_ADAPTER_PATH": "   ",
         }
     )
 
     assert is_ok(result)
-    assert result.unwrap().gemini_api_key is None
-    assert result.unwrap().embedding_model == "gemini-embedding-001"
+    assert result.unwrap().mlx_lora_model == "mlx-community/Qwen2.5-3B-Instruct-4bit"
+    assert result.unwrap().mlx_lora_adapter_path is None

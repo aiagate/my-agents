@@ -10,6 +10,11 @@ from my_agents.contracts.ports.association_expander import (
     AssociationExpandRequest,
     IAssociationExpander,
 )
+from my_agents.contracts.ports.association_generator import (
+    AssociationGeneratorError,
+    AssociationGeneratorErrorType,
+    IAssociationGenerator,
+)
 from my_agents.contracts.ports.core_profile_store import (
     CoreProfileStoreError,
     CoreProfileStoreErrorType,
@@ -22,11 +27,6 @@ from my_agents.contracts.ports.core_profile_updater import (
     CoreMemoryUpdateErrorType,
     CoreMemoryUpdateOutcome,
     ICoreProfileUpdater,
-)
-from my_agents.contracts.ports.embedding_client import (
-    EmbeddingClientError,
-    EmbeddingClientErrorType,
-    IEmbeddingClient,
 )
 from my_agents.contracts.ports.logger import (
     NOOP_LOGGER,
@@ -44,6 +44,8 @@ __all__ = [
     "AssociationExpandErrorType",
     "AssociationExpandOutcome",
     "AssociationExpandRequest",
+    "AssociationGeneratorError",
+    "AssociationGeneratorErrorType",
     "CoreMemoryUpdateAction",
     "CoreMemoryUpdateCommand",
     "CoreMemoryUpdateError",
@@ -51,11 +53,9 @@ __all__ = [
     "CoreMemoryUpdateOutcome",
     "CoreProfileStoreError",
     "CoreProfileStoreErrorType",
-    "EmbeddingClientError",
-    "EmbeddingClientErrorType",
     "IAgentRunner",
     "IAssociationExpander",
-    "IEmbeddingClient",
+    "IAssociationGenerator",
     "IAppLogger",
     "ICoreProfileStore",
     "ICoreProfileUpdater",
