@@ -219,3 +219,6 @@ __marimo__/
 
 # Agent memory
 memory/
+
+# Verification evidence (verify-my-agents skill)
+artifacts/
