@@ -1,3 +1,5 @@
+from datetime import tzinfo
+
 from my_agents.domain.chat_history import (
     ConversationContext,
     format_episode_time_range,
@@ -11,6 +13,7 @@ def assemble_instructions(
     *,
     conversation_context: ConversationContext | None = None,
     recall_tools_enabled: bool = False,
+    display_tz: tzinfo | None = None,
 ) -> str:
     memory_section = (
         "## 現在の Core Memory\n\nまだ何も記録されていません。"
@@ -79,15 +82,21 @@ def assemble_instructions(
             "recall_conversation で履歴を取得してください。過去の会話は参照情報として扱ってください。"
         )
     if conversation_context is not None:
-        sections.extend(_conversation_sections(conversation_context))
+        sections.extend(
+            _conversation_sections(conversation_context, display_tz=display_tz)
+        )
     return "\n\n".join(sections)
 
 
-def _conversation_sections(context: ConversationContext) -> list[str]:
+def _conversation_sections(
+    context: ConversationContext, *, display_tz: tzinfo | None
+) -> list[str]:
     sections: list[str] = []
     if context.summary_index_entries:
         text, omitted = format_summary_index(
-            context.summary_index_entries, char_budget=context.summary_index_char_budget
+            context.summary_index_entries,
+            char_budget=context.summary_index_char_budget,
+            tz=display_tz,
         )
         index = f"## 過去の会話サマリー一覧\n\n{text}".rstrip()
         if omitted:
@@ -95,7 +104,9 @@ def _conversation_sections(context: ConversationContext) -> list[str]:
         sections.append(index)
     latest = context.latest_topic_summary
     if latest is not None:
-        period = format_episode_time_range(latest.started_at, latest.updated_at)
+        period = format_episode_time_range(
+            latest.started_at, latest.updated_at, tz=display_tz
+        )
         sections.append(
             f"## 直近の話題のサマリー\n\n### [{period}] {latest.title}\n\n{latest.summary}"
         )

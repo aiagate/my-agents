@@ -353,10 +353,10 @@ async def test_empty_secret_does_not_corrupt_error_message() -> None:
 
 
 def test_default_usage_limits() -> None:
-    assert DEFAULT_REQUEST_LIMIT == 6
-    assert DEFAULT_TOOL_CALLS_LIMIT == 4
-    assert DEFAULT_USAGE_LIMITS.request_limit == 6
-    assert DEFAULT_USAGE_LIMITS.tool_calls_limit == 4
+    assert DEFAULT_REQUEST_LIMIT == 8
+    assert DEFAULT_TOOL_CALLS_LIMIT == 6
+    assert DEFAULT_USAGE_LIMITS.request_limit == 8
+    assert DEFAULT_USAGE_LIMITS.tool_calls_limit == 6
 
 
 @pytest.mark.anyio

@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS episodes (
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_episode ON episodes ((1)) WHERE closed_at IS NULL;
 CREATE INDEX IF NOT EXISTS episodes_recency ON episodes (updated_at DESC);
 CREATE TABLE IF NOT EXISTS dialogue_turns (
-    episode_id TEXT NOT NULL REFERENCES episodes(id),
+    episode_id TEXT NOT NULL REFERENCES episodes(id) ON DELETE CASCADE,
     turn_index INTEGER NOT NULL,
     role TEXT NOT NULL,
     content TEXT NOT NULL,
@@ -275,34 +275,6 @@ class SqliteChatRepository(IChatStore, IChatQuery):
 
         return self._write(record)
 
-    def create_episode(
-        self, episode_id: str, *, title: str, started_at: datetime
-    ) -> Result[EpisodeRecord, ChatStorageError]:
-        def create(
-            connection: sqlite3.Connection,
-        ) -> Result[EpisodeRecord, ChatStorageError]:
-            stamp = _timestamp(started_at)
-            connection.execute(
-                "INSERT INTO episodes (id, title, started_at, updated_at) VALUES (?, ?, ?, ?)",
-                (episode_id, title, stamp, stamp),
-            )
-            return Ok(
-                EpisodeRecord(
-                    episode_id,
-                    title,
-                    "",
-                    "",
-                    started_at.astimezone(UTC),
-                    started_at.astimezone(UTC),
-                    None,
-                    None,
-                    0,
-                    0,
-                )
-            )
-
-        return self._write(create)
-
     def _update_episode(
         self,
         episode_id: str,
@@ -331,36 +303,6 @@ class SqliteChatRepository(IChatStore, IChatQuery):
             return Ok(updated)
 
         return self._write(update)
-
-    def append_turns(
-        self, episode_id: str, turns: Sequence[NewDialogueTurn], *, updated_at: datetime
-    ) -> Result[EpisodeRecord, ChatStorageError]:
-        def append(connection: sqlite3.Connection, episode: EpisodeRecord) -> None:
-            if episode.closed_at is not None:
-                raise sqlite3.IntegrityError(f"Episode is closed: {episode_id}")
-            connection.executemany(
-                "INSERT INTO dialogue_turns (episode_id, turn_index, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-                (
-                    (
-                        episode_id,
-                        index,
-                        turn.role,
-                        turn.content,
-                        _timestamp(turn.created_at),
-                    )
-                    for index, turn in enumerate(turns, episode.turn_count + 1)
-                ),
-            )
-            connection.execute(
-                "UPDATE episodes SET turn_count = ?, updated_at = ? WHERE id = ?",
-                (
-                    episode.turn_count + len(turns),
-                    _timestamp(max(episode.updated_at, updated_at)),
-                    episode_id,
-                ),
-            )
-
-        return self._update_episode(episode_id, append)
 
     def update_episode_summary(
         self,

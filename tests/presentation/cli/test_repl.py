@@ -1,5 +1,5 @@
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -940,6 +940,7 @@ def test_history_marks_open_episode_after_clock_moves_backward(tmp_path: Path) -
         read_input=read_input,
         write_output=outputs.append,
         write_error=errors.append,
+        display_tz=UTC,
     ).run()
     assert errors == []
     assert runner.runs[-1][1] == (
@@ -951,6 +952,26 @@ def test_history_marks_open_episode_after_clock_moves_backward(tmp_path: Path) -
     assert (opened.started_at, opened.turn_count) == (eleven, 4)
     assert repo.get_latest_episode().unwrap() == opened
     headings = [output for output in outputs if output.startswith(("1. ", "2. "))]
-    assert len(headings) == 2
-    assert headings[0].endswith("new title (2 件)")
-    assert headings[1].endswith("new chat (4 件) (進行中)")
+    assert headings == [
+        "1. [11/22 12:00] new title (2 件)",
+        "2. [11/22 11:00-11:01] new chat (4 件) (進行中)",
+    ]
+
+
+def test_history_list_and_detail_use_display_timezone(tmp_path: Path) -> None:
+    now = datetime(2026, 11, 22, 13, 48, tzinfo=UTC)
+    repo = SqliteChatRepository(tmp_path / "chats.db")
+    repo.record_turns(None, (), title="local time", updated_at=now).unwrap()
+    profile = _empty_get_core_profile()
+    outputs: list[str] = []
+    CliRepl(
+        SendMessageHandler(FakeAgentRunner("reply"), profile),
+        profile,
+        get_chat_history=GetChatHistoryHandler(repo),
+        read_input=_read_inputs(["/history", "/history 1", "quit"]),
+        write_output=outputs.append,
+        display_tz=timezone(timedelta(hours=9)),
+    ).run()
+    heading = "1. [11/22 22:48] local time (0 件) (進行中)"
+    assert heading in outputs
+    assert f"\n{heading}" in outputs

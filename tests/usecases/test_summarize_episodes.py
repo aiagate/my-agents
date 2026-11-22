@@ -22,16 +22,16 @@ async def test_summarization_continues_after_missing_and_corrupt_episodes(
 ) -> None:
     path = tmp_path / "chats.db"
     repo = SqliteChatRepository(path)
-    repo.create_episode("corrupt", title="old", started_at=NOW).unwrap()
-    repo.close_episode("corrupt", closed_at=NOW, reason="rollover").unwrap()
-    add_turn(repo)
+    corrupt = repo.record_turns(None, (), title="old", updated_at=NOW).unwrap()
+    repo.close_episode(corrupt.id, closed_at=NOW, reason="rollover").unwrap()
+    current = add_turn(repo)
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
-            "UPDATE episodes SET started_at = 'bad' WHERE id = 'corrupt'"
+            "UPDATE episodes SET started_at = 'bad' WHERE id = ?", (corrupt.id,)
         )
     summarizer = RecordingSummarizer()
     handler = SummarizeEpisodesHandler(repo, repo, summarizer)
-    response = await handler.execute(("missing", "corrupt", "id"))
+    response = await handler.execute(("missing", corrupt.id, current.id))
     (warning,) = response.warnings
     assert (warning.event, warning.error_type) == (
         "summary_episode_read_failed",
@@ -41,7 +41,7 @@ async def test_summarization_continues_after_missing_and_corrupt_episodes(
     assert summarizer.requests == [
         EpisodeSummaryRequest("title", "", (ChatMessage("user", "question"),))
     ]
-    episode = repo.get_episode("id").unwrap()
+    episode = repo.get_episode(current.id).unwrap()
     assert episode is not None
     assert (episode.summary, episode.summarized_turn_count) == ("summary", 1)
 
@@ -51,21 +51,24 @@ async def test_blank_summary_preserves_previous_summary_and_checkpoint(
     tmp_path: Path,
 ) -> None:
     repo = SqliteChatRepository(tmp_path / "chats.db")
-    add_turn(repo)
+    current = add_turn(repo)
     previous = repo.update_episode_summary(
-        "id",
+        current.id,
         title="previous title",
         overview="previous overview",
         summary="previous summary",
         summarized_turn_count=1,
     ).unwrap()
-    unsummarized = repo.append_turns(
-        "id",
+    unsummarized = repo.record_turns(
+        current.id,
         (NewDialogueTurn("assistant", "reply", NOW),),
+        title=current.title,
         updated_at=NOW,
     ).unwrap()
     summarizer = RecordingSummarizer(Ok(EpisodeSummaryOutcome("new", "new", " \n\t")))
-    response = await SummarizeEpisodesHandler(repo, repo, summarizer).execute(("id",))
+    response = await SummarizeEpisodesHandler(repo, repo, summarizer).execute(
+        (current.id,)
+    )
     (warning,) = response.warnings
     assert (warning.event, warning.error_type, warning.message) == (
         "episode_summary_empty",
@@ -77,4 +80,4 @@ async def test_blank_summary_preserves_previous_summary_and_checkpoint(
             previous.title, previous.summary, (ChatMessage("assistant", "reply"),)
         )
     ]
-    assert repo.get_episode("id").unwrap() == unsummarized
+    assert repo.get_episode(current.id).unwrap() == unsummarized

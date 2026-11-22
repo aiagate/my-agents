@@ -59,11 +59,6 @@ class IChatStore(ABC):
     def location(self) -> str: ...
 
     @abstractmethod
-    def create_episode(
-        self, episode_id: str, *, title: str, started_at: datetime
-    ) -> Result[EpisodeRecord, ChatStorageError]: ...
-
-    @abstractmethod
     def record_turns(
         self,
         episode_id: str | None,
@@ -72,11 +67,6 @@ class IChatStore(ABC):
         title: str,
         updated_at: datetime,
         close_episode_id: str | None = None,
-    ) -> Result[EpisodeRecord, ChatStorageError]: ...
-
-    @abstractmethod
-    def append_turns(
-        self, episode_id: str, turns: Sequence[NewDialogueTurn], *, updated_at: datetime
     ) -> Result[EpisodeRecord, ChatStorageError]: ...
 
     @abstractmethod

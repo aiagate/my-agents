@@ -24,13 +24,13 @@ def test_recall_and_search_persisted_conversation(tmp_path: Path) -> None:
         expected_type=ChatRecallErrorType.NOT_FOUND,
         message_contains="Episode not found: missing",
     )
-    first = repo.create_episode("id", title="title", started_at=_NOW).unwrap()
-    repo.append_turns(
-        first.id,
+    first = repo.record_turns(
+        None,
         (
             NewDialogueTurn("user", "searchable question", _NOW),
             NewDialogueTurn("assistant", "reply", _NOW),
         ),
+        title="title",
         updated_at=_NOW,
     ).unwrap()
     repo.update_episode_summary(
@@ -40,7 +40,7 @@ def test_recall_and_search_persisted_conversation(tmp_path: Path) -> None:
         summary="summary",
         summarized_turn_count=2,
     ).unwrap()
-    result = handler.recall_episode(" id ", limit=1).unwrap()
+    result = handler.recall_episode(f" {first.id} ", limit=1).unwrap()
     assert (
         result.episode_id,
         result.title,
@@ -48,13 +48,13 @@ def test_recall_and_search_persisted_conversation(tmp_path: Path) -> None:
         result.summary,
         result.started_at,
         result.updated_at,
-    ) == ("id", "title", "overview", "summary", _NOW, _NOW)
+    ) == (first.id, "title", "overview", "summary", _NOW, _NOW)
     assert result.turns == (RecalledTurn(2, "assistant", "reply", _NOW),)
     assert result.total_turn_count == 2
     assert result.truncated
     assert not handler.recall_episode(first.id).unwrap().truncated
     assert handler.search_episodes(" searchable ").unwrap() == (
-        ChatSearchHit("id", "title", "overview", _NOW, _NOW, 2),
+        ChatSearchHit(first.id, "title", "overview", _NOW, _NOW, 2),
     )
 
 

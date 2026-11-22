@@ -20,18 +20,18 @@ def test_list_and_detail_expose_full_read_only_history(tmp_path: Path) -> None:
     repo = SqliteChatRepository(path)
     handler = GetChatHistoryHandler(repo)
     assert handler.list_episodes().unwrap().episodes == ()
-    first = repo.create_episode("id1", title="first", started_at=_NOW).unwrap()
-    repo.append_turns(
-        first.id,
+    first = repo.record_turns(
+        None,
         (
             NewDialogueTurn("user", "first question", _NOW),
             NewDialogueTurn("assistant", "first answer", _NOW),
         ),
+        title="first",
         updated_at=_NOW,
     ).unwrap()
     repo.close_episode(first.id, closed_at=_NOW, reason="clear").unwrap()
-    second = repo.create_episode(
-        "id2", title="second", started_at=_NOW + timedelta(minutes=1)
+    second = repo.record_turns(
+        None, (), title="second", updated_at=_NOW + timedelta(minutes=1)
     ).unwrap()
     listing = handler.list_episodes().unwrap()
     assert listing.location == str(path)
@@ -62,7 +62,7 @@ def test_history_and_recall_handle_missing_storage_tables(tmp_path: Path) -> Non
 
     path = tmp_path / "chats.db"
     repo = SqliteChatRepository(path)
-    repo.create_episode("id", title="title", started_at=_NOW).unwrap()
+    episode = repo.record_turns(None, (), title="title", updated_at=_NOW).unwrap()
     history = GetChatHistoryHandler(repo)
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("DROP TABLE dialogue_turns")
@@ -73,7 +73,7 @@ def test_history_and_recall_handle_missing_storage_tables(tmp_path: Path) -> Non
         message_contains="no such table: dialogue_turns",
     )
     assert_err(
-        RecallChatHandler(repo).recall_episode("id"),
+        RecallChatHandler(repo).recall_episode(episode.id),
         expected_type=ChatRecallErrorType.STORAGE_ERROR,
         message_contains="no such table: dialogue_turns",
     )

@@ -36,9 +36,7 @@ def test_lazy_creation_and_sqlite_roundtrip(tmp_path: Path) -> None:
     )
     assert repo.get_latest_episode().unwrap() is None
     assert repo.get_episode("missing").unwrap() is None
-    first = repo.create_episode(
-        "z-first", title="find in title", started_at=_NOW
-    ).unwrap()
+    first = repo.record_turns(None, (), title="find in title", updated_at=_NOW).unwrap()
     assert first.turn_count == first.summarized_turn_count == 0
     with closing(sqlite3.connect(path)) as connection:
         assert connection.execute("PRAGMA journal_mode").fetchone() == ("wal",)
@@ -49,10 +47,14 @@ def test_lazy_creation_and_sqlite_roundtrip(tmp_path: Path) -> None:
         NewDialogueTurn("user", "find in content %_\\", _NOW),
         NewDialogueTurn("assistant", "reply", _NOW),
     )
-    updated = repo.append_turns(first.id, turns, updated_at=_NOW).unwrap()
+    updated = repo.record_turns(
+        first.id, turns, title=first.title, updated_at=_NOW
+    ).unwrap()
     assert updated.turn_count == 2
     assert (
-        repo.append_turns(first.id, (), updated_at=_NOW - timedelta(days=1)).unwrap()
+        repo.record_turns(
+            first.id, (), title=first.title, updated_at=_NOW - timedelta(days=1)
+        ).unwrap()
         == updated
     )
     assert [
@@ -103,23 +105,19 @@ def test_lazy_creation_and_sqlite_roundtrip(tmp_path: Path) -> None:
     ).unwrap()
     assert (cleared.closed_at, cleared.close_reason) == (_NOW, "clear")
     assert_err(
-        repo.append_turns(first.id, turns, updated_at=_NOW),
+        repo.record_turns(first.id, turns, title=first.title, updated_at=_NOW),
         expected_type=ChatStorageErrorType.WRITE_FAILED,
         message_contains="Episode is closed",
     )
-    second = repo.create_episode(
-        "a-second", title="find second", started_at=_NOW
-    ).unwrap()
+    second = repo.record_turns(None, (), title="find second", updated_at=_NOW).unwrap()
     assert repo.get_latest_episode().unwrap() == second
     assert repo.list_episodes(limit=1).unwrap() == (second,)
     assert repo.list_episodes().unwrap() == (second, cleared)
     assert repo.search_episodes("find").unwrap() == (second, cleared)
     assert repo.search_episodes("find", limit=1).unwrap() == (second,)
     assert repo.get_episode(first.id).unwrap() == cleared
-    assert_err(
-        repo.create_episode("third", title="collision", started_at=_NOW),
-        expected_type=ChatStorageErrorType.WRITE_FAILED,
-        message_contains="one_open_episode",
+    assert (
+        repo.record_turns(None, (), title="unused", updated_at=_NOW).unwrap() == second
     )
 
 
@@ -155,7 +153,7 @@ def test_reports_corrupt_episode_reads_and_writes(
 ) -> None:
     path = tmp_path / "chats.db"
     repo = SqliteChatRepository(path)
-    created = repo.create_episode("episode", title="title", started_at=_NOW).unwrap()
+    created = repo.record_turns(None, (), title="title", updated_at=_NOW).unwrap()
     _execute(path, sql)
     assert_err(
         repo.get_episode(created.id),
@@ -181,9 +179,11 @@ def test_reports_corrupt_episode_reads_and_writes(
 def test_reports_corrupt_dialogue(tmp_path: Path, sql: str, message: str) -> None:
     path = tmp_path / "chats.db"
     repo = SqliteChatRepository(path)
-    episode = repo.create_episode("episode", title="title", started_at=_NOW).unwrap()
-    repo.append_turns(
-        episode.id, (NewDialogueTurn("user", "question", _NOW),), updated_at=_NOW
+    episode = repo.record_turns(
+        None,
+        (NewDialogueTurn("user", "question", _NOW),),
+        title="title",
+        updated_at=_NOW,
     ).unwrap()
     _execute(path, sql)
     assert_err(
@@ -202,18 +202,18 @@ def test_reports_io_errors(tmp_path: Path) -> None:
         message_contains="file is not a database",
     )
     assert_err(
-        SqliteChatRepository(path / "child").create_episode(
-            "episode", title="title", started_at=_NOW
+        SqliteChatRepository(path / "child").record_turns(
+            None, (), title="title", updated_at=_NOW
         ),
         expected_type=ChatStorageErrorType.WRITE_FAILED,
         message_contains="chats.db",
     )
 
 
-def test_failed_append_rolls_back_the_whole_turn_pair(tmp_path: Path) -> None:
+def test_failed_record_rolls_back_the_whole_turn_pair(tmp_path: Path) -> None:
     path = tmp_path / "chats.db"
     repo = SqliteChatRepository(path)
-    episode = repo.create_episode("episode", title="title", started_at=_NOW).unwrap()
+    episode = repo.record_turns(None, (), title="title", updated_at=_NOW).unwrap()
     _execute(
         path,
         "CREATE TRIGGER reject_assistant BEFORE INSERT ON dialogue_turns WHEN NEW.role = 'assistant' BEGIN SELECT RAISE(ABORT, 'rejected'); END;",
@@ -223,7 +223,7 @@ def test_failed_append_rolls_back_the_whole_turn_pair(tmp_path: Path) -> None:
         NewDialogueTurn("assistant", "reply", _NOW),
     )
     assert_err(
-        repo.append_turns(episode.id, turns, updated_at=_NOW),
+        repo.record_turns(episode.id, turns, title=episode.title, updated_at=_NOW),
         expected_type=ChatStorageErrorType.WRITE_FAILED,
         message_contains="rejected",
     )
@@ -234,7 +234,7 @@ def test_failed_append_rolls_back_the_whole_turn_pair(tmp_path: Path) -> None:
 def test_update_that_loses_episode_rolls_back(tmp_path: Path) -> None:
     path = tmp_path / "chats.db"
     repo = SqliteChatRepository(path)
-    episode = repo.create_episode("episode", title="title", started_at=_NOW).unwrap()
+    episode = repo.record_turns(None, (), title="title", updated_at=_NOW).unwrap()
     _execute(
         path,
         "CREATE TRIGGER delete_episode AFTER UPDATE ON episodes BEGIN DELETE FROM episodes; END;",
@@ -242,7 +242,7 @@ def test_update_that_loses_episode_rolls_back(tmp_path: Path) -> None:
     assert_err(
         repo.close_episode(episode.id, closed_at=_NOW, reason="clear"),
         expected_type=ChatStorageErrorType.CORRUPT_DATA,
-        message_contains="Episode disappeared during update: episode",
+        message_contains=f"Episode disappeared during update: {episode.id}",
     )
     assert repo.get_episode(episode.id).unwrap() == episode
 
@@ -319,21 +319,20 @@ def test_record_rejects_closed_episode_and_rolls_back_when_update_loses_episode(
 ) -> None:
     path = tmp_path / "chats.db"
     repo = SqliteChatRepository(path)
-    repo.create_episode("closed", title="old", started_at=_NOW).unwrap()
-    repo.close_episode("closed", closed_at=_NOW, reason="clear").unwrap()
+    closed = repo.record_turns(None, (), title="old", updated_at=_NOW).unwrap()
+    repo.close_episode(closed.id, closed_at=_NOW, reason="clear").unwrap()
     turns = (NewDialogueTurn("user", "question", _NOW),)
     assert_err(
-        repo.record_turns("closed", turns, title="question", updated_at=_NOW),
+        repo.record_turns(closed.id, turns, title="question", updated_at=_NOW),
         expected_type=ChatStorageErrorType.WRITE_FAILED,
-        message_contains="Episode is closed: closed",
+        message_contains=f"Episode is closed: {closed.id}",
     )
-    opened = repo.create_episode("open", title="open", started_at=_NOW).unwrap()
+    opened = repo.record_turns(None, (), title="open", updated_at=_NOW).unwrap()
     _execute(
         path,
         """
         CREATE TRIGGER lose_episode AFTER UPDATE OF turn_count ON episodes
         BEGIN
-            DELETE FROM dialogue_turns WHERE episode_id = NEW.id;
             DELETE FROM episodes WHERE id = NEW.id;
         END;
     """,
@@ -341,7 +340,7 @@ def test_record_rejects_closed_episode_and_rolls_back_when_update_loses_episode(
     assert_err(
         repo.record_turns(opened.id, turns, title="question", updated_at=_NOW),
         expected_type=ChatStorageErrorType.CORRUPT_DATA,
-        message_contains="Episode disappeared: open",
+        message_contains=f"Episode disappeared: {opened.id}",
     )
     assert repo.get_open_episode().unwrap() == opened
     assert repo.list_turns(opened.id).unwrap() == ()
@@ -367,3 +366,25 @@ def test_record_rejects_naive_timestamp_and_rolls_back(
         message_contains="Timestamp must use UTC.",
     )
     assert repo.list_episodes().unwrap() == ()
+
+
+def test_deleting_an_episode_cascades_only_its_turns(tmp_path: Path) -> None:
+    path = tmp_path / "chats.db"
+    repo = SqliteChatRepository(path)
+    first = repo.record_turns(
+        None, (NewDialogueTurn("user", "first", _NOW),), title="first", updated_at=_NOW
+    ).unwrap()
+    second = repo.record_turns(
+        None,
+        (NewDialogueTurn("user", "second", _NOW),),
+        title="second",
+        updated_at=_NOW,
+        close_episode_id=first.id,
+    ).unwrap()
+    assert [turn.content for turn in repo.list_turns(first.id).unwrap()] == ["first"]
+    with closing(sqlite3.connect(path)) as connection, connection:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("DELETE FROM episodes WHERE id = ?", (first.id,))
+    assert repo.get_episode(first.id).unwrap() is None
+    assert repo.list_turns(first.id).unwrap() == ()
+    assert [turn.content for turn in repo.list_turns(second.id).unwrap()] == ["second"]

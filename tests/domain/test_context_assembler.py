@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 from my_agents.domain.chat_history import (
     ConversationContext,
@@ -70,7 +70,7 @@ def test_adds_history_sections_in_order_with_omission_note() -> None:
     topic = LatestTopicSummary("newer", "決定", "- 一\n- 二", now, now)
     context = ConversationContext(topic, (entry,), summary_index_char_budget=1)
     instructions = assemble_instructions(
-        profile, conversation_context=context, recall_tools_enabled=True
+        profile, conversation_context=context, recall_tools_enabled=True, display_tz=UTC
     )
     assert instructions.startswith(
         assemble_instructions(profile) + "\n\n## 過去会話の参照方針"
@@ -83,4 +83,18 @@ def test_adds_history_sections_in_order_with_omission_note() -> None:
     assert assemble_instructions(
         profile,
         conversation_context=ConversationContext(summary_index_entries=(entry,)),
+        display_tz=UTC,
     ).endswith("- [11/22 00:00] (id:older) 調査: 概要")
+
+
+def test_formats_both_history_sections_in_display_timezone() -> None:
+    now = datetime(2026, 11, 22, 13, 48, tzinfo=UTC)
+    entry = EpisodeIndexEntry("older", "調査", "概要", now, now, 2)
+    topic = LatestTopicSummary("newer", "決定", "要約", now, now)
+    instructions = assemble_instructions(
+        CoreProfile.empty(),
+        conversation_context=ConversationContext(topic, (entry,)),
+        display_tz=timezone(timedelta(hours=9)),
+    )
+    assert "- [11/22 22:48] (id:older) 調査: 概要" in instructions
+    assert "### [11/22 22:48] 決定" in instructions

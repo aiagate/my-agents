@@ -2,7 +2,7 @@ import sqlite3
 from collections.abc import Sequence
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -15,7 +15,12 @@ from my_agents.contracts.ports.agent_runner import (
     AgentRunnerErrorType,
     IAgentRunner,
 )
-from my_agents.contracts.ports.episode_summarizer import EpisodeSummaryRequest
+from my_agents.contracts.ports.chat_history import NewDialogueTurn
+from my_agents.contracts.ports.episode_summarizer import (
+    EpisodeSummarizerError,
+    EpisodeSummarizerErrorType,
+    EpisodeSummaryRequest,
+)
 from my_agents.domain.context_assembler import assemble_instructions
 from my_agents.domain.core_profile import CoreProfile
 from my_agents.infrastructure.sqlite_chat_repository import SqliteChatRepository
@@ -445,15 +450,15 @@ async def test_already_rolled_over_episode_only_supplies_topic_without_clear(
     clear_rollover: bool,
 ) -> None:
     repo = SqliteChatRepository(tmp_path / "chats.db")
-    add_turn(repo)
+    episode = add_turn(repo)
     repo.update_episode_summary(
-        "id",
+        episode.id,
         title="title",
         overview="overview",
         summary="carried forward",
         summarized_turn_count=1,
     ).unwrap()
-    repo.close_episode("id", closed_at=NOW, reason="rollover").unwrap()
+    repo.close_episode(episode.id, closed_at=NOW, reason="rollover").unwrap()
     if clear_rollover:
         cleared_at = NOW + timedelta(minutes=1)
         summarizer = RecordingSummarizer()
@@ -463,7 +468,7 @@ async def test_already_rolled_over_episode_only_supplies_topic_without_clear(
             ).execute()
         ).unwrap().warnings == ()
         assert summarizer.requests == []
-        cleared = repo.get_episode("id").unwrap()
+        cleared = repo.get_episode(episode.id).unwrap()
         assert cleared is not None
         assert (cleared.closed_at, cleared.close_reason) == (NOW, "clear")
     runner = FakeAgentRunner(Ok(AgentReply("reply")))
@@ -548,7 +553,7 @@ async def test_rollover_without_a_summarizer_keeps_only_the_index(
     tmp_path: Path,
 ) -> None:
     repo = SqliteChatRepository(tmp_path / "chats.db")
-    add_turn(repo)
+    episode = add_turn(repo)
     runner = FakeAgentRunner(Ok(AgentReply("reply")))
     profile = FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty())))
     handler = SendMessageHandler(
@@ -559,12 +564,159 @@ async def test_rollover_without_a_summarizer_keeps_only_the_index(
         episode_max_messages=1,
         clock=lambda: NOW,
     )
-    assert (
-        await handler.execute(SendMessageRequest("after rollover"))
-    ).unwrap().warnings == ()
+    response = (await handler.execute(SendMessageRequest("after rollover"))).unwrap()
+    assert response.warnings == ()
+    assert response.pending_summary_episode_ids == (episode.id,)
     assert runner.runs[-1].history == ()
-    assert "(id:id) title" in runner.runs[-1].instructions
+    assert f"(id:{episode.id}) title" in runner.runs[-1].instructions
     assert "## 直近の話題のサマリー" not in runner.runs[-1].instructions
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("already_summarized", [False, True])
+async def test_first_rollover_reply_uses_current_summary_without_queuing_it(
+    tmp_path: Path, already_summarized: bool
+) -> None:
+    repo = SqliteChatRepository(tmp_path / "chats.db")
+    now = NOW.replace(hour=13, minute=48)
+    episode = repo.record_turns(
+        None, (NewDialogueTurn("user", "question", now),), title="title", updated_at=now
+    ).unwrap()
+    if already_summarized:
+        repo.update_episode_summary(
+            episode.id,
+            title="new title",
+            overview="overview",
+            summary="summary",
+            summarized_turn_count=1,
+        ).unwrap()
+    summarizer = RecordingSummarizer()
+    runner = FakeAgentRunner(Ok(AgentReply("reply")))
+    handler = SendMessageHandler(
+        runner,
+        FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty()))),
+        chat_store=repo,
+        chat_query=repo,
+        episode_summarizer=summarizer,
+        episode_max_messages=1,
+        clock=lambda: now,
+        display_tz=timezone(timedelta(hours=9)),
+    )
+    response = (await handler.execute(SendMessageRequest("next topic"))).unwrap()
+    assert response.warnings == response.pending_summary_episode_ids == ()
+    (run,) = runner.runs
+    assert run.history == ()
+    assert (
+        "## 直近の話題のサマリー\n\n### [11/22 22:48] new title\n\nsummary"
+        in run.instructions
+    )
+    assert "## 過去の会話サマリー一覧" not in run.instructions
+    assert summarizer.requests == (
+        []
+        if already_summarized
+        else [EpisodeSummaryRequest("title", "", (ChatMessage("user", "question"),))]
+    )
+    closed = repo.get_episode(episode.id).unwrap()
+    assert closed is not None
+    assert (closed.close_reason, closed.summary, closed.summarized_turn_count) == (
+        "rollover",
+        "summary",
+        1,
+    )
+    opened = repo.get_open_episode().unwrap()
+    assert opened is not None
+    assert (opened.title, opened.turn_count) == ("next topic", 2)
+
+
+@pytest.mark.anyio
+async def test_failed_rollover_reply_leaves_caught_up_episode_open_for_clear(
+    tmp_path: Path,
+) -> None:
+    repo = SqliteChatRepository(tmp_path / "chats.db")
+    episode = add_turn(repo)
+    summarizer = RecordingSummarizer()
+    runner = FakeAgentRunner(
+        Err(AgentRunnerError(AgentRunnerErrorType.API_ERROR, "offline"))
+    )
+    later = NOW + timedelta(hours=1)
+    handler = SendMessageHandler(
+        runner,
+        FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty()))),
+        chat_store=repo,
+        chat_query=repo,
+        episode_summarizer=summarizer,
+        clock=lambda: later,
+    )
+    assert_err(
+        await handler.execute(SendMessageRequest("failed rollover")),
+        expected_type=SendMessageErrorType.API_ERROR,
+        message_contains="offline",
+        display_message_contains="APIとの通信でエラーが発生しました",
+    )
+    (run,) = runner.runs
+    assert "## 直近の話題のサマリー" in run.instructions
+    opened = repo.get_open_episode().unwrap()
+    assert opened is not None
+    assert (
+        opened.id,
+        opened.summary,
+        opened.turn_count,
+        opened.summarized_turn_count,
+    ) == (episode.id, "summary", 1, 1)
+    clear = ClearChatHandler(repo, repo, summarizer, clock=lambda: later)
+    assert (await clear.execute()).unwrap().warnings == ()
+    assert repo.get_open_episode().unwrap() is None
+    (cleared,) = repo.list_episodes().unwrap()
+    assert (cleared.id, cleared.closed_at, cleared.close_reason) == (
+        episode.id,
+        later,
+        "clear",
+    )
+    assert len(summarizer.requests) == 1
+
+
+@pytest.mark.anyio
+async def test_failed_rollover_summary_warns_and_queues_retry_after_reply(
+    tmp_path: Path,
+) -> None:
+    repo = SqliteChatRepository(tmp_path / "chats.db")
+    episode = add_turn(repo)
+    summarizer = RecordingSummarizer(
+        Err(
+            EpisodeSummarizerError(
+                EpisodeSummarizerErrorType.API_ERROR, "summary offline"
+            )
+        )
+    )
+    runner = FakeAgentRunner(Ok(AgentReply("reply")))
+    handler = SendMessageHandler(
+        runner,
+        FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty()))),
+        chat_store=repo,
+        chat_query=repo,
+        episode_summarizer=summarizer,
+        episode_max_messages=1,
+        clock=lambda: NOW,
+    )
+    response = (await handler.execute(SendMessageRequest("next topic"))).unwrap()
+    assert response.reply == "reply"
+    assert response.pending_summary_episode_ids == (episode.id,)
+    (warning,) = response.warnings
+    assert (warning.event, warning.error_type, warning.message) == (
+        "episode_summary_failed",
+        "API_ERROR",
+        "summary offline",
+    )
+    (run,) = runner.runs
+    assert "## 直近の話題のサマリー" not in run.instructions
+    assert f"(id:{episode.id}) title" in run.instructions
+    closed = repo.get_episode(episode.id).unwrap()
+    assert closed is not None
+    assert (closed.close_reason, closed.summary, closed.summarized_turn_count) == (
+        "rollover",
+        "",
+        0,
+    )
 
 
 @pytest.mark.anyio
@@ -590,7 +742,7 @@ async def test_recovery_retries_failed_turns_only_in_the_same_episode(
         stored = (await handler.execute(SendMessageRequest("saved"))).unwrap()
         stored_history = stored.history
     else:
-        repo.create_episode("setup", title="setup", started_at=NOW).unwrap()
+        repo.record_turns(None, (), title="setup", updated_at=NOW).unwrap()
         with closing(sqlite3.connect(path)) as connection, connection:
             connection.execute("DELETE FROM episodes")
 
@@ -666,7 +818,7 @@ async def test_recovery_retries_failed_turns_only_in_the_same_episode(
 async def test_repeated_failures_only_retain_the_recent_turns(tmp_path: Path) -> None:
     path = tmp_path / "chats.db"
     repo = SqliteChatRepository(path)
-    add_turn(repo)
+    episode = add_turn(repo)
     runner = FakeAgentRunner(Ok(AgentReply("reply")))
     profile = FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty())))
     handler = SendMessageHandler(
@@ -690,7 +842,9 @@ async def test_repeated_failures_only_retain_the_recent_turns(tmp_path: Path) ->
         ChatMessage("user", "second"),
         ChatMessage("assistant", "reply"),
     )
-    assert [turn.content for turn in repo.list_turns("id").unwrap()] == ["question"]
+    assert [turn.content for turn in repo.list_turns(episode.id).unwrap()] == [
+        "question"
+    ]
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute("DROP TRIGGER reject_turn")
     third = (
@@ -698,7 +852,7 @@ async def test_repeated_failures_only_retain_the_recent_turns(tmp_path: Path) ->
     ).unwrap()
     assert third.warnings == ()
     assert runner.runs[-1].history == second.history
-    assert [turn.content for turn in repo.list_turns("id").unwrap()] == [
+    assert [turn.content for turn in repo.list_turns(episode.id).unwrap()] == [
         "question",
         "second",
         "reply",
@@ -712,10 +866,13 @@ async def test_episode_index_applies_character_budget_to_more_than_200_episodes(
     tmp_path: Path,
 ) -> None:
     repo = SqliteChatRepository(tmp_path / "chats.db")
+    episode_ids: list[str] = []
     for index in range(201):
-        episode_id = f"episode-{index}"
-        repo.create_episode(episode_id, title=f"Topic {index}", started_at=NOW).unwrap()
-        repo.close_episode(episode_id, closed_at=NOW, reason="clear").unwrap()
+        episode = repo.record_turns(
+            None, (), title=f"Topic {index}", updated_at=NOW
+        ).unwrap()
+        episode_ids.append(episode.id)
+        repo.close_episode(episode.id, closed_at=NOW, reason="clear").unwrap()
     runner = FakeAgentRunner(Ok(AgentReply("reply")))
     profile = FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty())))
     handler = SendMessageHandler(
@@ -728,8 +885,37 @@ async def test_episode_index_applies_character_budget_to_more_than_200_episodes(
     )
     (await handler.execute(SendMessageRequest("next"))).unwrap()
     instructions = runner.runs[-1].instructions
-    assert instructions.index("(id:episode-200) Topic 200") < instructions.index(
-        "(id:episode-0) Topic 0"
+    assert instructions.index(f"(id:{episode_ids[-1]}) Topic 200") < instructions.index(
+        f"(id:{episode_ids[0]}) Topic 0"
+    )
+
+
+@pytest.mark.anyio
+async def test_prompt_index_preserves_sqlite_recency_for_equal_timestamps(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.db"
+    repo = SqliteChatRepository(path)
+    for episode_id, title in (("z-first", "First"), ("a-second", "Second")):
+        episode = repo.record_turns(None, (), title=title, updated_at=NOW).unwrap()
+        repo.close_episode(episode.id, closed_at=NOW, reason="clear").unwrap()
+        with closing(sqlite3.connect(path)) as connection, connection:
+            connection.execute(
+                "UPDATE episodes SET id = ? WHERE id = ?", (episode_id, episode.id)
+            )
+    runner = FakeAgentRunner(Ok(AgentReply("reply")))
+    handler = SendMessageHandler(
+        runner,
+        FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty()))),
+        chat_store=repo,
+        chat_query=repo,
+        clock=lambda: NOW,
+        display_tz=UTC,
+    )
+    (await handler.execute(SendMessageRequest("next"))).unwrap()
+    (run,) = runner.runs
+    assert run.instructions.endswith(
+        "- [11/22 00:00] (id:a-second) Second\n- [11/22 00:00] (id:z-first) First"
     )
 
 
@@ -740,13 +926,13 @@ async def test_corrupt_previous_episode_warns_without_losing_reply(
 ) -> None:
     path = tmp_path / "chats.db"
     repo = SqliteChatRepository(path)
-    repo.create_episode("previous", title="previous", started_at=NOW).unwrap()
-    repo.close_episode("previous", closed_at=NOW, reason="rollover").unwrap()
+    previous = repo.record_turns(None, (), title="previous", updated_at=NOW).unwrap()
+    repo.close_episode(previous.id, closed_at=NOW, reason="rollover").unwrap()
     if has_open:
         add_turn(repo)
     with closing(sqlite3.connect(path)) as connection, connection:
         connection.execute(
-            "UPDATE episodes SET started_at = 'bad' WHERE id = 'previous'"
+            "UPDATE episodes SET started_at = 'bad' WHERE id = ?", (previous.id,)
         )
     runner = FakeAgentRunner(Ok(AgentReply("reply")))
     profile = FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty())))

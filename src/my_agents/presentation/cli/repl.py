@@ -1,6 +1,7 @@
 import asyncio
 import sys
 from collections.abc import Callable
+from datetime import tzinfo
 
 from flow_res import is_err, is_ok
 
@@ -43,6 +44,7 @@ class CliRepl:
         write_error: Callable[[str], None] = write_stderr,
         debug: bool = False,
         logger: IAppLogger = NOOP_LOGGER,
+        display_tz: tzinfo | None = None,
     ) -> None:
         self._send_message = send_message
         self._get_core_profile = get_core_profile
@@ -55,6 +57,7 @@ class CliRepl:
         self._write_error = write_error
         self._debug = debug
         self._logger = logger
+        self._display_tz = display_tz
 
     def run(self) -> None:
         history: tuple[ChatMessage, ...] = ()
@@ -228,14 +231,15 @@ class CliRepl:
         episode = detail.value.episode
         self._write_output(f"\n{self._episode_heading(episode)}")
         if episode.summary:
-            self._write_output(f"\nサマリー\n{episode.summary}")
+            self._write_output(f"\nサマリー\n{episode.summary}\n")
         for turn in detail.value.turns:
             label = "You" if turn.role == "user" else "AI"
             self._write_output(f"{label} > {turn.content}")
 
-    @staticmethod
-    def _episode_heading(episode: EpisodeSummaryView) -> str:
-        time_range = format_episode_time_range(episode.started_at, episode.updated_at)
+    def _episode_heading(self, episode: EpisodeSummaryView) -> str:
+        time_range = format_episode_time_range(
+            episode.started_at, episode.updated_at, tz=self._display_tz
+        )
         status = " (進行中)" if episode.is_active else ""
         return f"{episode.index}. [{time_range}] {episode.title} ({episode.turn_count} 件){status}"
 

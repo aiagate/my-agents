@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime, tzinfo
+from datetime import datetime, tzinfo
 
 EPISODE_TITLE_MAX_CHARS = 40
 EPISODE_OVERVIEW_MAX_CHARS = 250
@@ -85,7 +85,7 @@ def should_summarize_episode(
 
 
 def format_episode_time_range(
-    started_at: datetime, updated_at: datetime, *, tz: tzinfo = UTC
+    started_at: datetime, updated_at: datetime, *, tz: tzinfo | None = None
 ) -> str:
     start = started_at.astimezone(tz)
     end = updated_at.astimezone(tz)
@@ -101,13 +101,11 @@ def format_summary_index(
     entries: tuple[EpisodeIndexEntry, ...],
     *,
     char_budget: int = DEFAULT_SUMMARY_INDEX_CHAR_BUDGET,
-    tz: tzinfo = UTC,
+    tz: tzinfo | None = None,
 ) -> tuple[str, int]:
     lines: list[str] = []
     used = 0
-    for entry in sorted(
-        entries, key=lambda item: (item.updated_at, item.episode_id), reverse=True
-    ):
+    for entry in sorted(entries, key=lambda item: item.updated_at, reverse=True):
         period = format_episode_time_range(entry.started_at, entry.updated_at, tz=tz)
         line = f"- [{period}] (id:{entry.episode_id}) {entry.title}"
         if entry.overview:

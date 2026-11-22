@@ -699,7 +699,7 @@ def test_cli_persists_chat_displays_history_resumes_and_clears(
     assert "## 直近の話題のサマリー" in str(captured["instructions"])
     assert "first question" in str(captured["messages"])
     assert "  概要" in outputs
-    assert "\nサマリー\n要約" in outputs
+    assert "\nサマリー\n要約\n" in outputs
     assert "You > first question" in outputs
     assert "You > second question" in outputs
     assert (summarizer.requests[1].previous_summary, summarizer.requests[1].turns) == (

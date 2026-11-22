@@ -7,7 +7,7 @@ import pytest
 from flow_res import Err, Ok, Result
 
 from my_agents.contracts.messages import ChatMessage
-from my_agents.contracts.ports.chat_history import NewDialogueTurn
+from my_agents.contracts.ports.chat_history import EpisodeRecord, NewDialogueTurn
 from my_agents.contracts.ports.episode_summarizer import (
     EpisodeSummarizerError,
     EpisodeSummarizerErrorType,
@@ -40,10 +40,9 @@ class RecordingSummarizer(IEpisodeSummarizer):
         return self._result
 
 
-def add_turn(repo: SqliteChatRepository) -> None:
-    repo.create_episode("id", title="title", started_at=NOW).unwrap()
-    repo.append_turns(
-        "id", (NewDialogueTurn("user", "question", NOW),), updated_at=NOW
+def add_turn(repo: SqliteChatRepository) -> EpisodeRecord:
+    return repo.record_turns(
+        None, (NewDialogueTurn("user", "question", NOW),), title="title", updated_at=NOW
     ).unwrap()
 
 
@@ -71,7 +70,9 @@ async def test_clear_summarizes_and_closes_without_deleting_history(
         episode.summary,
         episode.summarized_turn_count,
     ) == ("clear", NOW, "summary", 1)
-    assert [turn.content for turn in repo.list_turns("id").unwrap()] == ["question"]
+    assert [turn.content for turn in repo.list_turns(episode.id).unwrap()] == [
+        "question"
+    ]
 
 
 @pytest.mark.anyio
@@ -133,8 +134,10 @@ async def test_clear_reports_failure_for_a_closed_rollover(
 ) -> None:
     path = tmp_path / "chats.db"
     repo = SqliteChatRepository(path)
-    add_turn(repo)
-    rolled_over = repo.close_episode("id", closed_at=NOW, reason="rollover").unwrap()
+    episode = add_turn(repo)
+    rolled_over = repo.close_episode(
+        episode.id, closed_at=NOW, reason="rollover"
+    ).unwrap()
     with closing(sqlite3.connect(path)) as connection, connection:
         if corrupt:
             connection.execute("UPDATE episodes SET updated_at = 'bad'")

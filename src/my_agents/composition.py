@@ -108,6 +108,7 @@ def build_cli(
         get_core_profile,
         chat_store=chat_repository,
         chat_query=chat_repository,
+        episode_summarizer=summarizer,
         summary_index_char_budget=settings.summary_index_char_budget,
         summary_every_messages=settings.summary_every_messages,
         recent_messages_limit=settings.recent_messages_limit,

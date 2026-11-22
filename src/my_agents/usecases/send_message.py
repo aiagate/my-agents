@@ -1,6 +1,6 @@
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from enum import Enum, auto
 from typing import Protocol, assert_never
 
@@ -19,6 +19,7 @@ from my_agents.contracts.ports.chat_history import (
     IChatStore,
     NewDialogueTurn,
 )
+from my_agents.contracts.ports.episode_summarizer import IEpisodeSummarizer
 from my_agents.domain.chat_history import (
     DEFAULT_EPISODE_GAP_MINUTES,
     DEFAULT_EPISODE_MAX_MESSAGES,
@@ -33,7 +34,7 @@ from my_agents.domain.chat_history import (
     should_summarize_episode,
 )
 from my_agents.domain.context_assembler import assemble_instructions
-from my_agents.usecases._episode_summary import storage_warning
+from my_agents.usecases._episode_summary import storage_warning, summarize_episode
 from my_agents.usecases.get_core_profile import (
     GetCoreProfileUseCase,
 )
@@ -125,6 +126,8 @@ class SendMessageHandler:
         *,
         chat_store: IChatStore | None = None,
         chat_query: IChatQuery | None = None,
+        episode_summarizer: IEpisodeSummarizer | None = None,
+        display_tz: tzinfo | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         summary_index_char_budget: int = DEFAULT_SUMMARY_INDEX_CHAR_BUDGET,
         summary_every_messages: int = DEFAULT_SUMMARY_EVERY_MESSAGES,
@@ -135,12 +138,14 @@ class SendMessageHandler:
         self._agent_runner = agent_runner
         self._get_core_profile = get_core_profile
         self._clock = clock
+        self._display_tz = display_tz
         self._chat = (
             None
             if chat_store is None or chat_query is None
             else _PersistentChat(
                 chat_store,
                 chat_query,
+                episode_summarizer,
                 summary_index_char_budget,
                 summary_every_messages,
                 recent_messages_limit,
@@ -175,7 +180,9 @@ class SendMessageHandler:
 
         history = request.history
         now = self._clock()
-        prepared = None if self._chat is None else self._chat.prepare(history, now)
+        prepared = (
+            None if self._chat is None else await self._chat.prepare(history, now)
+        )
         if prepared is not None:
             history = prepared.history
         result = await self._agent_runner.run(
@@ -185,6 +192,7 @@ class SendMessageHandler:
                 profile_result.value.profile,
                 conversation_context=None if prepared is None else prepared.context,
                 recall_tools_enabled=self._chat is not None,
+                display_tz=self._display_tz,
             ),
         )
         if is_err(result):
@@ -244,6 +252,7 @@ class _PersistentChat:
         self,
         store: IChatStore,
         query: IChatQuery,
+        summarizer: IEpisodeSummarizer | None,
         index_budget: int,
         summary_interval: int,
         recent_limit: int,
@@ -252,6 +261,7 @@ class _PersistentChat:
     ) -> None:
         self._store = store
         self._query = query
+        self._summarizer = summarizer
         self._index_budget = index_budget
         self._summary_interval = summary_interval
         self._recent_limit = recent_limit
@@ -265,7 +275,9 @@ class _PersistentChat:
     ) -> tuple[ChatMessage, ...]:
         return history[-self._recent_limit :]
 
-    def prepare(self, history: tuple[ChatMessage, ...], now: datetime) -> _PreparedChat:
+    async def prepare(
+        self, history: tuple[ChatMessage, ...], now: datetime
+    ) -> _PreparedChat:
         if not history:
             self._pending_turns = ()
             self._pending_target = _ChatTarget()
@@ -320,6 +332,17 @@ class _PersistentChat:
             ):
                 target = _ChatTarget(preceding_episode_id=episode.id)
                 stored_history = ()
+                if (
+                    episode.turn_count > episode.summarized_turn_count
+                    and self._summarizer is not None
+                ):
+                    episode, summary_warnings = await summarize_episode(
+                        episode,
+                        chat_store=self._store,
+                        chat_query=self._query,
+                        summarizer=self._summarizer,
+                    )
+                    warnings.extend(summary_warnings)
                 rollover = episode
                 topic = _latest_summary(episode)
             else:

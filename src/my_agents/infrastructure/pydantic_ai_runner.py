@@ -52,8 +52,8 @@ from my_agents.contracts.secret import SecretStr
 from my_agents.infrastructure.error_formatting import format_exception, redact_secret
 from my_agents.infrastructure.settings import AppSettings
 
-DEFAULT_REQUEST_LIMIT = 6
-DEFAULT_TOOL_CALLS_LIMIT = 4
+DEFAULT_REQUEST_LIMIT = 8
+DEFAULT_TOOL_CALLS_LIMIT = 6
 DEFAULT_USAGE_LIMITS = UsageLimits(
     request_limit=DEFAULT_REQUEST_LIMIT,
     tool_calls_limit=DEFAULT_TOOL_CALLS_LIMIT,
