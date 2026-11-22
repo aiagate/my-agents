@@ -17,6 +17,7 @@ from tools.project_lint import (
     check_no_object_in_contravariant_type_args,
     check_no_plain_str_secrets,
     check_no_private_dataclass_init_fields,
+    check_no_private_type_in_public_api,
     check_no_shallow_tests,
     check_strict_coverage_config,
     check_strict_pyright_config,
@@ -191,6 +192,54 @@ def test_pl003_flags_non_exhaustive_if_else_on_literal_and_enum(
 
     assert len(findings) == 2
     assert {f.rule for f in findings} == {"PL003"}
+
+
+def test_pl003_regression_ternary_ifexp_on_closed_literal(tmp_path: Path) -> None:
+    # 2026-11-22 | thread mcp:launch:1a4040d4c0a04b9a800ad4bbe24f3bfa7c6c26d232c6018cca491c9cb0b465e0 | SHA 83ff9e4
+    sample = _write(
+        tmp_path / "sample.py",
+        (
+            "import typing\n"
+            "from enum import Enum, auto\n"
+            "from typing import Literal, assert_never\n"
+            "class ChatTurn:\n"
+            "    role: Literal['user', 'assistant']\n"
+            "class Mode(Enum):\n"
+            "    FAST = auto()\n"
+            "    SLOW = auto()\n"
+            "def labels(turn: ChatTurn, mode: Mode, prompt: str) -> None:\n"
+            '    label = "You" if turn.role == "user" else "AI"\n'
+            "    speed = 1 if mode is Mode.FAST else 2\n"
+            "    chained = 1 if mode is Mode.FAST else 2 if mode is Mode.SLOW else 0\n"
+            "    guarded = 1 if mode is Mode.FAST else assert_never(mode)\n"
+            "    qualified = 1 if mode is Mode.FAST else (\n"
+            "        2 if mode is Mode.SLOW else typing.assert_never(mode)\n"
+            "    )\n"
+            "    plain = 1 if prompt == 'quit' else 0\n"
+            "    flag = 1 if prompt else 0\n"
+        ),
+    )
+
+    findings = check_exhaustive_branch(tmp_path)
+
+    assert {(finding.rule, finding.path) for finding in findings} == {("PL003", sample)}
+    assert [(finding.line, finding.col, finding.message) for finding in findings] == [
+        (
+            10,
+            13,
+            "Non-exhaustive '... if ... else ...' expression on closed type 'role'.",
+        ),
+        (
+            11,
+            13,
+            "Non-exhaustive '... if ... else ...' expression on closed type 'Mode'.",
+        ),
+        (
+            12,
+            15,
+            "Non-exhaustive '... if ... else ...' expression on closed type 'Mode'.",
+        ),
+    ]
 
 
 def test_pl004_enforces_clean_architecture_layer_boundaries(tmp_path: Path) -> None:
@@ -999,3 +1048,83 @@ def test_pl022_requires_tool_and_parameter_descriptions(tmp_path: Path) -> None:
     assert "empty_value" in messages
     assert "nested_value" in messages
     assert "valid" not in messages
+
+
+def test_pl023_regression_private_type_in_public_api(tmp_path: Path) -> None:
+    # 2026-11-22 | thread mcp:launch:1a4040d4c0a04b9a800ad4bbe24f3bfa7c6c26d232c6018cca491c9cb0b465e0 | SHAs 56de693, 83ff9e4
+    sample = _write(
+        tmp_path / "sample.py",
+        (
+            "class JsonlFileLogger:\n"
+            "    def __init__(self, handler: _PrivateRotatingFileHandler) -> None: ...\n"
+            "class PydanticAIEpisodeSummarizer:\n"
+            "    def __init__(\n"
+            "        self, model_or_agent: Model | Agent[None, _EpisodeSummaryOutput],\n"
+            "    ) -> None:\n"
+            "        self._agent: Agent[None, _EpisodeSummaryOutput] = model_or_agent\n"
+            "class Public(_Base[models._Config]):\n"
+            "    attribute: Annotated[_Value | _Value, _META]\n"
+            "    _private: _Value\n"
+            "    def _build(self, value: _Value) -> _Value: ...\n"
+            "    def __str__(self: _Receiver) -> str: ...\n"
+            "    @classmethod\n"
+            "    def create(cls: _Receiver) -> str: ...\n"
+            "    class Nested:\n"
+            "        async def get(self) -> _namespace._NestedValue: ...\n"
+            "        type LocalAlias = _Value\n"
+            "class _Internal:\n"
+            "    attribute: _Value\n"
+            "async def fetch() -> _Result:\n"
+            "    def local() -> _Result: ...\n"
+            "    return local()\n"
+            "type PublicAlias = dict[str, _Value]\n"
+            "type _PrivateAlias = _Value\n"
+            "public_value: list[_Value]\n"
+            "_private_value: _Value\n"
+            "def parameters(self: _Pos, /, regular: _Regular, *items: _Item,\n"
+            "               flag: _Flag, **options: _Option): ...\n"
+            "def valid(value: Annotated[str, _META], raw: Literal['_raw'],\n"
+            "          qualified: typing.Annotated[str, Field(_META)],\n"
+            "          sentinel: typing.Literal[constants._RAW],\n"
+            "          dunder: __Public__) -> Public: ...\n"
+        ),
+    )
+    _write(tmp_path / "_helper.py", "def hidden() -> _Value: ...\n")
+    _write(tmp_path / "_helpers" / "api.py", "def hidden() -> _Value: ...\n")
+    init = _write(tmp_path / "__init__.py", "exported: _Value\n")
+    main = _write(tmp_path / "__main__.py", "def main() -> _Value: ...\n")
+
+    findings = check_no_private_type_in_public_api(tmp_path)
+
+    assert len(findings) == 15
+    assert {finding.rule for finding in findings} == {"PL023"}
+    assert {(finding.path, finding.line, finding.col) for finding in findings} >= {
+        (sample, 2, 24),
+        (sample, 5, 15),
+        (sample, 16, 9),
+        (init, 1, 1),
+        (main, 1, 1),
+    }
+    assert {finding.message for finding in findings} == {
+        f"Public API '{symbol}' exposes private type(s) {names}."
+        for symbol, names in (
+            ("JsonlFileLogger.__init__(handler)", "_PrivateRotatingFileHandler"),
+            (
+                "PydanticAIEpisodeSummarizer.__init__(model_or_agent)",
+                "_EpisodeSummaryOutput",
+            ),
+            ("Public base", "_Base, _Config"),
+            ("Public.attribute", "_Value"),
+            ("Public.Nested.get() return", "_NestedValue, _namespace"),
+            ("fetch() return", "_Result"),
+            ("PublicAlias", "_Value"),
+            ("public_value", "_Value"),
+            ("parameters(self)", "_Pos"),
+            ("parameters(regular)", "_Regular"),
+            ("parameters(items)", "_Item"),
+            ("parameters(flag)", "_Flag"),
+            ("parameters(options)", "_Option"),
+            ("exported", "_Value"),
+            ("main() return", "_Value"),
+        )
+    }

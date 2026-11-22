@@ -110,7 +110,7 @@ class _PrivateRotatingFileHandler(RotatingFileHandler):
 
 
 class JsonlFileLogger(IAppLogger):
-    def __init__(self, handler: _PrivateRotatingFileHandler) -> None:
+    def __init__(self, handler: RotatingFileHandler) -> None:
         self._handler = handler
 
     @classmethod

@@ -46,6 +46,9 @@ from tools.project_lint.rules.pl021_usecase_protocol_ownership import (
     check_usecase_protocol_ownership,
 )
 from tools.project_lint.rules.pl022_tool_descriptions import check_tool_descriptions
+from tools.project_lint.rules.pl023_no_private_type_in_public_api import (
+    check_no_private_type_in_public_api,
+)
 
 
 def _src_rule(
@@ -151,6 +154,9 @@ RULES: tuple[LintRule, ...] = (
         check_usecase_protocol_ownership,
     ),
     _src_rule("PL022", "tool_descriptions", check_tool_descriptions),
+    _src_rule(
+        "PL023", "no_private_type_in_public_api", check_no_private_type_in_public_api
+    ),
 )
 
 __all__ = [
@@ -171,6 +177,7 @@ __all__ = [
     "check_no_object_in_contravariant_type_args",
     "check_no_plain_str_secrets",
     "check_no_private_dataclass_init_fields",
+    "check_no_private_type_in_public_api",
     "check_no_shallow_tests",
     "check_strict_coverage_config",
     "check_strict_pyright_config",

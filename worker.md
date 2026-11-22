@@ -6,7 +6,7 @@
 すべてのタスクで有効である。
 
 - 何かを書く前にリポジトリルートの AGENTS.md を読むこと。規約と強制手段
-  （PL001〜PL022 / Ruff / Pyright / pre-commit）の対応表がある。
+  （PL001〜PL023 / Ruff / Pyright / pre-commit）の対応表がある。
 - コミット前に実行: uv run ruff check . && uv run ruff format --check . &&
   uv run pyright && uv run python -m tools.project_lint
   （サンドボックス等で uv run が ~/.cache/uv へのはじかれで失敗するときは、

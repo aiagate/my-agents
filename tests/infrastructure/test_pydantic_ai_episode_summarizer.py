@@ -1,8 +1,7 @@
 from pathlib import Path
-from typing import Never
 
 import pytest
-from pydantic_ai import Agent, UsageLimits
+from pydantic_ai import UsageLimits
 from pydantic_ai.exceptions import (
     ModelAPIError,
     UnexpectedModelBehavior,
@@ -157,29 +156,6 @@ async def test_summary_factory_applies_settings_and_usage_limit(
         await summarizer.summarize(_REQUEST),
         expected_type=EpisodeSummarizerErrorType.UNEXPECTED_BEHAVIOR,
         message_contains="request_limit",
-    )
-
-
-@pytest.mark.anyio
-async def test_summary_uses_supplied_agent() -> None:
-    def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        assert "Injected agent" in (info.instructions or "")
-        raise ModelAPIError("test", "supplied agent called")
-
-    def reject_output(_text: str) -> Never:
-        pytest.fail("The model should fail before producing output")
-
-    with pytest.warns(UserWarning, match="unsupported return type typing.Never"):
-        agent: Agent[None, Never] = Agent(
-            FunctionModel(respond),
-            output_type=reject_output,
-            instructions="Injected agent",
-        )
-    summarizer = PydanticAIEpisodeSummarizer(agent)
-    assert_err(
-        await summarizer.summarize(_REQUEST),
-        expected_type=EpisodeSummarizerErrorType.API_ERROR,
-        message_contains="supplied agent called",
     )
 
 

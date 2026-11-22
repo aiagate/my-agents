@@ -1,6 +1,6 @@
 # 規約と強制手段
 
-制約の本体は tools/project_lint/rules/（PL001〜PL022）と pyproject.toml
+制約の本体は tools/project_lint/rules/（PL001〜PL023）と pyproject.toml
 （Ruff / Pyright）と .githooks/ にある。この表は規約と強制手段の対応を示す
 索引であり、強制手段の空欄を見つけるための道具である。
 
@@ -39,6 +39,7 @@
 | logging/print を直接使わず IAppLogger を通す | PL020 + Ruff T201 |
 | usecase の Protocol は usecase 側が所有する | PL021 |
 | LLM 向けツール定義に Field description を付ける | PL022 |
+| 公開 API の型注釈に非公開型を露出しない | PL023 |
 | Python 3.14+ 前提・__future__ annotations と typing.Any を使わない | pyproject（requires-python / Ruff TID251）+ Pyright pythonVersion |
 | コミットメッセージは Conventional Commits 形式（英語） | .githooks/commit-msg（type・形式・ASCII。字数・命令形は判断） |
 

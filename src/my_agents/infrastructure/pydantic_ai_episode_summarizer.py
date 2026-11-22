@@ -45,15 +45,13 @@ class _EpisodeSummaryOutput(BaseModel):
 class PydanticAIEpisodeSummarizer(IEpisodeSummarizer):
     def __init__(
         self,
-        model_or_agent: Model | Agent[None, _EpisodeSummaryOutput],
+        model: Model,
         *,
         api_key: SecretStr | None = None,
         usage_limits: UsageLimits = DEFAULT_SUMMARY_USAGE_LIMITS,
     ) -> None:
-        self._agent: Agent[None, _EpisodeSummaryOutput] = (
-            model_or_agent
-            if isinstance(model_or_agent, Agent)
-            else Agent(model_or_agent, output_type=_EpisodeSummaryOutput)
+        self._agent: Agent[None, _EpisodeSummaryOutput] = Agent(
+            model, output_type=_EpisodeSummaryOutput
         )
         self._api_key = api_key
         self._usage_limits = usage_limits

@@ -2,6 +2,7 @@ import asyncio
 import sys
 from collections.abc import Callable
 from datetime import tzinfo
+from typing import assert_never
 
 from flow_res import is_err, is_ok
 
@@ -233,7 +234,13 @@ class CliRepl:
         if episode.summary:
             self._write_output(f"\nサマリー\n{episode.summary}\n")
         for turn in detail.value.turns:
-            label = "You" if turn.role == "user" else "AI"
+            match turn.role:
+                case "user":
+                    label = "You"
+                case "assistant":
+                    label = "AI"
+                case _:
+                    assert_never(turn.role)
             self._write_output(f"{label} > {turn.content}")
 
     def _episode_heading(self, episode: EpisodeSummaryView) -> str:
