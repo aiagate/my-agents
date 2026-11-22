@@ -1,19 +1,55 @@
-# コミットメッセージ
+# 規約と強制手段
 
-- Conventional Commits 形式で、英語・命令形（imperative mood）で書く。
-- 補足が必要な場合は、本文（body）に理由や要点を短い英文で書く。
+制約の本体は tools/project_lint/rules/（PL001〜PL022）と pyproject.toml
+（Ruff / Pyright）と .githooks/ にある。この表は規約と強制手段の対応を示す
+索引であり、強制手段の空欄を見つけるための道具である。
 
-# Docstring・コメント
+新規 PL ルールの入場条件:
 
-- 説明目的の Docstring は書かない（`tools/project_lint/rules/pl006_no_docstrings.py` の `PL006` で禁止）。仕様や契約は厳格な型・命名・テストで表現する。
-- 抽象メソッドや `Protocol` などボディが空になる箇所は `...` を使う。
-- 例外は実行時にフレームワークが読み取る用途（例: ツール定義の LLM 向け説明）に限り、`tools/project_lint/rules/pl006_no_docstrings.py` 側で明示的に許可する。インライン抑止コメントは使わない。
-- Docstring の代わりに自明な What を `#` コメントで書かない。`#` コメントは外部制約や罠など、コードと型から読み取れない Why に限る。
+- 「2 回起きた実ミス」の失敗クラスからだけ作る。抽象的な懸念による先回りルールを作らない。
+- 導入時に実際の違反コード断片に対して新チェックが fail することを
+  tests/test_project_lint_rules.py で証明する（`test_plXXX_regression_<class>`
+  と名付け、`#` コメントに起票元（日付・スレッド・関連 SHA）を残す）。
+- 解決は Architecture > Types/Lint > Test > Docs の順で上位層から試みる。
+- 例外を許す場合は理由・有効期限・人間承認を要する。許可リストは該当ルール
+  実装内でのみ管理する（PL006 の allowed_decorators 方式）。インライン抑止は
+  PL008 が禁止済み。
 
-# 環境・型注釈
+| 規約 | 強制手段 |
+| --- | --- |
+| 秘密を平文 str で持ち歩かない | PL001 + contracts/secret.py（SecretStr 型） |
+| テストのエラー検証は型とメッセージを両方見る | PL002 + tests/helpers.py（assert_err） |
+| 列挙分岐の網羅を型で強制する | PL003 + Pyright（assert_never） |
+| レイヤー依存は contracts→domain→usecases→infrastructure/presentation 一方向 | PL004 |
+| 型検査は strict 固定 | PL005 + pyproject（Pyright 設定） |
+| 説明 Docstring を書かない。仕様は型・命名・テストで表す | PL006（hint が修正行動を指示） |
+| カバレッジ 100%（分岐込み）を維持 | pyproject（fail_under=100 / branch）+ PL007 |
+| インライン抑止（noqa / type: ignore / cast）を使わない | PL008 + Ruff PGH003/PGH004/RUF100 |
+| src で cast による型のすり替えをしない | PL009 |
+| テストは実挙動を検証し内部実装を写さない | PL010 |
+| dataclass は init 外フィールド・プライベートフィールドにしない | PL011 |
+| 反変位置の型引数に object を入れない | PL012 |
+| アダプタは Port の型を公開露出しない | PL013 |
+| エントリポイントと __init__ は thin に保つ | PL014 |
+| os.environ をグローバルに読み書きしない（注入で渡す） | PL015 |
+| 状態は frozen dataclass で不変表現する | PL016 |
+| レイヤー根はアダプタを再公開しない | PL017 |
+| テストは他レイヤーの内部を monkeypatch しない | PL018 |
+| Result のエラー型は例外でなく TypedError | PL019 + flow-res 型 |
+| logging/print を直接使わず IAppLogger を通す | PL020 + Ruff T201 |
+| usecase の Protocol は usecase 側が所有する | PL021 |
+| LLM 向けツール定義に Field description を付ける | PL022 |
+| Python 3.14+ 前提・__future__ annotations と typing.Any を使わない | pyproject（requires-python / Ruff TID251）+ Pyright pythonVersion |
+| コミットメッセージは Conventional Commits 形式（英語） | .githooks/commit-msg（type・形式・ASCII。字数・命令形は判断） |
 
-- Python 3.14+ を前提とする。
-- ジェネリクスの型引数を決めるときは、定義の `TypeVar` や変性（入出力の向き）を確認する。
+# 判断のみの規約（強制手段なし）
+
+- コミットメッセージの件名は英語・命令形。補足は本文（body）に理由や要点を短い英文で書く。
+- `#` コメントは外部制約や罠など、コードと型から読み取れない Why に限る
+  （Ruff ERA001 はコメントアウトコードのみ検出。What コメントの排除は判断）。
+- ジェネリクスの型引数は定義の TypeVar と変性（入出力の向き）を確認して決める。
+- 子エージェント／別スレッドのキックオフ 1 行目は「Read the worker.md at the repository root before anything else.」で始める（AGENTS.md の子への自動注入は前提としない、上流 Issue #28704）。修正ラウンド・再試行・次タスクでは既存の子を延命せず、目的・直前の報告・ブランチを渡してフレッシュ起動する（Fresh subagents by default。延命は未コミット変更や実行中プロセスなど移動コストが高い状態のときだけ）。子への固有の指示はキックオフ本文に書き、この契約を子ごとに書き直さない。子の報告は「変更内容・検証方法（正確なコマンドと出力）・未カバー範囲」で受け取る。
+- CLI の動作確認は `.agents/skills/verify-my-agents/SKILL.md` の手順に従う。
 
 # 主要ライブラリ
 
@@ -21,10 +57,3 @@
 | --- | --- |
 | `pydantic-ai` | LLM エージェント実行 |
 | `flow-res` | `Result` 型によるエラーハンドリング |
-
-# 子エージェント運用
-
-- 子エージェント／別スレッドのキックオフ 1 行目は「Read the worker.md at the repository root before anything else.」で始める。AGENTS.md は子に自動注入されない前提で運用する（T3×Antigravity の自動注入欠落、上流 Issue #28704）。
-- 修正ラウンド・再試行・次タスクでは既存の子スレッドを延命せず、目的・直前の報告・ブランチを渡してフレッシュ起動する（Fresh subagents by default）。延命は未コミット変更や実行中プロセスなど移動コストが高い状態のときだけ。
-- 子への固有の指示はキックオフ本文に書く。worker.md と AGENTS.md の契約を子ごとに書き直して重複させない。
-- 子の報告は「変更内容・検証方法（正確なコマンドと出力）・未カバー範囲」の形式で受け取る。欠けていたら報告し直させる。
