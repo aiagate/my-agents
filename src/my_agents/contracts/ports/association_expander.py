@@ -20,7 +20,7 @@ class AssociationExpandOutcome:
 
 class AssociationExpandErrorType(Enum):
     INVALID_INPUT = auto()
-    GENERATION_ERROR = auto()
+    EXPANSION_FAILED = auto()
 
 
 @dataclass(frozen=True, slots=True)

@@ -80,14 +80,14 @@ class _FakeMlxLm:
         self._stream_error = stream_error
         self._load_started = load_started
         self._release_load = release_load
-        self.load_calls: list[tuple[str, str]] = []
+        self.load_calls: list[tuple[str, str | None]] = []
         self.generate_calls: list[dict[str, object]] = []
 
     def load(
         self,
         model_name: str,
         *,
-        adapter_path: str,
+        adapter_path: str | None = None,
     ) -> tuple[object, _FakeTokenizer]:
         self.load_calls.append((model_name, adapter_path))
         if self._load_started is not None:
@@ -162,12 +162,31 @@ def test_is_available_checks_directory_and_mlx_lm_spec(
         no_spec,
     )
     assert MlxLoraAssociationGenerator.is_available(existing_dir) is False
+    assert MlxLoraAssociationGenerator.is_available() is False
 
     monkeypatch.setattr(
         "my_agents.infrastructure.mlx_lora_association_generator.find_spec",
         found_spec,
     )
     assert MlxLoraAssociationGenerator.is_available(existing_dir) is True
+    assert MlxLoraAssociationGenerator.is_available() is True
+
+
+@pytest.mark.anyio
+async def test_from_settings_loads_base_model_without_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+    tokenizer = _FakeTokenizer()
+    fake_mlx = _FakeMlxLm(captured, tokenizer)
+    _install_fake_mlx(monkeypatch, fake_mlx, _FakeSampleUtils(captured))
+
+    generator = MlxLoraAssociationGenerator.from_settings("base-only-model")
+    result = await generator.generate("sys", "user-base")
+
+    assert is_ok(result)
+    assert result.unwrap() == '{"root": "r", "branches": []}'
+    assert fake_mlx.load_calls == [("base-only-model", None)]
 
 
 @pytest.mark.anyio

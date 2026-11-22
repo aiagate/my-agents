@@ -907,12 +907,12 @@ async def test_association_tool_returns_tree_and_lateral_ideas_to_model() -> Non
         ),
         pytest.param(
             AssociationExpandError(
-                type=AssociationExpandErrorType.GENERATION_ERROR,
+                type=AssociationExpandErrorType.EXPANSION_FAILED,
                 message="upstream timeout",
             ),
-            "Association expansion failed while generating associations: "
-            "upstream timeout Answer without this tool instead.",
-            id="generation-error",
+            "Association expansion failed: upstream timeout "
+            "Answer without this tool instead.",
+            id="expansion-failed",
         ),
     ],
 )

@@ -126,7 +126,7 @@ async def test_rejects_blank_topic_without_calling_generator(topic: str) -> None
         ),
     ],
 )
-async def test_maps_generator_errors_to_generation_error(
+async def test_maps_generator_errors_to_expansion_failed(
     error_type: AssociationGeneratorErrorType,
     message: str,
 ) -> None:
@@ -139,14 +139,14 @@ async def test_maps_generator_errors_to_generation_error(
 
     error = assert_err(
         result,
-        expected_type=AssociationExpandErrorType.GENERATION_ERROR,
+        expected_type=AssociationExpandErrorType.EXPANSION_FAILED,
         message_contains=message,
     )
     assert isinstance(error, AssociationExpandError)
 
 
 @pytest.mark.anyio
-async def test_maps_malformed_model_output_to_generation_error() -> None:
+async def test_maps_malformed_model_output_to_expansion_failed() -> None:
     generator = FakeAssociationGenerator(Ok("no json payload"))
     handler = ExpandAssociationsHandler(generator)
 
@@ -154,6 +154,6 @@ async def test_maps_malformed_model_output_to_generation_error() -> None:
 
     assert_err(
         result,
-        expected_type=AssociationExpandErrorType.GENERATION_ERROR,
+        expected_type=AssociationExpandErrorType.EXPANSION_FAILED,
         message_contains="contained no JSON object",
     )

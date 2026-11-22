@@ -33,7 +33,11 @@ class _ChatTemplateRenderer(Protocol):
 
 
 class MlxLoraAssociationGenerator(IAssociationGenerator):
-    def __init__(self, model_name: str, adapter_path: Path) -> None:
+    def __init__(
+        self,
+        model_name: str,
+        adapter_path: Path | None = None,
+    ) -> None:
         self._model_name = model_name
         self._adapter_path = adapter_path
         self._loaded: tuple[object, _ChatTemplateRenderer] | None = None
@@ -41,27 +45,32 @@ class MlxLoraAssociationGenerator(IAssociationGenerator):
         self._generate_lock = asyncio.Lock()
 
     @staticmethod
-    def is_available(adapter_path: Path) -> bool:
-        return adapter_path.is_dir() and find_spec("mlx_lm") is not None
+    def is_available(adapter_path: Path | None = None) -> bool:
+        if adapter_path is not None and not adapter_path.is_dir():
+            return False
+        return find_spec("mlx_lm") is not None
 
     @classmethod
     def from_settings(
         cls,
         model_name: str,
-        adapter_path: Path,
+        adapter_path: Path | None = None,
     ) -> MlxLoraAssociationGenerator:
         return cls(model_name, adapter_path)
 
     def _load_sync(self) -> tuple[object, _ChatTemplateRenderer]:
-        if not self._adapter_path.is_dir():
+        if self._adapter_path is not None and not self._adapter_path.is_dir():
             raise FileNotFoundError(
                 f"MLX LoRA adapter not found at {self._adapter_path}"
             )
         mlx_lm = import_module("mlx_lm")
-        model, tokenizer = mlx_lm.load(
-            self._model_name,
-            adapter_path=str(self._adapter_path),
-        )
+        if self._adapter_path is None:
+            model, tokenizer = mlx_lm.load(self._model_name)
+        else:
+            model, tokenizer = mlx_lm.load(
+                self._model_name,
+                adapter_path=str(self._adapter_path),
+            )
         loaded_model: object = model
         renderer: _ChatTemplateRenderer = tokenizer
         return loaded_model, renderer

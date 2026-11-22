@@ -175,10 +175,10 @@ def _format_association_error(error: AssociationExpandError) -> str:
                 f"Association expansion input was invalid: {error.message} "
                 "Provide a non-empty topic and retry."
             )
-        case AssociationExpandErrorType.GENERATION_ERROR:
+        case AssociationExpandErrorType.EXPANSION_FAILED:
             return (
-                "Association expansion failed while generating associations: "
-                f"{error.message} Answer without this tool instead."
+                f"Association expansion failed: {error.message} "
+                "Answer without this tool instead."
             )
         case _:
             assert_never(error.type)

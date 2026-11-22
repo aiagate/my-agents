@@ -28,7 +28,7 @@ def _to_expand_error(error: AssociationGeneratorError) -> AssociationExpandError
             | AssociationGeneratorErrorType.GENERATION_FAILED
         ):
             return AssociationExpandError(
-                type=AssociationExpandErrorType.GENERATION_ERROR,
+                type=AssociationExpandErrorType.EXPANSION_FAILED,
                 message=error.message,
             )
         case _:
@@ -64,7 +64,7 @@ class ExpandAssociationsHandler(IAssociationExpander):
         if is_err(parsed):
             return Err(
                 AssociationExpandError(
-                    type=AssociationExpandErrorType.GENERATION_ERROR,
+                    type=AssociationExpandErrorType.EXPANSION_FAILED,
                     message=parsed.error.message,
                 )
             )

@@ -3,7 +3,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from flow_res import is_ok
+from flow_res import Ok, Result, is_ok
 from pydantic_ai.exceptions import ModelAPIError
 from pydantic_ai.messages import (
     ModelMessage,
@@ -16,7 +16,12 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from my_agents.composition import build_cli, run_cli
-from my_agents.contracts.ports.association_expander import IAssociationExpander
+from my_agents.contracts.ports.association_expander import (
+    AssociationExpandError,
+    AssociationExpandOutcome,
+    AssociationExpandRequest,
+    IAssociationExpander,
+)
 from my_agents.contracts.ports.core_profile_updater import ICoreProfileUpdater
 from my_agents.contracts.ports.logger import NOOP_LOGGER
 from my_agents.contracts.secret import SecretStr
@@ -550,3 +555,53 @@ def test_build_cli_skips_mlx_lora_association_when_unavailable(
     assert is_ok(result)
     assert captured["checked_adapter_path"] == adapter_dir
     assert captured["association_expander"] is None
+
+
+def test_build_and_run_cli_accept_injected_association_expander(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class InjectedExpander(IAssociationExpander):
+        async def expand(
+            self,
+            request: AssociationExpandRequest,
+        ) -> Result[AssociationExpandOutcome, AssociationExpandError]:
+            return Ok(
+                AssociationExpandOutcome(
+                    root=request.topic,
+                    tree_summary=f"root: {request.topic}",
+                    lateral_ideas=(),
+                )
+            )
+
+    class FailIfCalledMlxGenerator:
+        @staticmethod
+        def is_available(_adapter_path: Path) -> bool:
+            raise AssertionError("default MLX wiring should not run when injected")
+
+    captured: dict[str, object] = {}
+    injected = InjectedExpander()
+    _patch_runner(monkeypatch, captured, "注入済み")
+    monkeypatch.setattr(
+        "my_agents.composition.MlxLoraAssociationGenerator",
+        FailIfCalledMlxGenerator,
+    )
+    outputs: list[str] = []
+    env = {
+        **_VALID_ENV,
+        "MLX_LORA_ADAPTER_PATH": str(tmp_path / "adapters"),
+        "MEMORY_PATH": str(tmp_path / "memory"),
+    }
+
+    exit_code = run_cli(
+        argv=(),
+        env=env,
+        env_path=tmp_path / ".env",
+        read_input=_read_inputs(["こんにちは", "exit"]),
+        write_output=outputs.append,
+        association_expander=injected,
+    )
+
+    assert exit_code == 0
+    assert captured["association_expander"] is injected
+    assert "\nAI > 注入済み" in outputs

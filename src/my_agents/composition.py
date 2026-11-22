@@ -21,7 +21,11 @@ from my_agents.infrastructure.mlx_lora_association_generator import (
     MlxLoraAssociationGenerator,
 )
 from my_agents.infrastructure.pydantic_ai_runner import PydanticAIAgentRunner
-from my_agents.infrastructure.settings import SettingsError, load_app_settings
+from my_agents.infrastructure.settings import (
+    AppSettings,
+    SettingsError,
+    load_app_settings,
+)
 from my_agents.presentation.cli.args import (
     CliArgsError,
     CliHelp,
@@ -35,6 +39,20 @@ from my_agents.usecases.send_message import SendMessageHandler
 from my_agents.usecases.update_core_profile import UpdateCoreProfileHandler
 
 
+def _build_association_expander(
+    settings: AppSettings,
+) -> IAssociationExpander | None:
+    if settings.mlx_lora_adapter_path is None:
+        return None
+    if not MlxLoraAssociationGenerator.is_available(settings.mlx_lora_adapter_path):
+        return None
+    generator = MlxLoraAssociationGenerator.from_settings(
+        settings.mlx_lora_model,
+        settings.mlx_lora_adapter_path,
+    )
+    return ExpandAssociationsHandler(generator)
+
+
 def build_cli(
     *,
     env: Mapping[str, str] | None = None,
@@ -44,6 +62,7 @@ def build_cli(
     write_error: Callable[[str], None] = write_stderr,
     debug: bool = False,
     logger: IAppLogger = NOOP_LOGGER,
+    association_expander: IAssociationExpander | None = None,
 ) -> Result[CliRepl, SettingsError]:
     resolved_env_path = Path(env_path) if env_path is not None else Path.cwd() / ".env"
 
@@ -55,20 +74,15 @@ def build_cli(
     store = MarkdownCoreProfileStore.from_memory_dir(settings.memory_dir)
     get_core_profile = GetCoreProfileHandler(store)
     update_core_profile = UpdateCoreProfileHandler(store)
-    association_expander: IAssociationExpander | None = None
-    if (
-        settings.mlx_lora_adapter_path is not None
-        and MlxLoraAssociationGenerator.is_available(settings.mlx_lora_adapter_path)
-    ):
-        generator = MlxLoraAssociationGenerator.from_settings(
-            settings.mlx_lora_model,
-            settings.mlx_lora_adapter_path,
-        )
-        association_expander = ExpandAssociationsHandler(generator)
+    resolved_expander = (
+        association_expander
+        if association_expander is not None
+        else _build_association_expander(settings)
+    )
     agent_runner = PydanticAIAgentRunner.from_settings(
         settings,
         core_profile_updater=update_core_profile,
-        association_expander=association_expander,
+        association_expander=resolved_expander,
     )
     send_message = SendMessageHandler(agent_runner, get_core_profile)
     return Ok(
@@ -93,6 +107,7 @@ def run_cli(
     write_output: Callable[[str], None] = print,
     write_error: Callable[[str], None] = write_stderr,
     logger: IAppLogger | None = None,
+    association_expander: IAssociationExpander | None = None,
 ) -> int:
     raw_argv = sys.argv[1:] if argv is None else argv
     parsed = parse_cli_args(raw_argv)
@@ -139,6 +154,7 @@ def run_cli(
             write_error=write_error,
             debug=options.debug,
             logger=active_logger,
+            association_expander=association_expander,
         )
         if is_err(result):
             active_logger.log(
