@@ -16,13 +16,21 @@ from pydantic_ai.messages import (
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from my_agents.composition import build_cli, run_cli
+from my_agents.contracts.messages import ChatMessage
 from my_agents.contracts.ports.association_expander import (
     AssociationExpandError,
     AssociationExpandOutcome,
     AssociationExpandRequest,
     IAssociationExpander,
 )
+from my_agents.contracts.ports.chat_recall import IChatRecall
 from my_agents.contracts.ports.core_profile_updater import ICoreProfileUpdater
+from my_agents.contracts.ports.episode_summarizer import (
+    EpisodeSummarizerError,
+    EpisodeSummaryOutcome,
+    EpisodeSummaryRequest,
+    IEpisodeSummarizer,
+)
 from my_agents.contracts.ports.logger import NOOP_LOGGER
 from my_agents.contracts.secret import SecretStr
 from my_agents.domain.context_assembler import assemble_instructions
@@ -38,6 +46,21 @@ _VALID_ENV = {
 }
 
 
+class StubSummarizer(IEpisodeSummarizer):
+    def __init__(self) -> None:
+        self.requests: list[EpisodeSummaryRequest] = []
+
+    @classmethod
+    def from_settings(cls, _settings: AppSettings) -> IEpisodeSummarizer:
+        return cls()
+
+    async def summarize(
+        self, request: EpisodeSummaryRequest
+    ) -> Result[EpisodeSummaryOutcome, EpisodeSummarizerError]:
+        self.requests.append(request)
+        return Ok(EpisodeSummaryOutcome("話題", "概要", "要約"))
+
+
 def _patch_runner(
     monkeypatch: pytest.MonkeyPatch,
     captured: dict[str, object],
@@ -45,6 +68,7 @@ def _patch_runner(
 ) -> None:
     def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
         captured["instructions"] = info.instructions
+        captured["messages"] = messages
         last_message = messages[-1]
         assert isinstance(last_message, ModelRequest)
         last_part = last_message.parts[0]
@@ -60,6 +84,7 @@ def _patch_runner(
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
             association_expander: IAssociationExpander | None = None,
+            chat_recall: IChatRecall | None = None,
         ) -> PydanticAIAgentRunner:
             captured["model_name"] = settings.model_name
             captured["base_url"] = settings.base_url
@@ -67,13 +92,18 @@ def _patch_runner(
             captured["memory_dir"] = settings.memory_dir
             captured["updater"] = core_profile_updater
             captured["association_expander"] = association_expander
+            captured["chat_recall"] = chat_recall
             return PydanticAIAgentRunner(
                 FunctionModel(respond),
                 core_profile_updater=core_profile_updater,
                 association_expander=association_expander,
+                chat_recall=chat_recall,
             )
 
     monkeypatch.setattr("my_agents.composition.PydanticAIAgentRunner", StubRunner)
+    monkeypatch.setattr(
+        "my_agents.composition.PydanticAIEpisodeSummarizer", StubSummarizer
+    )
 
 
 def _patch_core_memory_runner(
@@ -109,17 +139,23 @@ def _patch_core_memory_runner(
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
             association_expander: IAssociationExpander | None = None,
+            chat_recall: IChatRecall | None = None,
         ) -> PydanticAIAgentRunner:
             captured["memory_dir"] = settings.memory_dir
             captured["updater"] = core_profile_updater
             captured["association_expander"] = association_expander
+            captured["chat_recall"] = chat_recall
             return PydanticAIAgentRunner(
                 FunctionModel(respond),
                 core_profile_updater=core_profile_updater,
                 association_expander=association_expander,
+                chat_recall=chat_recall,
             )
 
     monkeypatch.setattr("my_agents.composition.PydanticAIAgentRunner", StubRunner)
+    monkeypatch.setattr(
+        "my_agents.composition.PydanticAIEpisodeSummarizer", StubSummarizer
+    )
 
 
 def _read_inputs(inputs: list[str]) -> Callable[[str], str]:
@@ -164,7 +200,9 @@ def test_build_cli_wires_runner_into_cli(
     assert captured["memory_dir"] == tmp_path / "agent-memory"
     assert captured["updater"] is not None
     assert captured["association_expander"] is None
-    assert captured["instructions"] == assemble_instructions(CoreProfile.empty())
+    assert captured["instructions"] == assemble_instructions(
+        CoreProfile.empty(), recall_tools_enabled=True
+    )
     assert captured["prompt"] == "こんにちは"
     assert "\nAI > 配線済み" in outputs
 
@@ -239,7 +277,9 @@ def test_run_cli_returns_zero_and_uses_default_env_path(
     assert captured["base_url"] == "https://file.example.com/v1"
     assert captured["api_key"] == SecretStr("file-secret")
     assert captured["memory_dir"] == tmp_path / "memory"
-    assert captured["instructions"] == assemble_instructions(CoreProfile.empty())
+    assert captured["instructions"] == assemble_instructions(
+        CoreProfile.empty(), recall_tools_enabled=True
+    )
     assert captured["prompt"] == "質問"
     assert "\nAI > 応答" in outputs
 
@@ -341,12 +381,14 @@ def test_run_cli_debug_and_explicit_log_file_record_runtime_errors(
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
             association_expander: IAssociationExpander | None = None,
+            chat_recall: IChatRecall | None = None,
         ) -> PydanticAIAgentRunner:
             return PydanticAIAgentRunner(
                 FunctionModel(failing_respond),
                 api_key=settings.api_key,
                 core_profile_updater=core_profile_updater,
                 association_expander=association_expander,
+                chat_recall=chat_recall,
             )
 
     monkeypatch.setattr(
@@ -605,3 +647,101 @@ def test_build_and_run_cli_accept_injected_association_expander(
     assert exit_code == 0
     assert captured["association_expander"] is injected
     assert "\nAI > 注入済み" in outputs
+
+
+def test_cli_persists_chat_displays_history_resumes_and_clears(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    captured: dict[str, object] = {}
+    _patch_runner(monkeypatch, captured, "stored answer")
+    summarizer = StubSummarizer()
+    db_path = tmp_path / "chat-data" / "conversation.sqlite"
+    outputs: list[str] = []
+    errors: list[str] = []
+    env = {
+        **_VALID_ENV,
+        "MEMORY_PATH": str(tmp_path / "memory"),
+        "CHATS_DB_PATH": str(db_path),
+    }
+
+    def run(inputs: list[str]) -> None:
+        assert (
+            run_cli(
+                [],
+                env=env,
+                env_path=tmp_path / ".env",
+                read_input=_read_inputs(inputs),
+                write_output=outputs.append,
+                write_error=errors.append,
+                logger=NOOP_LOGGER,
+                episode_summarizer=summarizer,
+            )
+            == 0
+        )
+
+    run(["first question", "/history", "/history 1", "exit"])
+    assert db_path.is_file()
+    assert "(進行中)" in "\n".join(outputs)
+    assert "You > first question" in outputs
+    assert "AI > stored answer" in outputs
+    assert summarizer.requests == [
+        EpisodeSummaryRequest(
+            "first question",
+            "",
+            (
+                ChatMessage("user", "first question"),
+                ChatMessage("assistant", "stored answer"),
+            ),
+        )
+    ]
+    outputs.clear()
+    run(["second question", "/history", "/history 1", "/clear", "exit"])
+    assert "## 直近の話題のサマリー" in str(captured["instructions"])
+    assert "first question" in str(captured["messages"])
+    assert "  概要" in outputs
+    assert "\nサマリー\n要約" in outputs
+    assert "You > first question" in outputs
+    assert "You > second question" in outputs
+    assert (summarizer.requests[1].previous_summary, summarizer.requests[1].turns) == (
+        "要約",
+        (
+            ChatMessage("user", "second question"),
+            ChatMessage("assistant", "stored answer"),
+        ),
+    )
+    outputs.clear()
+    run(["fresh question", "/history", "/history 2", "exit"])
+    assert "## 過去の会話サマリー一覧" in str(captured["instructions"])
+    assert "## 直近の話題のサマリー" not in str(captured["instructions"])
+    assert "first question" not in str(captured["messages"])
+    assert "You > first question" in outputs
+    assert "You > second question" in outputs
+    assert errors == []
+    recall = captured["chat_recall"]
+    assert isinstance(recall, IChatRecall)
+    [old] = recall.search_episodes("first question").unwrap()
+    assert old.turn_count == 4
+    assert (
+        recall.recall_episode(old.episode_id).unwrap().turns[-1].content
+        == "stored answer"
+    )
+
+
+def test_history_detail_without_summary_and_closed_listing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_runner(monkeypatch, {}, "reply")
+    outputs: list[str] = []
+    env = {**_VALID_ENV, "MEMORY_PATH": str(tmp_path)}
+    cli = build_cli(
+        env=env,
+        env_path=tmp_path / ".env",
+        read_input=_read_inputs(["first", "/history 1", "/clear", "/history", "exit"]),
+        write_output=outputs.append,
+    ).unwrap()
+    cli.run()
+    assert "You > first" in outputs
+    assert not any("サマリー\n" in output for output in outputs)
+    assert any(
+        output.startswith("1.") and output.endswith("話題 (2 件)") for output in outputs
+    )

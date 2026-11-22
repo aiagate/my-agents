@@ -34,6 +34,13 @@ from my_agents.contracts.ports.association_expander import (
     AssociationExpandRequest,
     IAssociationExpander,
 )
+from my_agents.contracts.ports.chat_recall import (
+    ChatRecallError,
+    ChatRecallErrorType,
+    ChatSearchHit,
+    IChatRecall,
+    RecalledEpisode,
+)
 from my_agents.contracts.ports.core_profile_updater import (
     CoreMemoryUpdateAction,
     CoreMemoryUpdateCommand,
@@ -233,6 +240,59 @@ def _build_association_toolset(
     return FunctionToolset(tools=[tool])
 
 
+def _format_recall_error(error: ChatRecallError) -> str:
+    match error.type:
+        case ChatRecallErrorType.INVALID_INPUT:
+            return f"Invalid chat history request: {error.message}"
+        case ChatRecallErrorType.NOT_FOUND:
+            return f"Conversation not found: {error.message}"
+        case ChatRecallErrorType.STORAGE_ERROR:
+            return f"Could not read conversation history: {error.message}"
+        case _:
+            assert_never(error.type)
+
+
+def _build_chat_recall_toolset(recall: IChatRecall) -> FunctionToolset[None]:
+    def recall_conversation(
+        episode_id: Annotated[
+            str,
+            Field(description="Episode ID from the summary index or search results."),
+        ],
+        limit: Annotated[
+            int,
+            Field(description="Maximum number of recent dialogue messages to return."),
+        ] = 40,
+    ) -> RecalledEpisode | str:
+        result = recall.recall_episode(episode_id, limit=limit)
+        return _format_recall_error(result.error) if is_err(result) else result.value
+
+    def search_conversations(
+        query: Annotated[
+            str,
+            Field(
+                description="Literal term to look for in titles, summaries, and dialogue."
+            ),
+        ],
+        limit: Annotated[
+            int, Field(description="Maximum number of matching episodes to return.")
+        ] = 10,
+    ) -> tuple[ChatSearchHit, ...] | str:
+        result = recall.search_episodes(query, limit=limit)
+        return _format_recall_error(result.error) if is_err(result) else result.value
+
+    recall_tool: Tool[None] = Tool(
+        recall_conversation,
+        description="Retrieve summary and recent dialogue for a specific past conversation by episode ID.",
+        takes_ctx=False,
+    )
+    search_tool: Tool[None] = Tool(
+        search_conversations,
+        description="Find past conversations that mention a term and return compact results with episode IDs.",
+        takes_ctx=False,
+    )
+    return FunctionToolset(tools=[recall_tool, search_tool])
+
+
 class PydanticAIAgentRunner(IAgentRunner):
     def __init__(
         self,
@@ -241,6 +301,7 @@ class PydanticAIAgentRunner(IAgentRunner):
         api_key: SecretStr | None = None,
         core_profile_updater: ICoreProfileUpdater | None = None,
         association_expander: IAssociationExpander | None = None,
+        chat_recall: IChatRecall | None = None,
         usage_limits: UsageLimits = DEFAULT_USAGE_LIMITS,
     ) -> None:
         self._agent: Agent[None, str]
@@ -251,6 +312,7 @@ class PydanticAIAgentRunner(IAgentRunner):
         self._api_key = api_key
         self._core_profile_updater = core_profile_updater
         self._association_expander = association_expander
+        self._chat_recall = chat_recall
         self._usage_limits = usage_limits
 
     @classmethod
@@ -260,6 +322,7 @@ class PydanticAIAgentRunner(IAgentRunner):
         *,
         core_profile_updater: ICoreProfileUpdater | None = None,
         association_expander: IAssociationExpander | None = None,
+        chat_recall: IChatRecall | None = None,
         usage_limits: UsageLimits = DEFAULT_USAGE_LIMITS,
     ) -> PydanticAIAgentRunner:
         pydantic_ai.BANNER_ENABLED = False
@@ -275,6 +338,7 @@ class PydanticAIAgentRunner(IAgentRunner):
             api_key=settings.api_key,
             core_profile_updater=core_profile_updater,
             association_expander=association_expander,
+            chat_recall=chat_recall,
             usage_limits=usage_limits,
         )
 
@@ -297,6 +361,8 @@ class PydanticAIAgentRunner(IAgentRunner):
             )
         if self._association_expander is not None:
             toolsets.append(_build_association_toolset(self._association_expander))
+        if self._chat_recall is not None:
+            toolsets.append(_build_chat_recall_toolset(self._chat_recall))
         try:
             result = await self._agent.run(
                 user_input,

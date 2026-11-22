@@ -1,5 +1,6 @@
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pydantic_ai
@@ -35,6 +36,14 @@ from my_agents.contracts.ports.association_expander import (
     AssociationExpandOutcome,
     AssociationExpandRequest,
     IAssociationExpander,
+)
+from my_agents.contracts.ports.chat_recall import (
+    ChatRecallError,
+    ChatRecallErrorType,
+    ChatSearchHit,
+    IChatRecall,
+    RecalledEpisode,
+    RecalledTurn,
 )
 from my_agents.contracts.ports.core_profile_updater import (
     CoreMemoryUpdateCommand,
@@ -1018,3 +1027,97 @@ async def test_registers_both_toolsets_when_both_collaborators_exist() -> None:
 
     assert is_ok(result)
     assert result.unwrap() == AgentReply(content="ok")
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("kind", "recall_text", "search_text"),
+    [
+        (None, "全文", "概要"),
+        (
+            ChatRecallErrorType.INVALID_INPUT,
+            "Invalid chat history request: failed",
+            "Invalid chat history request: failed",
+        ),
+        (
+            ChatRecallErrorType.NOT_FOUND,
+            "Conversation not found: failed",
+            "Conversation not found: failed",
+        ),
+        (
+            ChatRecallErrorType.STORAGE_ERROR,
+            "Could not read conversation history: failed",
+            "Could not read conversation history: failed",
+        ),
+    ],
+)
+async def test_chat_recall_tools_publish_schemas_and_return_data(
+    kind: ChatRecallErrorType | None, recall_text: str, search_text: str
+) -> None:
+    calls: list[tuple[str, int]] = []
+    now = datetime(2026, 11, 22, tzinfo=UTC)
+
+    class Recall(IChatRecall):
+        def recall_episode(
+            self, episode_id: str, *, limit: int = 40
+        ) -> Result[RecalledEpisode, ChatRecallError]:
+            calls.append((episode_id, limit))
+            if kind is not None:
+                return Err(ChatRecallError(kind, "failed"))
+            return Ok(
+                RecalledEpisode(
+                    episode_id,
+                    "題名",
+                    "概要",
+                    "要約",
+                    now,
+                    now,
+                    (RecalledTurn(1, "user", "全文", now),),
+                    1,
+                    False,
+                )
+            )
+
+        def search_episodes(
+            self, query: str, *, limit: int = 10
+        ) -> Result[tuple[ChatSearchHit, ...], ChatRecallError]:
+            calls.append((query, limit))
+            if kind is not None:
+                return Err(ChatRecallError(kind, "failed"))
+            return Ok((ChatSearchHit("id", "題名", "概要", now, now, 1),))
+
+    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+        tools = {tool.name: tool for tool in info.function_tools}
+        for name, parameter, default in (
+            ("recall_conversation", "episode_id", 40),
+            ("search_conversations", "query", 10),
+        ):
+            tool = tools[name]
+            assert tool.description
+            properties = tool.parameters_json_schema["properties"]
+            assert properties[parameter]["description"]
+            assert properties["limit"]["description"]
+            assert properties["limit"]["default"] == default
+        if not calls:
+            return ModelResponse(
+                [
+                    ToolCallPart("recall_conversation", {"episode_id": "id"}),
+                    ToolCallPart("search_conversations", {"query": "term", "limit": 3}),
+                ]
+            )
+        last = messages[-1]
+        assert isinstance(last, ModelRequest)
+        returned = {
+            part.tool_name: str(part.content)
+            for part in last.parts
+            if isinstance(part, ToolReturnPart)
+        }
+        assert recall_text in returned["recall_conversation"]
+        assert search_text in returned["search_conversations"]
+        return ModelResponse([TextPart("検索しました")])
+
+    runner = PydanticAIAgentRunner(FunctionModel(respond), chat_recall=Recall())
+    assert (
+        await runner.run("検索", history=(), instructions="指示")
+    ).unwrap().content == "検索しました"
+    assert sorted(calls) == [("id", 40), ("term", 3)]

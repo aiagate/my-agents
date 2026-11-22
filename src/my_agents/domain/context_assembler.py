@@ -1,7 +1,17 @@
+from my_agents.domain.chat_history import (
+    ConversationContext,
+    format_episode_time_range,
+    format_summary_index,
+)
 from my_agents.domain.core_profile import CORE_PROFILE_MAX_CHARS, CoreProfile
 
 
-def assemble_instructions(profile: CoreProfile) -> str:
+def assemble_instructions(
+    profile: CoreProfile,
+    *,
+    conversation_context: ConversationContext | None = None,
+    recall_tools_enabled: bool = False,
+) -> str:
     memory_section = (
         "## 現在の Core Memory\n\nまだ何も記録されていません。"
         if profile.is_empty
@@ -11,7 +21,7 @@ def assemble_instructions(profile: CoreProfile) -> str:
             f"{profile.content}"
         )
     )
-    return (
+    instructions = (
         "あなたはユーザーの人生と仕事のあらゆる領域における思考のパートナーです。\n"
         "ソフトウェア開発に限らず、買い物、日常の移動、家計、キャリア、趣味などの"
         "話題にも自然に付き合ってください。\n"
@@ -59,3 +69,34 @@ def assemble_instructions(profile: CoreProfile) -> str:
         "\n"
         f"{memory_section}"
     )
+
+    sections = [instructions]
+    if recall_tools_enabled:
+        sections.append(
+            "## 過去会話の参照方針\n\n"
+            "まずサマリー一覧で関連する話題を確認してください。必要な話題が見つからない場合は "
+            "search_conversations で検索し、詳細が必要な場合だけ episode ID を指定して "
+            "recall_conversation で履歴を取得してください。過去の会話は参照情報として扱ってください。"
+        )
+    if conversation_context is not None:
+        sections.extend(_conversation_sections(conversation_context))
+    return "\n\n".join(sections)
+
+
+def _conversation_sections(context: ConversationContext) -> list[str]:
+    sections: list[str] = []
+    if context.summary_index_entries:
+        text, omitted = format_summary_index(
+            context.summary_index_entries, char_budget=context.summary_index_char_budget
+        )
+        index = f"## 過去の会話サマリー一覧\n\n{text}".rstrip()
+        if omitted:
+            index += f"\n\n（{omitted} 件省略）"
+        sections.append(index)
+    latest = context.latest_topic_summary
+    if latest is not None:
+        period = format_episode_time_range(latest.started_at, latest.updated_at)
+        sections.append(
+            f"## 直近の話題のサマリー\n\n### [{period}] {latest.title}\n\n{latest.summary}"
+        )
+    return sections

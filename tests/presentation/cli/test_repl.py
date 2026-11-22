@@ -1,9 +1,11 @@
 from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from flow_res import Err, Ok, Result
 
-from my_agents.contracts.messages import AgentReply, ChatMessage
+from my_agents.contracts.messages import AgentReply, ChatMessage, ChatWarning
 from my_agents.contracts.ports.agent_runner import (
     AgentRunnerError,
     IAgentRunner,
@@ -15,11 +17,20 @@ from my_agents.contracts.ports.core_profile_store import (
 from my_agents.contracts.ports.logger import IAppLogger, LogEntry, LogLevel
 from my_agents.domain.context_assembler import assemble_instructions
 from my_agents.domain.core_profile import CoreProfile
+from my_agents.infrastructure.sqlite_chat_repository import SqliteChatRepository
 from my_agents.presentation.cli import (
     CliRepl,
     GetCoreProfileUseCase,
     SendMessageUseCase,
 )
+from my_agents.usecases.clear_chat import (
+    ClearChatError,
+    ClearChatErrorType,
+    ClearChatHandler,
+    ClearChatResponse,
+)
+from my_agents.usecases.finalize_chat import FinalizeChatResponse
+from my_agents.usecases.get_chat_history import GetChatHistoryHandler
 from my_agents.usecases.get_core_profile import (
     GetCoreProfileError,
     GetCoreProfileErrorType,
@@ -33,12 +44,16 @@ from my_agents.usecases.send_message import (
     SendMessageRequest,
     SendMessageResponse,
 )
+from my_agents.usecases.summarize_episodes import SummarizeEpisodesResponse
+from tests.usecases.test_clear_chat import RecordingSummarizer
 
 _START_BANNER = "会話を開始します。コマンド: /help  終了: exit / quit"
 _END_BANNER = "\n会話を終了しました。"
 _HELP_OUTPUT = (
     "\n利用可能なコマンド:"
     "\n  /core   Core Memory を表示"
+    "\n  /history  過去の会話を一覧表示"
+    "\n  /history <番号>  会話の詳細を表示"
     "\n  /clear  会話履歴をリセット"
     "\n  /help   このヘルプを表示"
     "\n  exit / quit  終了"
@@ -616,3 +631,326 @@ def test_send_message_handler_satisfies_protocol_end_to_end() -> None:
             assemble_instructions(CoreProfile.empty()),
         )
     ]
+
+
+def test_history_commands_validate_numbers_and_display_empty_history(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chats.db"
+    outputs: list[str] = []
+    errors: list[str] = []
+    send = FakeSendMessageUseCase([])
+    CliRepl(
+        send,
+        _empty_get_core_profile(),
+        get_chat_history=GetChatHistoryHandler(SqliteChatRepository(path)),
+        read_input=_read_inputs(
+            [
+                "/HISTORY",
+                "/history nope",
+                "/history 1 2",
+                "/history 0",
+                "/history 1",
+                "exit",
+            ]
+        ),
+        write_output=outputs.append,
+        write_error=errors.append,
+    ).run()
+    assert not path.exists()
+    assert send.requests == []
+    assert outputs == [
+        _START_BANNER,
+        f"\n会話履歴: {path}",
+        "(会話履歴はありません)",
+        "\n会話を終了しました。",
+    ]
+    assert errors == [
+        "\nError: /history <番号> には正の整数を指定してください。"
+    ] * 3 + ["\nError: 一覧に表示された会話の番号を指定してください。"]
+
+
+def test_history_command_without_history_use_case_reports_unavailable() -> None:
+    send = FakeSendMessageUseCase([])
+    _prompts, outputs, errors = _run_repl(send, ["/history", "exit"])
+    assert send.requests == []
+    assert outputs == [_START_BANNER, "\n会話を終了しました。"]
+    assert errors == ["\nError: 会話履歴は利用できません。"]
+
+
+def test_history_commands_report_read_errors_in_debug_mode(tmp_path: Path) -> None:
+    path = tmp_path / "chats.db"
+    path.write_text("broken")
+    logger = RecordingLogger()
+    errors: list[str] = []
+    CliRepl(
+        FakeSendMessageUseCase([]),
+        _empty_get_core_profile(),
+        get_chat_history=GetChatHistoryHandler(SqliteChatRepository(path)),
+        read_input=_read_inputs(["/history", "/history 1", "exit"]),
+        write_output=lambda _text: None,
+        write_error=errors.append,
+        logger=logger,
+        debug=True,
+    ).run()
+    assert (
+        errors
+        == [
+            "\nError: 会話履歴を読み込めませんでした。",
+            "Debug [STORAGE_ERROR]: file is not a database",
+        ]
+        * 2
+    )
+    assert [
+        (entry.level, entry.event, entry.error_type, entry.message)
+        for entry in logger.entries
+    ] == [
+        (
+            LogLevel.ERROR,
+            "chat_history_list_failed",
+            "STORAGE_ERROR",
+            "file is not a database",
+        ),
+        (
+            LogLevel.ERROR,
+            "chat_history_detail_failed",
+            "STORAGE_ERROR",
+            "file is not a database",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("debug", [False, True])
+def test_send_clear_and_finalize_display_and_log_warnings_in_order(debug: bool) -> None:
+    warning = ChatWarning(
+        "append_failed", "WRITE_FAILED", "disk full", "保存できません。", "details\n"
+    )
+    clear_warning = ChatWarning(
+        "summary_failed", "API_ERROR", "bad response", "要約できません。"
+    )
+    clear_error = ClearChatError(
+        ClearChatErrorType.STORAGE_ERROR,
+        "close denied",
+        "閉じられません。",
+        (clear_warning,),
+    )
+    exit_warning = ChatWarning(
+        "finalize_failed",
+        "READ_FAILED",
+        "read denied",
+        "終了時の履歴を読み込めません。",
+    )
+    events: list[str] = []
+    logger = RecordingLogger()
+
+    class Clear:
+        async def execute(self) -> Result[ClearChatResponse, ClearChatError]:
+            events.append("clear invoked")
+            return Err(clear_error)
+
+    class Finalize:
+        async def execute(self) -> FinalizeChatResponse:
+            events.append("finalize invoked")
+            return FinalizeChatResponse((exit_warning,))
+
+    send = FakeSendMessageUseCase(
+        [
+            Ok(
+                SendMessageResponse(
+                    "reply",
+                    (ChatMessage("assistant", "reply"),),
+                    ("update",),
+                    (warning,),
+                )
+            ),
+            Ok(SendMessageResponse("next reply", ())),
+        ]
+    )
+    CliRepl(
+        send,
+        _empty_get_core_profile(),
+        clear_chat=Clear(),
+        finalize_chat=Finalize(),
+        read_input=_read_inputs(["message", "/clear", "next", "exit"]),
+        write_output=events.append,
+        write_error=events.append,
+        logger=logger,
+        debug=debug,
+    ).run()
+    expected = [
+        _START_BANNER,
+        "\n[Core Memory updated: update]",
+        "\nAI > reply",
+        "Warning: 保存できません。",
+        "Debug [WRITE_FAILED]: disk full",
+        "details",
+        "clear invoked",
+        "Warning: 要約できません。",
+        "Debug [API_ERROR]: bad response",
+        "\nError: 閉じられません。",
+        "Debug [STORAGE_ERROR]: close denied",
+        "\nAI > next reply",
+        "finalize invoked",
+        "Warning: 終了時の履歴を読み込めません。",
+        "Debug [READ_FAILED]: read denied",
+        "\n会話を終了しました。",
+    ]
+    if not debug:
+        expected = [
+            line
+            for line in expected
+            if not line.startswith("Debug ") and line != "details"
+        ]
+    assert events == expected
+    assert send.requests[-1] == SendMessageRequest(
+        "next", (ChatMessage("assistant", "reply"),)
+    )
+    assert [
+        (entry.level, entry.event, entry.error_type, entry.message)
+        for entry in logger.entries
+    ] == [
+        (LogLevel.WARNING, "append_failed", "WRITE_FAILED", "disk full"),
+        (LogLevel.WARNING, "summary_failed", "API_ERROR", "bad response"),
+        (LogLevel.ERROR, "clear_chat_failed", "STORAGE_ERROR", "close denied"),
+        (LogLevel.WARNING, "finalize_failed", "READ_FAILED", "read denied"),
+    ]
+
+
+def test_interrupt_during_clear_then_finalize_still_exits() -> None:
+    events: list[str] = []
+
+    class InterruptClear:
+        async def execute(self) -> Result[ClearChatResponse, ClearChatError]:
+            events.append("clear invoked")
+            raise KeyboardInterrupt
+
+    class InterruptFinalize:
+        async def execute(self) -> FinalizeChatResponse:
+            events.append("finalize invoked")
+            raise KeyboardInterrupt
+
+    CliRepl(
+        FakeSendMessageUseCase([]),
+        _empty_get_core_profile(),
+        clear_chat=InterruptClear(),
+        finalize_chat=InterruptFinalize(),
+        read_input=_read_inputs(["/clear"]),
+        write_output=events.append,
+        write_error=events.append,
+    ).run()
+    assert events == [
+        _START_BANNER,
+        "clear invoked",
+        "finalize invoked",
+        "\n会話を終了しました。",
+    ]
+
+
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_reply_and_save_warnings_are_displayed_before_summary(interrupt: bool) -> None:
+    events: list[str] = []
+    warning = ChatWarning("save_failed", "WRITE_FAILED", "disk full", "保存失敗")
+    summary_warning = ChatWarning("summary_failed", "API_ERROR", "offline", "要約失敗")
+
+    class Summarize:
+        async def execute(
+            self, episode_ids: tuple[str, ...]
+        ) -> SummarizeEpisodesResponse:
+            assert episode_ids == ("episode",)
+            events.append("summary started")
+            if interrupt:
+                raise KeyboardInterrupt
+            return SummarizeEpisodesResponse((summary_warning,))
+
+    send = FakeSendMessageUseCase(
+        [
+            Ok(
+                SendMessageResponse(
+                    "reply",
+                    (),
+                    ("update",),
+                    (warning,),
+                    ("episode",),
+                )
+            )
+        ]
+    )
+    prompts = iter(("message", "quit"))
+
+    def read_input(_prompt: str) -> str:
+        value = next(prompts)
+        events.append(f"input {value}")
+        return value
+
+    CliRepl(
+        send,
+        _empty_get_core_profile(),
+        summarize_episodes=Summarize(),
+        read_input=read_input,
+        write_output=events.append,
+        write_error=events.append,
+    ).run()
+    expected = [
+        _START_BANNER,
+        "input message",
+        "\n[Core Memory updated: update]",
+        "\nAI > reply",
+        "Warning: 保存失敗",
+        "summary started",
+    ]
+    if not interrupt:
+        expected.extend(("Warning: 要約失敗", "input quit"))
+    assert events == [*expected, _END_BANNER]
+
+
+def test_history_marks_open_episode_after_clock_moves_backward(tmp_path: Path) -> None:
+    repo = SqliteChatRepository(tmp_path / "chats.db")
+    runner = FakeAgentRunner("reply")
+    profile = _empty_get_core_profile()
+    noon = datetime(2026, 11, 22, 12, tzinfo=UTC)
+    eleven = noon - timedelta(hours=1)
+    now = noon
+    prompts = iter(
+        (
+            (noon, "before clear"),
+            (eleven, "/clear"),
+            (eleven, "new chat"),
+            (eleven + timedelta(minutes=1), "follow-up"),
+            (eleven, "/history"),
+            (eleven, "quit"),
+        )
+    )
+
+    def read_input(_prompt: str) -> str:
+        nonlocal now
+        now, command = next(prompts)
+        return command
+
+    outputs: list[str] = []
+    errors: list[str] = []
+    CliRepl(
+        SendMessageHandler(
+            runner, profile, chat_store=repo, chat_query=repo, clock=lambda: now
+        ),
+        profile,
+        get_chat_history=GetChatHistoryHandler(repo),
+        clear_chat=ClearChatHandler(
+            repo, repo, RecordingSummarizer(), clock=lambda: now
+        ),
+        read_input=read_input,
+        write_output=outputs.append,
+        write_error=errors.append,
+    ).run()
+    assert errors == []
+    assert runner.runs[-1][1] == (
+        ChatMessage("user", "new chat"),
+        ChatMessage("assistant", "reply"),
+    )
+    closed, opened = repo.list_episodes().unwrap()
+    assert (closed.started_at, closed.close_reason) == (noon, "clear")
+    assert (opened.started_at, opened.turn_count) == (eleven, 4)
+    assert repo.get_latest_episode().unwrap() == opened
+    headings = [output for output in outputs if output.startswith(("1. ", "2. "))]
+    assert len(headings) == 2
+    assert headings[0].endswith("new title (2 件)")
+    assert headings[1].endswith("new chat (4 件) (進行中)")

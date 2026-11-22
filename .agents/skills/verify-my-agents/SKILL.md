@@ -34,7 +34,7 @@ Drive の前に全項目を確認する。1 つでも崩れたら Drive に入�
 ## Drive
 
 features/ の各レシピを順に実行する。実 API / ローカル MLX 推論が必要な
-のは chat / core-memory / association の 3 枚。API 不要なのは
+のは chat / core-memory / association / chat-history。API 不要なのは
 repl-commands / cli-flags / error-evidence の 3 枚。各レシピは
 helpers/drive.sh で駆動し、トランスクリプトを Evidence に残す。
 

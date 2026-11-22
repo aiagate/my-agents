@@ -24,6 +24,7 @@ my_agents=${MY_AGENTS_BIN:-uv run my-agents}
 out_dir="artifacts/verify/$run_id"
 tmp_dir="$out_dir/tmp"
 memory_dir="$tmp_dir/$name-memory"
+chats_db=${VERIFY_CHATS_DB_PATH:-$memory_dir/chats.db}
 log_file="$tmp_dir/$name-log.jsonl"
 transcript="$out_dir/$name.txt"
 
@@ -38,7 +39,7 @@ mkdir -p "$memory_dir"
 } > "$transcript"
 
 set +e
-MEMORY_PATH="$memory_dir" $my_agents --log-file "$log_file" "$@" < "$commands_file" >> "$transcript" 2>&1
+MEMORY_PATH="$memory_dir" CHATS_DB_PATH="$chats_db" $my_agents --log-file "$log_file" "$@" < "$commands_file" >> "$transcript" 2>&1
 status=$?
 set -e
 

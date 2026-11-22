@@ -15,6 +15,24 @@ from my_agents.contracts.ports.association_generator import (
     AssociationGeneratorErrorType,
     IAssociationGenerator,
 )
+from my_agents.contracts.ports.chat_history import (
+    ChatStorageError,
+    ChatStorageErrorType,
+    DialogueTurnRecord,
+    EpisodeCloseReason,
+    EpisodeRecord,
+    IChatQuery,
+    IChatStore,
+    NewDialogueTurn,
+)
+from my_agents.contracts.ports.chat_recall import (
+    ChatRecallError,
+    ChatRecallErrorType,
+    ChatSearchHit,
+    IChatRecall,
+    RecalledEpisode,
+    RecalledTurn,
+)
 from my_agents.contracts.ports.core_profile_store import (
     CoreProfileStoreError,
     CoreProfileStoreErrorType,
@@ -28,6 +46,13 @@ from my_agents.contracts.ports.core_profile_updater import (
     CoreMemoryUpdateOutcome,
     ICoreProfileUpdater,
 )
+from my_agents.contracts.ports.episode_summarizer import (
+    EpisodeSummarizerError,
+    EpisodeSummarizerErrorType,
+    EpisodeSummaryOutcome,
+    EpisodeSummaryRequest,
+    IEpisodeSummarizer,
+)
 from my_agents.contracts.ports.logger import (
     NOOP_LOGGER,
     IAppLogger,
@@ -37,6 +62,25 @@ from my_agents.contracts.ports.logger import (
 )
 
 __all__ = [
+    "EpisodeSummarizerError",
+    "EpisodeSummarizerErrorType",
+    "EpisodeSummaryOutcome",
+    "EpisodeSummaryRequest",
+    "IEpisodeSummarizer",
+    "ChatRecallError",
+    "ChatRecallErrorType",
+    "ChatSearchHit",
+    "IChatRecall",
+    "RecalledEpisode",
+    "RecalledTurn",
+    "ChatStorageError",
+    "ChatStorageErrorType",
+    "DialogueTurnRecord",
+    "EpisodeCloseReason",
+    "EpisodeRecord",
+    "IChatQuery",
+    "IChatStore",
+    "NewDialogueTurn",
     "NOOP_LOGGER",
     "AgentRunnerError",
     "AgentRunnerErrorType",

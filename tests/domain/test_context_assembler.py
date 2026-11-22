@@ -1,3 +1,10 @@
+from datetime import UTC, datetime
+
+from my_agents.domain.chat_history import (
+    ConversationContext,
+    EpisodeIndexEntry,
+    LatestTopicSummary,
+)
 from my_agents.domain.context_assembler import assemble_instructions
 from my_agents.domain.core_profile import CORE_PROFILE_MAX_CHARS, CoreProfile
 
@@ -54,3 +61,26 @@ def test_assemble_instructions_embeds_profile_and_usage() -> None:
     assert expected_memory in instructions
     assert instructions.endswith(expected_memory)
     assert "まだ何も記録されていません。" not in instructions
+
+
+def test_adds_history_sections_in_order_with_omission_note() -> None:
+    profile = CoreProfile.empty()
+    now = datetime(2026, 11, 22, tzinfo=UTC)
+    entry = EpisodeIndexEntry("older", "調査", "概要", now, now, 2)
+    topic = LatestTopicSummary("newer", "決定", "- 一\n- 二", now, now)
+    context = ConversationContext(topic, (entry,), summary_index_char_budget=1)
+    instructions = assemble_instructions(
+        profile, conversation_context=context, recall_tools_enabled=True
+    )
+    assert instructions.startswith(
+        assemble_instructions(profile) + "\n\n## 過去会話の参照方針"
+    )
+    assert "search_conversations" in instructions
+    assert "recall_conversation" in instructions
+    assert instructions.endswith(
+        "## 過去の会話サマリー一覧\n\n（1 件省略）\n\n## 直近の話題のサマリー\n\n### [11/22 00:00] 決定\n\n- 一\n- 二"
+    )
+    assert assemble_instructions(
+        profile,
+        conversation_context=ConversationContext(summary_index_entries=(entry,)),
+    ).endswith("- [11/22 00:00] (id:older) 調査: 概要")

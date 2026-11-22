@@ -6,6 +6,25 @@ from my_agents.domain.association_tree import (
     build_association_user_prompt,
     parse_association_tree,
 )
+from my_agents.domain.chat_history import (
+    DEFAULT_EPISODE_GAP_MINUTES,
+    DEFAULT_EPISODE_MAX_MESSAGES,
+    DEFAULT_RECENT_MESSAGES_LIMIT,
+    DEFAULT_SUMMARY_EVERY_MESSAGES,
+    DEFAULT_SUMMARY_INDEX_CHAR_BUDGET,
+    EPISODE_OVERVIEW_MAX_CHARS,
+    EPISODE_SUMMARY_MAX_CHARS,
+    EPISODE_TITLE_MAX_CHARS,
+    ConversationContext,
+    EpisodeIndexEntry,
+    LatestTopicSummary,
+    format_episode_time_range,
+    format_summary_index,
+    make_fallback_title,
+    normalize_summary_fields,
+    should_rollover_episode,
+    should_summarize_episode,
+)
 from my_agents.domain.context_assembler import assemble_instructions
 from my_agents.domain.core_profile import (
     CORE_PROFILE_MAX_CHARS,
@@ -15,6 +34,23 @@ from my_agents.domain.core_profile import (
 )
 
 __all__ = [
+    "DEFAULT_EPISODE_GAP_MINUTES",
+    "DEFAULT_EPISODE_MAX_MESSAGES",
+    "DEFAULT_RECENT_MESSAGES_LIMIT",
+    "DEFAULT_SUMMARY_EVERY_MESSAGES",
+    "DEFAULT_SUMMARY_INDEX_CHAR_BUDGET",
+    "EPISODE_OVERVIEW_MAX_CHARS",
+    "EPISODE_SUMMARY_MAX_CHARS",
+    "EPISODE_TITLE_MAX_CHARS",
+    "ConversationContext",
+    "EpisodeIndexEntry",
+    "LatestTopicSummary",
+    "format_episode_time_range",
+    "format_summary_index",
+    "make_fallback_title",
+    "normalize_summary_fields",
+    "should_rollover_episode",
+    "should_summarize_episode",
     "ASSOCIATION_SYSTEM_PROMPT",
     "CORE_PROFILE_MAX_CHARS",
     "AssociationTree",

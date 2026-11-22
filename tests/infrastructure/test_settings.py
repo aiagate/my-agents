@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 from flow_res import is_ok
 
 from my_agents.contracts.secret import SecretStr
@@ -170,3 +171,79 @@ def test_whitespace_mlx_lora_settings_fall_back_to_defaults() -> None:
     assert is_ok(result)
     assert result.unwrap().mlx_lora_model == "mlx-community/Qwen2.5-3B-Instruct-4bit"
     assert result.unwrap().mlx_lora_adapter_path is None
+
+
+def test_chat_settings_defaults_and_summary_inheritance(tmp_path: Path) -> None:
+    settings = load_app_settings(
+        env={
+            "MAGPIE_MODEL": "chat",
+            "MAGPIE_BASE_URL": "https://chat.example",
+            "MAGPIE_API_KEY": "chat-credential",
+            "MEMORY_PATH": str(tmp_path),
+        }
+    ).unwrap()
+    assert settings.resolved_chats_db_path == tmp_path / "chats.db"
+    assert settings.resolved_summary_model_name == "chat"
+    assert settings.resolved_summary_base_url == "https://chat.example"
+    assert settings.resolved_summary_api_key == SecretStr("chat-credential")
+    assert (
+        settings.summary_index_char_budget,
+        settings.summary_every_messages,
+        settings.recent_messages_limit,
+        settings.episode_max_messages,
+        settings.episode_gap_minutes,
+    ) == (16000, 6, 20, 40, 60)
+
+
+def test_chat_settings_overrides(tmp_path: Path) -> None:
+    path = tmp_path / "history.sqlite"
+    settings = load_app_settings(
+        env={
+            "MAGPIE_MODEL": "chat",
+            "MAGPIE_BASE_URL": "https://chat.example",
+            "MAGPIE_API_KEY": "chat-credential",
+            "CHATS_DB_PATH": f" {path} ",
+            "SUMMARY_MODEL": " summary ",
+            "SUMMARY_BASE_URL": " https://summary.example ",
+            "SUMMARY_API_KEY": " summary-credential ",
+            "SUMMARY_INDEX_CHAR_BUDGET": "100",
+            "SUMMARY_EVERY_MESSAGES": "2",
+            "RECENT_MESSAGES_LIMIT": "4",
+            "EPISODE_MAX_MESSAGES": "8",
+            "EPISODE_GAP_MINUTES": "15",
+        }
+    ).unwrap()
+    assert settings.resolved_chats_db_path == path
+    assert settings.resolved_summary_model_name == "summary"
+    assert settings.resolved_summary_base_url == "https://summary.example"
+    assert settings.resolved_summary_api_key == SecretStr("summary-credential")
+    assert (
+        settings.summary_index_char_budget,
+        settings.summary_every_messages,
+        settings.recent_messages_limit,
+        settings.episode_max_messages,
+        settings.episode_gap_minutes,
+    ) == (100, 2, 4, 8, 15)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("SUMMARY_EVERY_MESSAGES", "no"),
+        ("SUMMARY_INDEX_CHAR_BUDGET", "0"),
+        ("RECENT_MESSAGES_LIMIT", "-1"),
+        ("EPISODE_MAX_MESSAGES", ""),
+        ("EPISODE_GAP_MINUTES", "  "),
+    ],
+)
+def test_chat_settings_reject_invalid_integer(name: str, value: str) -> None:
+    env = {
+        "MAGPIE_MODEL": "chat",
+        "MAGPIE_BASE_URL": "https://chat.example",
+        "MAGPIE_API_KEY": "chat-credential",
+        name: value,
+    }
+    assert_err(
+        load_app_settings(env=env),
+        message_contains=f"{name} must be a positive integer.",
+    )
