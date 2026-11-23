@@ -1,0 +1,12 @@
+{{- bos_token + '<|plamo:tag|>' -}}
+{%- for message in messages -%}
+    {{- message['role'] + '<|plamo:msg|>' + message['content'] -}}
+    {%- if message['role'] == 'assistant' -%}
+        {{- eos_token -}}
+    {%- else -%}
+        {{- '<|plamo:tag|>' -}}
+    {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+    {{- 'assistant<|plamo:msg|>' -}}
+{%- endif -%}
