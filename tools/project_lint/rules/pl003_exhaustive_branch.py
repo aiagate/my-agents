@@ -154,7 +154,7 @@ def check_exhaustive_branch(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding
                     col=node.col_offset + 1,
                     message=f"Non-exhaustive {branch} on closed type '{target_name}'.",
                     hint=(
-                        "Use 'match' with 'typing.assert_never' so pyright "
+                        "Use 'match' with 'typing.assert_never' so ty "
                         "catches unhandled values if new Literal/Enum members "
                         "are added."
                     ),

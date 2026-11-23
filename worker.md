@@ -6,12 +6,11 @@
 すべてのタスクで有効である。
 
 - 何かを書く前にリポジトリルートの AGENTS.md を読むこと。規約と強制手段
-  （PL001〜PL023 / Ruff / Pyright / pre-commit）の対応表がある。
-- コミット前に実行: uv run ruff check . && uv run ruff format --check . &&
-  uv run pyright && uv run python -m tools.project_lint
+  （PL001〜PL023 / Ruff / ty / pre-commit）の対応表がある。
+- コミット前に実行: uv run --locked ruff check . && uv run --locked ruff format --check . &&
+  uv run --locked ty check && uv run --locked python -m tools.project_lint
   （サンドボックス等で uv run が ~/.cache/uv へのはじかれで失敗するときは、
-  PATH="$PWD/.venv/bin:$PATH" を前置して .venv/bin/ 側の同一コマンドで検証する。
-  pyright は venv を PATH 解決するため前置が必須）
+  PATH="$PWD/.venv/bin:$PATH" を前置して .venv/bin/ 側の同一ツールで検証する）
 - コミットメッセージは Conventional Commits・英語・命令形
   （.githooks/commit-msg が type・形式・ASCII を検査する）。
 - 説明 Docstring は書かない。契約は型・命名・テストで表す。`#` コメントは

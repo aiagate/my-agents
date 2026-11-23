@@ -14,7 +14,7 @@ from tools.project_lint.common import (
 
 _INLINE_SUPPRESSION_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("type: ignore", re.compile(r"\btype:\s*ignore\b", re.IGNORECASE)),
-    ("pyright: ignore", re.compile(r"\bpyright:\s*ignore\b", re.IGNORECASE)),
+    ("ty: ignore", re.compile(r"\bty:\s*ignore\b", re.IGNORECASE)),
     ("noqa", re.compile(r"\bnoqa\b", re.IGNORECASE)),
     ("pragma: no cover", re.compile(r"\bpragma:\s*no\s+cover\b", re.IGNORECASE)),
 )

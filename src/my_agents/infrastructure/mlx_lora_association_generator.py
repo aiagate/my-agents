@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Iterator, Mapping, Sequence
 from importlib import import_module
 from importlib.util import find_spec
+from operator import attrgetter
 from pathlib import Path
 from typing import Protocol
 
@@ -65,14 +66,14 @@ class MlxLoraAssociationGenerator(IAssociationGenerator):
             )
         mlx_lm = import_module("mlx_lm")
         if self._adapter_path is None:
-            model, tokenizer = mlx_lm.load(self._model_name)
+            loaded = mlx_lm.load(self._model_name)
         else:
-            model, tokenizer = mlx_lm.load(
+            loaded = mlx_lm.load(
                 self._model_name,
                 adapter_path=str(self._adapter_path),
             )
-        loaded_model: object = model
-        renderer: _ChatTemplateRenderer = tokenizer
+        loaded_model: object = loaded[0]
+        renderer: _ChatTemplateRenderer = loaded[1]
         return loaded_model, renderer
 
     async def _ensure_loaded(self) -> tuple[object, _ChatTemplateRenderer]:
@@ -100,9 +101,11 @@ class MlxLoraAssociationGenerator(IAssociationGenerator):
             tokenize=False,
             add_generation_prompt=True,
         )
+        # The optional MLX backend owns the concrete model and tokenizer types.
+        stream_generate = attrgetter("stream_generate")(mlx_lm)
         chunks: Iterator[str] = (
             chunk.text
-            for chunk in mlx_lm.stream_generate(
+            for chunk in stream_generate(
                 model,
                 tokenizer,
                 prompt,

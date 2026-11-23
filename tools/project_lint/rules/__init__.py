@@ -8,7 +8,7 @@ from tools.project_lint.rules.pl002_error_message_assert import (
 )
 from tools.project_lint.rules.pl003_exhaustive_branch import check_exhaustive_branch
 from tools.project_lint.rules.pl004_layer_boundaries import check_layer_boundaries
-from tools.project_lint.rules.pl005_pyright_config import check_strict_pyright_config
+from tools.project_lint.rules.pl005_ty_config import check_strict_ty_config
 from tools.project_lint.rules.pl006_no_docstrings import check_no_docstrings
 from tools.project_lint.rules.pl007_coverage_config import check_strict_coverage_config
 from tools.project_lint.rules.pl008_inline_suppressions import (
@@ -100,7 +100,7 @@ RULES: tuple[LintRule, ...] = (
     _tests_rule("PL002", "assert_error_message", check_assert_error_message),
     _src_rule("PL003", "exhaustive_branch", check_exhaustive_branch),
     _src_rule("PL004", "layer_boundaries", check_layer_boundaries),
-    _pyproject_rule("PL005", "strict_pyright_config", check_strict_pyright_config),
+    _pyproject_rule("PL005", "strict_ty_config", check_strict_ty_config),
     _all_dirs_rule("PL006", "no_docstrings", check_no_docstrings),
     _pyproject_rule("PL007", "strict_coverage_config", check_strict_coverage_config),
     _all_dirs_rule("PL008", "no_inline_suppressions", check_no_inline_suppressions),
@@ -180,7 +180,7 @@ __all__ = [
     "check_no_private_type_in_public_api",
     "check_no_shallow_tests",
     "check_strict_coverage_config",
-    "check_strict_pyright_config",
+    "check_strict_ty_config",
     "check_thin_entrypoint",
     "check_tool_descriptions",
     "check_usecase_protocol_ownership",

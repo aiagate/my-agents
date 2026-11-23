@@ -20,7 +20,7 @@ from tools.project_lint import (
     check_no_private_type_in_public_api,
     check_no_shallow_tests,
     check_strict_coverage_config,
-    check_strict_pyright_config,
+    check_strict_ty_config,
     check_thin_entrypoint,
     check_tool_descriptions,
     check_usecase_protocol_ownership,
@@ -271,23 +271,23 @@ def test_pl004_enforces_clean_architecture_layer_boundaries(tmp_path: Path) -> N
     )
 
 
-def test_pl005_flags_weakened_pyright_config(tmp_path: Path) -> None:
+def test_pl005_flags_weakened_ty_config(tmp_path: Path) -> None:
     bad_toml = _write(
         tmp_path / "bad.toml",
         (
-            "[tool.pyright]\n"
-            'typeCheckingMode = "strict"\n'
-            "reportUnknownVariableType = false\n"
-            "reportPrivateUsage = false\n"
+            "[tool.ty.terminal]\n"
+            "error-on-warning = false\n"
+            "[tool.ty.rules]\n"
+            'invalid-assignment = "ignore"\n'
         ),
     )
     good_toml = _write(
         tmp_path / "good.toml",
-        ('[tool.pyright]\ntypeCheckingMode = "strict"\n'),
+        "[tool.ty.terminal]\nerror-on-warning = true\n",
     )
 
-    bad_findings = check_strict_pyright_config(bad_toml)
-    good_findings = check_strict_pyright_config(good_toml)
+    bad_findings = check_strict_ty_config(bad_toml)
+    good_findings = check_strict_ty_config(good_toml)
 
     assert len(bad_findings) == 2
     assert {f.rule for f in bad_findings} == {"PL005"}
@@ -400,7 +400,7 @@ def test_pl008_flags_inline_suppressions_and_ignores_strings(tmp_path: Path) -> 
         src / "bad.py",
         (
             "a = 1  # type: ignore[assignment]\n"
-            "b = 2  # pyright: ignore[reportArgumentType]\n"
+            "b = 2  # ty: ignore[invalid-argument-type]\n"
             "c = 3  # noqa: TID251\n"
             "d = 4  # pragma: no cover\n"
         ),

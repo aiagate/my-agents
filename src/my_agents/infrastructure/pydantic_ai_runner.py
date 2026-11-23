@@ -325,7 +325,8 @@ class PydanticAIAgentRunner(IAgentRunner):
         chat_recall: IChatRecall | None = None,
         usage_limits: UsageLimits = DEFAULT_USAGE_LIMITS,
     ) -> PydanticAIAgentRunner:
-        pydantic_ai.BANNER_ENABLED = False
+        # Pydantic AI exposes a mutable flag inferred as Literal[True].
+        vars(pydantic_ai)["BANNER_ENABLED"] = False
         model = OpenAIChatModel(
             settings.model_name,
             provider=OpenAIProvider(

@@ -63,7 +63,8 @@ class PydanticAIEpisodeSummarizer(IEpisodeSummarizer):
         *,
         usage_limits: UsageLimits = DEFAULT_SUMMARY_USAGE_LIMITS,
     ) -> PydanticAIEpisodeSummarizer:
-        pydantic_ai.BANNER_ENABLED = False
+        # Pydantic AI exposes a mutable flag inferred as Literal[True].
+        vars(pydantic_ai)["BANNER_ENABLED"] = False
         api_key = settings.resolved_summary_api_key
         model = OpenAIChatModel(
             settings.resolved_summary_model_name,

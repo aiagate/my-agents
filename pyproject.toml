@@ -22,10 +22,10 @@ my-agents = "my_agents:main"
 [dependency-groups]
 dev = [
     "anyio>=4.16.0",
-    "pyright>=1.1.414",
     "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
     "ruff>=0.17.6",
+    "ty==0.0.108",
 ]
 
 [build-system]
@@ -74,17 +74,15 @@ ignore = [
 quote-style = "double"
 indent-style = "space"
 
-[tool.pyright]
-typeCheckingMode = "strict"
-pythonVersion = "3.14"
-include = ["src/my_agents", "tests", "tools"]
-exclude = [
-    "**/__pycache__",
-    "**/node_modules",
-    "**/.*",
-    ".venv",
-]
-reportMissingTypeStubs = false
+[tool.ty.environment]
+python-version = "3.14"
+root = ["./src", "."]
+
+[tool.ty.src]
+include = ["./src/my_agents", "./tests", "./tools"]
+
+[tool.ty.terminal]
+error-on-warning = true
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

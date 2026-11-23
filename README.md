@@ -37,13 +37,17 @@ uv run --extra mlx my-agents
 ## Lint
 
 ```sh
-uv run ruff check .
-uv run ruff format --check .
-uv run pyright
-uv run python -m tools.project_lint
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked ty check
+uv run --locked python -m tools.project_lint
 ```
 
-自動修正できる指摘を修正するには、`uv run ruff check --fix .` / `uv run ruff format .` を実行してください。
+自動修正できる指摘を修正するには、`uv run --locked ruff check --fix .` / `uv run --locked ruff format .` を実行してください。
+
+CI でも同じ Lint・型チェックと `uv run --locked python -m pytest` を実行します。
+Zed では `uv sync --locked` で環境を作成し、Python のツールチェーンに `.venv` を選択してください。
+プロジェクト設定で ty と Ruff が有効になります。
 
 ## Git Hook
 
