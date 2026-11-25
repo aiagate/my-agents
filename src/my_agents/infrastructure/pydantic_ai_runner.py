@@ -28,12 +28,6 @@ from my_agents.contracts.ports.agent_runner import (
     AgentRunnerErrorType,
     IAgentRunner,
 )
-from my_agents.contracts.ports.association_expander import (
-    AssociationExpandError,
-    AssociationExpandErrorType,
-    AssociationExpandRequest,
-    IAssociationExpander,
-)
 from my_agents.contracts.ports.chat_recall import (
     ChatRecallError,
     ChatRecallErrorType,
@@ -187,71 +181,6 @@ def _build_core_memory_toolset(
     return FunctionToolset(tools=[tool])
 
 
-def _format_association_error(error: AssociationExpandError) -> str:
-    match error.type:
-        case AssociationExpandErrorType.INVALID_INPUT:
-            return (
-                f"Association expansion input was invalid: {error.message} "
-                "Provide a non-empty topic and retry."
-            )
-        case AssociationExpandErrorType.EXPANSION_FAILED:
-            return (
-                f"Association expansion failed: {error.message} "
-                "Answer without this tool instead."
-            )
-        case _:
-            assert_never(error.type)
-
-
-def _build_association_toolset(
-    expander: IAssociationExpander,
-) -> FunctionToolset[None]:
-    async def expand_associations(
-        topic: Annotated[
-            str,
-            Field(
-                description=(
-                    "Concrete object, place, problem, or theme to explore, such as "
-                    "a shopping item, an everyday annoyance, or a trip idea."
-                )
-            ),
-        ],
-        context: Annotated[
-            str,
-            Field(
-                description=(
-                    "Optional constraints, preferences, or current situation that "
-                    "should steer the associations. Leave empty when irrelevant."
-                )
-            ),
-        ] = "",
-    ) -> str:
-        result = await expander.expand(
-            AssociationExpandRequest(topic=topic, context=context)
-        )
-        if is_err(result):
-            return _format_association_error(result.error)
-        outcome = result.value
-        ideas = "\n".join(f"- {idea}" for idea in outcome.lateral_ideas)
-        return (
-            f"3-level Magical Banana association tree for {outcome.root}:\n"
-            f"{outcome.tree_summary}\n\n"
-            f"Lateral ideas:\n{ideas}"
-        )
-
-    tool: Tool[None] = Tool(
-        expand_associations,
-        name="expand_associations",
-        description=(
-            "Compute a 3-level cross-category Magical Banana association tree "
-            "for a consultation, shopping, lifestyle, planning, or brainstorming "
-            "topic."
-        ),
-        takes_ctx=False,
-    )
-    return FunctionToolset(tools=[tool])
-
-
 def _format_recall_error(error: ChatRecallError) -> str:
     match error.type:
         case ChatRecallErrorType.INVALID_INPUT:
@@ -312,7 +241,6 @@ class PydanticAIAgentRunner(IAgentRunner):
         *,
         api_key: SecretStr | None = None,
         core_profile_updater: ICoreProfileUpdater | None = None,
-        association_expander: IAssociationExpander | None = None,
         chat_recall: IChatRecall | None = None,
         usage_limits: UsageLimits = DEFAULT_USAGE_LIMITS,
     ) -> None:
@@ -323,7 +251,6 @@ class PydanticAIAgentRunner(IAgentRunner):
             self._agent = Agent(model_or_agent)
         self._api_key = api_key
         self._core_profile_updater = core_profile_updater
-        self._association_expander = association_expander
         self._chat_recall = chat_recall
         self._usage_limits = usage_limits
 
@@ -333,7 +260,6 @@ class PydanticAIAgentRunner(IAgentRunner):
         settings: AppSettings,
         *,
         core_profile_updater: ICoreProfileUpdater | None = None,
-        association_expander: IAssociationExpander | None = None,
         chat_recall: IChatRecall | None = None,
         usage_limits: UsageLimits = DEFAULT_USAGE_LIMITS,
     ) -> PydanticAIAgentRunner:
@@ -350,7 +276,6 @@ class PydanticAIAgentRunner(IAgentRunner):
             model,
             api_key=settings.api_key,
             core_profile_updater=core_profile_updater,
-            association_expander=association_expander,
             chat_recall=chat_recall,
             usage_limits=usage_limits,
         )
@@ -372,8 +297,6 @@ class PydanticAIAgentRunner(IAgentRunner):
                     recorded_updates,
                 )
             )
-        if self._association_expander is not None:
-            toolsets.append(_build_association_toolset(self._association_expander))
         if self._chat_recall is not None:
             toolsets.append(_build_chat_recall_toolset(self._chat_recall))
         try:

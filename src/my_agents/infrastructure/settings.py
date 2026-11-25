@@ -25,7 +25,6 @@ from my_agents.domain.chat_history import (
 
 type ChatBackend = Literal["openai", "local"]
 DEFAULT_MEMORY_DIR_NAME = "memory"
-DEFAULT_MLX_LORA_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
 _INVALID_INT = "\x00invalid-int"
 _REQUIRED_ENV = ("MAGPIE_MODEL", "MAGPIE_BASE_URL", "MAGPIE_API_KEY")
 _ERROR_MESSAGES = {
@@ -53,8 +52,6 @@ class AppSettings:
     base_url: str
     api_key: SecretStr
     memory_dir: Path
-    mlx_lora_model: str = DEFAULT_MLX_LORA_MODEL
-    mlx_lora_adapter_path: Path | None = None
     chats_db_path: Path | None = None
     summary_model_name: str | None = None
     summary_base_url: str | None = None
@@ -118,10 +115,6 @@ def _memory_dir(value: str) -> Path:
     return _optional_path(value) or Path.cwd() / DEFAULT_MEMORY_DIR_NAME
 
 
-def _mlx_lora_model(value: str) -> str:
-    return value.strip() or DEFAULT_MLX_LORA_MODEL
-
-
 class _EnvSettings(BaseModel):
     model_config = ConfigDict(
         str_strip_whitespace=True,
@@ -134,12 +127,6 @@ class _EnvSettings(BaseModel):
     memory_dir: Annotated[
         Path, Field(alias="MEMORY_PATH"), BeforeValidator(_memory_dir)
     ] = Field(default_factory=lambda: Path.cwd() / DEFAULT_MEMORY_DIR_NAME)
-    mlx_lora_model: Annotated[str, BeforeValidator(_mlx_lora_model)] = (
-        DEFAULT_MLX_LORA_MODEL
-    )
-    mlx_lora_adapter_path: Annotated[Path | None, BeforeValidator(_optional_path)] = (
-        None
-    )
     chats_db_path: Annotated[Path | None, BeforeValidator(_optional_path)] = None
     summary_model_name: Annotated[
         str | None, Field(alias="SUMMARY_MODEL"), BeforeValidator(_blank_to_none)

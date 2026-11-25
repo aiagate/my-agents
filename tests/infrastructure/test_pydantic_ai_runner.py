@@ -30,13 +30,6 @@ from my_agents.contracts.ports.agent_runner import (
     AgentRunnerError,
     AgentRunnerErrorType,
 )
-from my_agents.contracts.ports.association_expander import (
-    AssociationExpandError,
-    AssociationExpandErrorType,
-    AssociationExpandOutcome,
-    AssociationExpandRequest,
-    IAssociationExpander,
-)
 from my_agents.contracts.ports.chat_recall import (
     ChatRecallError,
     ChatRecallErrorType,
@@ -100,54 +93,6 @@ class SequenceUpdater(ICoreProfileUpdater):
     ) -> Result[CoreMemoryUpdateOutcome, CoreMemoryUpdateError]:
         self.commands.append(command)
         return self._results[len(self.commands) - 1]
-
-
-class FakeExpander(IAssociationExpander):
-    def __init__(
-        self,
-        result: Result[AssociationExpandOutcome, AssociationExpandError],
-    ) -> None:
-        self._result = result
-        self.requests: list[AssociationExpandRequest] = []
-
-    async def expand(
-        self,
-        request: AssociationExpandRequest,
-    ) -> Result[AssociationExpandOutcome, AssociationExpandError]:
-        self.requests.append(request)
-        return self._result
-
-
-def _association_calling_model(
-    captured: dict[str, object],
-    schemas: list[ObjectJsonSchema] | None = None,
-) -> FunctionModel:
-    calls = 0
-
-    def respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            captured["tools"] = [
-                (tool.name, tool.description) for tool in info.function_tools
-            ]
-            if schemas is not None:
-                schemas.append(info.function_tools[0].parameters_json_schema)
-            return ModelResponse(
-                [
-                    ToolCallPart(
-                        "expand_associations",
-                        {"topic": "コースター", "context": "1LDK・水滴対策"},
-                    )
-                ]
-            )
-        for message in messages:
-            for part in message.parts:
-                if isinstance(part, ToolReturnPart):
-                    captured["tool_result"] = part.content
-        return ModelResponse([TextPart("done")])
-
-    return FunctionModel(respond)
 
 
 def _tool_calling_model(
@@ -837,160 +782,8 @@ async def test_accepts_agent_instance() -> None:
     assert result.unwrap() == AgentReply(content="こんにちは")
 
 
-_ASSOCIATION_TOOL_DESCRIPTION = (
-    "Compute a 3-level cross-category Magical Banana association tree "
-    "for a consultation, shopping, lifestyle, planning, or brainstorming "
-    "topic."
-)
-
-
 @pytest.mark.anyio
-async def test_association_tool_returns_tree_and_lateral_ideas_to_model() -> None:
-    captured: dict[str, object] = {}
-    schemas: list[ObjectJsonSchema] = []
-    expander = FakeExpander(
-        Ok(
-            AssociationExpandOutcome(
-                root="コースター",
-                tree_summary=(
-                    "root: コースター\n"
-                    "- L1 コルク [素材・テクスチャ] (0.842)\n"
-                    "  - L2 ゴム板 [ホームセンター資材・DIY] (0.731)"
-                ),
-                lateral_ideas=(
-                    "コルク（素材・テクスチャ: 軽くて弾力がある）",
-                    "ゴム板（ホームセンター資材・DIY: 滑り止めに使える）",
-                ),
-            )
-        )
-    )
-    runner = PydanticAIAgentRunner(
-        _association_calling_model(captured, schemas),
-        association_expander=expander,
-    )
-
-    result = await runner.run("コースターが欲しい", history=[], instructions="")
-
-    assert is_ok(result)
-    assert result.unwrap() == AgentReply(content="done")
-    assert expander.requests == [
-        AssociationExpandRequest(
-            topic="コースター",
-            context="1LDK・水滴対策",
-        )
-    ]
-    assert captured["tools"] == [("expand_associations", _ASSOCIATION_TOOL_DESCRIPTION)]
-    assert captured["tool_result"] == (
-        "3-level Magical Banana association tree for コースター:\n"
-        "root: コースター\n"
-        "- L1 コルク [素材・テクスチャ] (0.842)\n"
-        "  - L2 ゴム板 [ホームセンター資材・DIY] (0.731)\n"
-        "\n"
-        "Lateral ideas:\n"
-        "- コルク（素材・テクスチャ: 軽くて弾力がある）\n"
-        "- ゴム板（ホームセンター資材・DIY: 滑り止めに使える）"
-    )
-    assert len(schemas) == 1
-    schema = schemas[0]
-    assert schema["type"] == "object"
-    properties = schema["properties"]
-    for name in ("topic", "context"):
-        description = properties[name]["description"]
-        assert isinstance(description, str)
-        assert description.strip()
-    assert schema["required"] == ["topic"]
-
-
-@pytest.mark.anyio
-@pytest.mark.parametrize(
-    ("error", "expected"),
-    [
-        pytest.param(
-            AssociationExpandError(
-                type=AssociationExpandErrorType.INVALID_INPUT,
-                message="topic required",
-            ),
-            "Association expansion input was invalid: topic required "
-            "Provide a non-empty topic and retry.",
-            id="invalid-input",
-        ),
-        pytest.param(
-            AssociationExpandError(
-                type=AssociationExpandErrorType.EXPANSION_FAILED,
-                message="upstream timeout",
-            ),
-            "Association expansion failed: upstream timeout "
-            "Answer without this tool instead.",
-            id="expansion-failed",
-        ),
-    ],
-)
-async def test_association_tool_formats_error_for_model(
-    error: AssociationExpandError,
-    expected: str,
-) -> None:
-    captured: dict[str, object] = {}
-    runner = PydanticAIAgentRunner(
-        _association_calling_model(captured),
-        association_expander=FakeExpander(Err(error)),
-    )
-
-    result = await runner.run("hello", history=[], instructions="")
-
-    assert is_ok(result)
-    assert result.unwrap() == AgentReply(content="done")
-    assert captured["tool_result"] == expected
-
-
-@pytest.mark.anyio
-async def test_from_settings_forwards_association_expander(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recorded = _install_recording_agent(monkeypatch)
-    expander = FakeExpander(
-        Ok(
-            AssociationExpandOutcome(
-                root="root",
-                tree_summary="root: root",
-                lateral_ideas=(),
-            )
-        )
-    )
-
-    def fake_provider(**_kwargs: object) -> object:
-        return object()
-
-    def fake_chat_model(*_args: object, **_kwargs: object) -> TestModel:
-        return TestModel()
-
-    monkeypatch.setattr(
-        "my_agents.infrastructure.pydantic_ai_runner.OpenAIProvider",
-        fake_provider,
-    )
-    monkeypatch.setattr(
-        "my_agents.infrastructure.pydantic_ai_runner.OpenAIChatModel",
-        fake_chat_model,
-    )
-    settings = AppSettings(
-        model_name="test-model",
-        base_url="https://example.com/v1",
-        api_key=SecretStr("secret"),
-        memory_dir=Path("/tmp/memory"),
-    )
-
-    runner = PydanticAIAgentRunner.from_settings(
-        settings,
-        association_expander=expander,
-    )
-    result = await runner.run("hello", history=[], instructions="")
-
-    assert is_ok(result)
-    assert result.unwrap() == AgentReply(content="ok")
-    assert recorded["toolsets"] is not None
-
-
-@pytest.mark.anyio
-async def test_registers_both_toolsets_when_both_collaborators_exist() -> None:
+async def test_registers_core_memory_toolset_when_updater_exists() -> None:
     updater = FakeUpdater(
         Ok(
             CoreMemoryUpdateOutcome(
@@ -1000,27 +793,14 @@ async def test_registers_both_toolsets_when_both_collaborators_exist() -> None:
             )
         )
     )
-    expander = FakeExpander(
-        Ok(
-            AssociationExpandOutcome(
-                root="root",
-                tree_summary="root: root",
-                lateral_ideas=(),
-            )
-        )
-    )
 
     def respond(_messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
-        assert [tool.name for tool in info.function_tools] == [
-            "update_core_memory",
-            "expand_associations",
-        ]
+        assert [tool.name for tool in info.function_tools] == ["update_core_memory"]
         return ModelResponse([TextPart("ok")])
 
     runner = PydanticAIAgentRunner(
         FunctionModel(respond),
         core_profile_updater=updater,
-        association_expander=expander,
     )
 
     result = await runner.run("hello", history=[], instructions="")

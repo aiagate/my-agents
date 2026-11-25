@@ -127,52 +127,6 @@ def test_injected_env_overrides_env_file(tmp_path: Path) -> None:
     assert result.unwrap().memory_dir == Path("/process/memory")
 
 
-def test_optional_mlx_lora_settings_default_when_unset() -> None:
-    result = load_app_settings(
-        env={
-            "MAGPIE_MODEL": "test-model",
-            "MAGPIE_BASE_URL": "https://example.com/v1",
-            "MAGPIE_API_KEY": "secret",
-        }
-    )
-
-    assert is_ok(result)
-    assert result.unwrap().mlx_lora_model == "mlx-community/Qwen2.5-3B-Instruct-4bit"
-    assert result.unwrap().mlx_lora_adapter_path is None
-
-
-def test_loads_custom_mlx_lora_model_and_expands_adapter_path() -> None:
-    result = load_app_settings(
-        env={
-            "MAGPIE_MODEL": "test-model",
-            "MAGPIE_BASE_URL": "https://example.com/v1",
-            "MAGPIE_API_KEY": "secret",
-            "MLX_LORA_MODEL": "  /models/custom-3b  ",
-            "MLX_LORA_ADAPTER_PATH": "  ~/my-adapters  ",
-        }
-    )
-
-    assert is_ok(result)
-    assert result.unwrap().mlx_lora_model == "/models/custom-3b"
-    assert result.unwrap().mlx_lora_adapter_path == Path("~/my-adapters").expanduser()
-
-
-def test_whitespace_mlx_lora_settings_fall_back_to_defaults() -> None:
-    result = load_app_settings(
-        env={
-            "MAGPIE_MODEL": "test-model",
-            "MAGPIE_BASE_URL": "https://example.com/v1",
-            "MAGPIE_API_KEY": "secret",
-            "MLX_LORA_MODEL": "   ",
-            "MLX_LORA_ADAPTER_PATH": "   ",
-        }
-    )
-
-    assert is_ok(result)
-    assert result.unwrap().mlx_lora_model == "mlx-community/Qwen2.5-3B-Instruct-4bit"
-    assert result.unwrap().mlx_lora_adapter_path is None
-
-
 def test_chat_settings_defaults_and_summary_inheritance(tmp_path: Path) -> None:
     settings = load_app_settings(
         env={

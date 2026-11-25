@@ -13,23 +13,20 @@ def test_assemble_instructions_for_empty_profile() -> None:
     instructions = assemble_instructions(CoreProfile.empty())
 
     assert instructions.startswith(
-        "あなたはユーザーの人生と仕事のあらゆる領域における思考のパートナーです。"
+        "あなたはユーザーの人生と仕事のあらゆる領域に寄り添う対話パートナーです。"
     )
     for domain in ("買い物", "日常の移動", "家計", "キャリア", "趣味"):
         assert domain in instructions
-    assert instructions.count("## 対話と発散の方針") == 1
-    assert "マジックバナナ" in instructions
-    for level in ("第1階層", "第2階層", "第3階層"):
-        assert level in instructions
-    assert "具体的な横転用案を2〜3個（使い方と効果まで示す）" in instructions
-    assert instructions.count("L2/L3") == 1
-    assert "`expand_associations` が利用でき発散が有用な場合は" in instructions
-    assert "最初に一度 `topic` と Core Memory の制約・好みを添えて" in instructions
-    assert "利用できない、空、または役立たない場合は再試行せず" in instructions
-    assert "上の3階層プロトコルだけで発散してください" in instructions
-    assert "事実確認（所要時間など）や短い雑談では" in instructions
-    assert "3階層ツリーも出さず" in instructions
-    assert "発散を強制せず簡潔に答えてください" in instructions
+    assert instructions.count("## 対話の方針") == 1
+    assert "ユーザーの言葉と気持ちをまず受け止め" in instructions
+    assert "会話の流れを途切れさせずに自然な言葉で応答してください" in instructions
+    assert "使い方と効果が伝わる具体案として示してください" in instructions
+    assert "無理に話を広げず簡潔に答えてください" in instructions
+    assert "## 対話と発散の方針" not in instructions
+    assert "3階層" not in instructions
+    assert "第1階層" not in instructions
+    persona = instructions.split("## update_core_memory の運用方針")[0]
+    assert "`" not in persona
     assert "## update_core_memory の運用方針" in instructions
     for action in ("append:", "replace:", "rewrite:"):
         assert action in instructions

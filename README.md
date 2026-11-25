@@ -1,18 +1,8 @@
 # my-agents
 
-## MLX LoRA 連想エンジン（オプション）
+## 思考発散ツールの方針
 
-Apple Silicon（macOS arm64）環境では、ローカルの MLX LoRA モデルによる異分野連想ツール `expand_associations` を有効化できます。
-
-```sh
-uv sync --extra mlx
-uv run --extra mlx my-agents
-```
-
-`.env` に以下を設定すると起動時にツールが有効になります（未設定または非 Apple Silicon 環境では自動的に 3 階層プロンプトのみへフォールバックします）。
-
-- `MLX_LORA_ADAPTER_PATH`: 学習済み LoRA アダプタディレクトリのパス（例: `~/.local/share/my-agents/mlx-lora/adapters`）
-- `MLX_LORA_MODEL`: ベースモデル名またはローカルディレクトリ（省略時は `mlx-community/Qwen2.5-3B-Instruct-4bit`）
+思考発散（連想ツリー）は本体に内蔵せず、外部 MCP ツールとして分離します。接続は `pydantic-ai` V2 の `MCPToolset` と `capabilities.MCP(include_instructions=False)` を前提とし、人格・Core Memory・過去会話の方針（L0）にはツール固有の指示を混ぜません。
 
 ## 会話履歴
 

@@ -1,6 +1,6 @@
 ---
 name: verify-my-agents
-description: Verifies the my-agents CLI end to end. Use when checking that the chat REPL, core memory updates, embedding association, CLI flags, or error reporting of this repository still behave as specified, or before shipping a change to the CLI.
+description: Verifies the my-agents CLI end to end. Use when checking that the chat REPL, core memory updates, CLI flags, or error reporting of this repository still behave as specified, or before shipping a change to the CLI.
 ---
 
 # verify-my-agents
@@ -27,16 +27,13 @@ Drive の前に全項目を確認する。1 つでも崩れたら Drive に入�
 
 1. `uv run my-agents --help` が exit 0 で usage を返す。
 2. リポジトリルートに `.env` がある（中身は読まない）。
-3. `.env` に `MLX_LORA_ADAPTER_PATH` キーがあり、指定先ディレクトリが存在するか確認する
-   （association 系レシピの可否を報告するため。`uv run --extra mlx my-agents --help` も確認する）。
-4. `--log-file <tmp>` 付きで起動すると空ファイル（0600）が作られる。
+3. `--log-file <tmp>` 付きで起動すると空ファイル（0600）が作られる。
 
 ## Drive
 
-features/ の各レシピを順に実行する。実 API / ローカル MLX 推論が必要な
-のは chat / core-memory / association / chat-history。API 不要なのは
-repl-commands / cli-flags / error-evidence の 3 枚。各レシピは
-helpers/drive.sh で駆動し、トランスクリプトを Evidence に残す。
+features/ の各レシピを順に実行する。実 API が必要なのは chat / core-memory /
+chat-history。API 不要なのは repl-commands / cli-flags / error-evidence の 3 枚。
+各レシピは helpers/drive.sh で駆動し、トランスクリプトを Evidence に残す。
 
 ## Evidence
 

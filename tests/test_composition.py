@@ -17,12 +17,6 @@ from pydantic_ai.models.function import AgentInfo, FunctionModel
 
 from my_agents.composition import build_cli, run_cli
 from my_agents.contracts.messages import ChatMessage
-from my_agents.contracts.ports.association_expander import (
-    AssociationExpandError,
-    AssociationExpandOutcome,
-    AssociationExpandRequest,
-    IAssociationExpander,
-)
 from my_agents.contracts.ports.chat_recall import IChatRecall
 from my_agents.contracts.ports.core_profile_updater import ICoreProfileUpdater
 from my_agents.contracts.ports.episode_summarizer import (
@@ -84,7 +78,6 @@ def _patch_runner(
             settings: AppSettings,
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
-            association_expander: IAssociationExpander | None = None,
             chat_recall: IChatRecall | None = None,
         ) -> PydanticAIAgentRunner:
             captured["model_name"] = settings.model_name
@@ -92,12 +85,10 @@ def _patch_runner(
             captured["api_key"] = settings.api_key
             captured["memory_dir"] = settings.memory_dir
             captured["updater"] = core_profile_updater
-            captured["association_expander"] = association_expander
             captured["chat_recall"] = chat_recall
             return PydanticAIAgentRunner(
                 FunctionModel(respond),
                 core_profile_updater=core_profile_updater,
-                association_expander=association_expander,
                 chat_recall=chat_recall,
             )
 
@@ -139,17 +130,14 @@ def _patch_core_memory_runner(
             settings: AppSettings,
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
-            association_expander: IAssociationExpander | None = None,
             chat_recall: IChatRecall | None = None,
         ) -> PydanticAIAgentRunner:
             captured["memory_dir"] = settings.memory_dir
             captured["updater"] = core_profile_updater
-            captured["association_expander"] = association_expander
             captured["chat_recall"] = chat_recall
             return PydanticAIAgentRunner(
                 FunctionModel(respond),
                 core_profile_updater=core_profile_updater,
-                association_expander=association_expander,
                 chat_recall=chat_recall,
             )
 
@@ -200,7 +188,6 @@ def test_build_cli_wires_runner_into_cli(
     assert captured["api_key"] == SecretStr("secret")
     assert captured["memory_dir"] == tmp_path / "agent-memory"
     assert captured["updater"] is not None
-    assert captured["association_expander"] is None
     assert captured["instructions"] == assemble_instructions(
         CoreProfile.empty(), recall_tools_enabled=True
     )
@@ -381,14 +368,12 @@ def test_run_cli_debug_and_explicit_log_file_record_runtime_errors(
             settings: AppSettings,
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
-            association_expander: IAssociationExpander | None = None,
             chat_recall: IChatRecall | None = None,
         ) -> PydanticAIAgentRunner:
             return PydanticAIAgentRunner(
                 FunctionModel(failing_respond),
                 api_key=settings.api_key,
                 core_profile_updater=core_profile_updater,
-                association_expander=association_expander,
                 chat_recall=chat_recall,
             )
 
@@ -512,142 +497,6 @@ def test_run_cli_warns_and_continues_when_default_log_path_unwritable(
     assert len(errors) == 1
     assert errors[0].startswith("Warning: Failed to open log file")
     assert "\nAI > 続行できた" in outputs
-
-
-def test_build_cli_wires_mlx_lora_association_pipeline(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    captured: dict[str, object] = {}
-    sentinel_generator = object()
-    sentinel_expander = object()
-    adapter_dir = tmp_path / "adapters"
-
-    class StubMlxLoraGenerator:
-        @staticmethod
-        def is_available(adapter_path: Path) -> bool:
-            captured["checked_adapter_path"] = adapter_path
-            return True
-
-        @classmethod
-        def from_settings(
-            cls,
-            model_name: str,
-            adapter_path: Path,
-        ) -> object:
-            captured["mlx_lora_model"] = model_name
-            captured["mlx_lora_adapter_path"] = adapter_path
-            return sentinel_generator
-
-    def fake_expander_factory(generator: object) -> object:
-        captured["generator"] = generator
-        return sentinel_expander
-
-    _patch_runner(monkeypatch, captured, "配線済み")
-    monkeypatch.setattr(
-        "my_agents.composition.MlxLoraAssociationGenerator",
-        StubMlxLoraGenerator,
-    )
-    monkeypatch.setattr(
-        "my_agents.composition.ExpandAssociationsHandler",
-        fake_expander_factory,
-    )
-    env = {
-        **_VALID_ENV,
-        "MLX_LORA_MODEL": "custom-mlx-model",
-        "MLX_LORA_ADAPTER_PATH": str(adapter_dir),
-        "MEMORY_PATH": str(tmp_path / "memory"),
-    }
-
-    result = build_cli(env=env, env_path=tmp_path / ".env")
-
-    assert is_ok(result)
-    assert captured["checked_adapter_path"] == adapter_dir
-    assert captured["mlx_lora_model"] == "custom-mlx-model"
-    assert captured["mlx_lora_adapter_path"] == adapter_dir
-    assert captured["generator"] is sentinel_generator
-    assert captured["association_expander"] is sentinel_expander
-
-
-def test_build_cli_skips_mlx_lora_association_when_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    captured: dict[str, object] = {}
-    adapter_dir = tmp_path / "missing-adapters"
-
-    class UnavailableMlxLoraGenerator:
-        @staticmethod
-        def is_available(adapter_path: Path) -> bool:
-            captured["checked_adapter_path"] = adapter_path
-            return False
-
-    _patch_runner(monkeypatch, captured, "フォールバック")
-    monkeypatch.setattr(
-        "my_agents.composition.MlxLoraAssociationGenerator",
-        UnavailableMlxLoraGenerator,
-    )
-    env = {
-        **_VALID_ENV,
-        "MLX_LORA_ADAPTER_PATH": str(adapter_dir),
-        "MEMORY_PATH": str(tmp_path / "memory"),
-    }
-
-    result = build_cli(env=env, env_path=tmp_path / ".env")
-
-    assert is_ok(result)
-    assert captured["checked_adapter_path"] == adapter_dir
-    assert captured["association_expander"] is None
-
-
-def test_build_and_run_cli_accept_injected_association_expander(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    class InjectedExpander(IAssociationExpander):
-        async def expand(
-            self,
-            request: AssociationExpandRequest,
-        ) -> Result[AssociationExpandOutcome, AssociationExpandError]:
-            return Ok(
-                AssociationExpandOutcome(
-                    root=request.topic,
-                    tree_summary=f"root: {request.topic}",
-                    lateral_ideas=(),
-                )
-            )
-
-    class FailIfCalledMlxGenerator:
-        @staticmethod
-        def is_available(_adapter_path: Path) -> bool:
-            raise AssertionError("default MLX wiring should not run when injected")
-
-    captured: dict[str, object] = {}
-    injected = InjectedExpander()
-    _patch_runner(monkeypatch, captured, "注入済み")
-    monkeypatch.setattr(
-        "my_agents.composition.MlxLoraAssociationGenerator",
-        FailIfCalledMlxGenerator,
-    )
-    outputs: list[str] = []
-    env = {
-        **_VALID_ENV,
-        "MLX_LORA_ADAPTER_PATH": str(tmp_path / "adapters"),
-        "MEMORY_PATH": str(tmp_path / "memory"),
-    }
-
-    exit_code = run_cli(
-        argv=(),
-        env=env,
-        env_path=tmp_path / ".env",
-        read_input=_read_inputs(["こんにちは", "exit"]),
-        write_output=outputs.append,
-        association_expander=injected,
-    )
-
-    assert exit_code == 0
-    assert captured["association_expander"] is injected
-    assert "\nAI > 注入済み" in outputs
 
 
 def test_cli_persists_chat_displays_history_resumes_and_clears(

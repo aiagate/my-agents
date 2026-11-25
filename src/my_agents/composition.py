@@ -7,7 +7,6 @@ from typing import assert_never
 from flow_res import Err, Ok, Result, is_err
 
 from my_agents.contracts.ports.agent_runner import IAgentRunner
-from my_agents.contracts.ports.association_expander import IAssociationExpander
 from my_agents.contracts.ports.episode_summarizer import IEpisodeSummarizer
 from my_agents.contracts.ports.event_webhook import IEventWebhookServer
 from my_agents.contracts.ports.logger import (
@@ -21,9 +20,6 @@ from my_agents.infrastructure.local_agent_runner import LocalAgentRunner
 from my_agents.infrastructure.local_episode_summarizer import LocalEpisodeSummarizer
 from my_agents.infrastructure.markdown_core_profile_store import (
     MarkdownCoreProfileStore,
-)
-from my_agents.infrastructure.mlx_lora_association_generator import (
-    MlxLoraAssociationGenerator,
 )
 from my_agents.infrastructure.pydantic_ai_episode_summarizer import (
     PydanticAIEpisodeSummarizer,
@@ -52,7 +48,6 @@ from my_agents.presentation.webhook.background_scheduler import (
 from my_agents.presentation.webhook.event_server import EventWebhookServer
 from my_agents.usecases.accept_event import AcceptEventHandler
 from my_agents.usecases.clear_chat import ClearChatHandler
-from my_agents.usecases.expand_associations import ExpandAssociationsHandler
 from my_agents.usecases.finalize_chat import FinalizeChatHandler
 from my_agents.usecases.get_chat_history import GetChatHistoryHandler
 from my_agents.usecases.get_core_profile import GetCoreProfileHandler
@@ -61,20 +56,6 @@ from my_agents.usecases.recall_chat import RecallChatHandler
 from my_agents.usecases.send_message import SendMessageHandler
 from my_agents.usecases.summarize_episodes import SummarizeEpisodesHandler
 from my_agents.usecases.update_core_profile import UpdateCoreProfileHandler
-
-
-def _build_association_expander(
-    settings: AppSettings,
-) -> IAssociationExpander | None:
-    if settings.mlx_lora_adapter_path is None:
-        return None
-    if not MlxLoraAssociationGenerator.is_available(settings.mlx_lora_adapter_path):
-        return None
-    generator = MlxLoraAssociationGenerator.from_settings(
-        settings.mlx_lora_model,
-        settings.mlx_lora_adapter_path,
-    )
-    return ExpandAssociationsHandler(generator)
 
 
 def _build_event_webhook(
@@ -111,7 +92,6 @@ def build_cli(
     write_error: Callable[[str], None] = write_stderr,
     debug: bool = False,
     logger: IAppLogger = NOOP_LOGGER,
-    association_expander: IAssociationExpander | None = None,
     episode_summarizer: IEpisodeSummarizer | None = None,
 ) -> Result[CliRepl, SettingsError]:
     resolved_env_path = Path(env_path) if env_path is not None else Path.cwd() / ".env"
@@ -124,11 +104,6 @@ def build_cli(
     store = MarkdownCoreProfileStore.from_memory_dir(settings.memory_dir)
     get_core_profile = GetCoreProfileHandler(store)
     update_core_profile = UpdateCoreProfileHandler(store)
-    resolved_expander = (
-        association_expander
-        if association_expander is not None
-        else _build_association_expander(settings)
-    )
     chat_repository = SqliteChatRepository.from_settings(settings)
     chat_recall = RecallChatHandler(chat_repository)
     if episode_summarizer is not None:
@@ -143,7 +118,6 @@ def build_cli(
         agent_runner = PydanticAIAgentRunner.from_settings(
             settings,
             core_profile_updater=update_core_profile,
-            association_expander=resolved_expander,
             chat_recall=chat_recall,
         )
     send_message = SendMessageHandler(
@@ -194,7 +168,6 @@ def run_cli(
     write_output: Callable[[str], None] = print,
     write_error: Callable[[str], None] = write_stderr,
     logger: IAppLogger | None = None,
-    association_expander: IAssociationExpander | None = None,
     episode_summarizer: IEpisodeSummarizer | None = None,
 ) -> int:
     raw_argv = sys.argv[1:] if argv is None else argv
@@ -242,7 +215,6 @@ def run_cli(
             write_error=write_error,
             debug=options.debug,
             logger=active_logger,
-            association_expander=association_expander,
             episode_summarizer=episode_summarizer,
         )
         if is_err(result):
