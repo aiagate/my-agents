@@ -18,7 +18,7 @@
 | `SUMMARY_MODEL` | `MAGPIE_MODEL` を継承 | 要約に使うモデル |
 | `SUMMARY_BASE_URL` | `MAGPIE_BASE_URL` を継承 | 要約モデルの API URL |
 | `SUMMARY_API_KEY` | `MAGPIE_API_KEY` を継承 | 要約モデルの API キー |
-| `SUMMARY_INDEX_CHAR_BUDGET` | `16000` | 過去の話題の索引に使う文字数 |
+| `SUMMARY_INDEX_CHAR_BUDGET` | `16000` | 過去の話題の索引に使う文字数の上限（プロンプトは別途 2400 文字で上限） |
 | `SUMMARY_EVERY_MESSAGES` | `6` | 差分要約を開始する未要約の発言数 |
 | `RECENT_MESSAGES_LIMIT` | `20` | エージェントに渡す現在の話題の直近発言数 |
 | `EPISODE_MAX_MESSAGES` | `40` | 次の入力で話題を切り替える発言数 |
@@ -31,9 +31,16 @@
 
 `EVENT_WEBHOOK_PORT` を指定すると、`127.0.0.1` のみでイベントを受け付ける
 Webhook がチャットと同じプロセスで起動します。受理時に相関 ID を返し、解析は
-独立したバックグラウンドスレッドで行います。完了・失敗はイベント ID 付きで
-メインチャットの画面と SQLite の会話タイムラインへ合流し、後続の `/history` や
-チャット文脈から参照できます。
+独立したバックグラウンドスレッドで行います。イベントは会話ターン
+（`dialogue_turns`）とは別の `events` 台帳へ構造化記録し、`episode.turn_count`
+や要約周期には触れません。
+
+温度閾値超過・緊急語を含むメール・ワーカー失敗は `proactive` として
+`[Event <id>: completed]` / `[Event <id>: failed]` をメインチャットへ通知し、
+`surfaced_at` を記録します。閾値内の温度や通常メールは `ambient` として静かに
+台帳へ保存し、次回の通常チャットで背景文脈として合流した時点で `surfaced_at`
+を更新します。`/history <番号>` は会話ターンと区別した
+`[event:<id>] <status> (<delivery>)` 行を相関するイベント台帳記録として併記します。
 
 ```sh
 EVENT_WEBHOOK_PORT=8765 uv run my-agents
@@ -45,9 +52,13 @@ curl -sS -X POST http://127.0.0.1:8765/events \
 
 受付けるイベント名は `temperature.threshold_exceeded`、`email.received`、
 `spike.worker_failure`（失敗経路の検証用）です。スキーマ違反は 422、不正な
-JSON は 400 を返します。イベント本文は LLM へ渡す前に JSON 化・制御文字除去・
-区切り文字エスケープを行い、`UNTRUSTED_EVENT_DATA_*` で囲んだデータとして
-のみ扱います。解析ワーカー自体は LLM や Web 検索を呼ばない決定論的実装です。
+JSON は 400 を返します。`payload_json` は構造化データのまま台帳へ保存し、
+コンテキスト組み立て時に `sensor_id` / `sender` / `subject` / `body` / `reason`
+を含む全フィールドの制御文字除去・改行正規化・`<`/`>` エスケープを行って
+`UNTRUSTED_EVENT_DATA_*` で囲みます。解析ワーカー自体は LLM や Web 検索を
+呼ばない決定論的実装です。プロンプトの L0〜L2（人格・Core Memory・日付のみの
+話題索引）はイベントの有無で変化しないため、KV プロンプトキャッシュの prefix が
+安定します。
 
 これは MCP Events のドラフト（`events/list` / `events/subscribe` / 署名付き
 Webhook 配信）のワイヤ互換実装ではなく、`{name, data}` の受理、`event_id` の

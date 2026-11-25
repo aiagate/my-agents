@@ -95,24 +95,3 @@ def format_episode_time_range(
     if (start.hour, start.minute) == (end.hour, end.minute):
         return start_label
     return f"{start_label}-{end:%H:%M}"
-
-
-def format_summary_index(
-    entries: tuple[EpisodeIndexEntry, ...],
-    *,
-    char_budget: int = DEFAULT_SUMMARY_INDEX_CHAR_BUDGET,
-    tz: tzinfo | None = None,
-) -> tuple[str, int]:
-    lines: list[str] = []
-    used = 0
-    for entry in sorted(entries, key=lambda item: item.updated_at, reverse=True):
-        period = format_episode_time_range(entry.started_at, entry.updated_at, tz=tz)
-        line = f"- [{period}] (id:{entry.episode_id}) {entry.title}"
-        if entry.overview:
-            line += f": {entry.overview}"
-        cost = len(line) + bool(lines)
-        if used + cost > char_budget:
-            break
-        lines.append(line)
-        used += cost
-    return "\n".join(lines), len(entries) - len(lines)

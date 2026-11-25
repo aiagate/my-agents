@@ -1,12 +1,26 @@
 import sqlite3
+from collections.abc import Sequence
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from flow_res import Err, Ok, Result
+
+from my_agents.contracts.events import (
+    EventDelivery,
+    EventRecord,
+    EventStatus,
+)
 from my_agents.contracts.ports.chat_history import NewDialogueTurn
+from my_agents.contracts.ports.event_ledger import (
+    EventLedgerError,
+    EventLedgerErrorType,
+    IEventLedger,
+)
 from my_agents.infrastructure.sqlite_chat_repository import SqliteChatRepository
 from my_agents.usecases.get_chat_history import (
     DialogueTurnView,
+    EventTimelineView,
     GetChatHistoryErrorType,
     GetChatHistoryHandler,
 )
@@ -91,3 +105,117 @@ def test_history_and_recall_handle_missing_storage_tables(tmp_path: Path) -> Non
         display_message_contains="会話履歴を読み込めませんでした",
         message_contains="no such table: episodes",
     )
+
+
+class StubEventLedger(IEventLedger):
+    def __init__(
+        self, result: Result[tuple[EventRecord, ...], EventLedgerError]
+    ) -> None:
+        self.result = result
+
+    def record(self, entry: EventRecord) -> Result[None, EventLedgerError]:
+        raise AssertionError(entry)
+
+    def list_recent(
+        self, *, limit: int = 10, unsurfaced_only: bool = False
+    ) -> Result[tuple[EventRecord, ...], EventLedgerError]:
+        _ = (limit, unsurfaced_only)
+        return self.result
+
+    def get_event(self, event_id: str) -> Result[EventRecord | None, EventLedgerError]:
+        raise AssertionError(event_id)
+
+    def mark_surfaced(
+        self, event_ids: Sequence[str], *, surfaced_at: datetime
+    ) -> Result[None, EventLedgerError]:
+        _ = (event_ids, surfaced_at)
+        raise AssertionError("not used")
+
+
+def _event(
+    event_id: str,
+    *,
+    recorded_at: datetime,
+    delivery: EventDelivery = EventDelivery.PROACTIVE,
+    failure_reason: str = "",
+) -> EventRecord:
+    return EventRecord(
+        event_id,
+        "email.received",
+        recorded_at,
+        recorded_at,
+        EventStatus.FAILED if failure_reason else EventStatus.COMPLETED,
+        delivery,
+        '{"subject": "定例"}',
+        "メールを受信しました。",
+        (),
+        "確認する。",
+        failure_reason,
+        recorded_at,
+    )
+
+
+def test_detail_merges_correlated_event_ledger_records(tmp_path: Path) -> None:
+    path = tmp_path / "chats.db"
+    repo = SqliteChatRepository(path)
+    first = repo.record_turns(
+        None,
+        (
+            NewDialogueTurn("user", "first question", _NOW),
+            NewDialogueTurn("assistant", "first answer", _NOW),
+        ),
+        title="first",
+        updated_at=_NOW,
+    ).unwrap()
+    repo.close_episode(
+        first.id, closed_at=_NOW + timedelta(minutes=1), reason="clear"
+    ).unwrap()
+    repo.record_turns(
+        None, (), title="second", updated_at=_NOW + timedelta(minutes=3)
+    ).unwrap()
+    later = _event(
+        "evt_later",
+        recorded_at=_NOW + timedelta(minutes=2),
+        delivery=EventDelivery.AMBIENT,
+    )
+    inside = _event("evt_inside", recorded_at=_NOW, failure_reason="boom")
+    after = _event(
+        "evt_after",
+        recorded_at=_NOW + timedelta(minutes=4),
+        delivery=EventDelivery.AMBIENT,
+    )
+    ledger = StubEventLedger(Ok((after, later, inside)))
+
+    detail = GetChatHistoryHandler(repo, event_ledger=ledger).get_episode_detail(2)
+
+    assert detail.unwrap().events == (
+        EventTimelineView(
+            "evt_inside",
+            EventStatus.FAILED,
+            EventDelivery.PROACTIVE,
+            _NOW,
+            _NOW,
+            "メールを受信しました。",
+            "boom",
+            _NOW,
+        ),
+    )
+    active = GetChatHistoryHandler(repo, event_ledger=ledger).get_episode_detail(1)
+    assert [event.event_id for event in active.unwrap().events] == ["evt_after"]
+    assert GetChatHistoryHandler(repo).get_episode_detail(1).unwrap().events == ()
+
+
+def test_detail_reports_event_ledger_failure(tmp_path: Path) -> None:
+    repo = SqliteChatRepository(tmp_path / "chats.db")
+    repo.record_turns(None, (), title="title", updated_at=_NOW).unwrap()
+    ledger = StubEventLedger(
+        Err(EventLedgerError(EventLedgerErrorType.READ_FAILED, "ledger offline"))
+    )
+
+    error = assert_err(
+        GetChatHistoryHandler(repo, event_ledger=ledger).get_episode_detail(1),
+        expected_type=GetChatHistoryErrorType.STORAGE_ERROR,
+        message_contains="ledger offline",
+        display_message_contains="イベント台帳を読み込めませんでした",
+    )
+    assert error.message == "ledger offline"

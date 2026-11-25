@@ -2,7 +2,7 @@ import asyncio
 import sys
 from collections.abc import Callable
 from datetime import tzinfo
-from typing import assert_never
+from typing import Literal, assert_never
 
 from flow_res import is_err, is_ok
 
@@ -19,6 +19,7 @@ from my_agents.usecases.clear_chat import ClearChatError, ClearChatUseCase
 from my_agents.usecases.finalize_chat import FinalizeChatUseCase
 from my_agents.usecases.get_chat_history import (
     EpisodeSummaryView,
+    EventTimelineView,
     GetChatHistoryError,
     GetChatHistoryUseCase,
 )
@@ -268,15 +269,35 @@ class CliRepl:
         self._write_output(f"\n{self._episode_heading(episode)}")
         if episode.summary:
             self._write_output(f"\nサマリー\n{episode.summary}\n")
-        for turn in detail.value.turns:
-            match turn.role:
-                case "user":
-                    label = "You"
-                case "assistant":
-                    label = "AI"
-                case _:
-                    assert_never(turn.role)
-            self._write_output(f"{label} > {turn.content}")
+        timeline = [
+            (turn.created_at, self._turn_line(turn.role, turn.content))
+            for turn in detail.value.turns
+        ]
+        timeline.extend(
+            (event.recorded_at, self._event_line(event))
+            for event in detail.value.events
+        )
+        for _recorded_at, line in sorted(timeline, key=lambda item: item[0]):
+            self._write_output(line)
+
+    def _turn_line(self, role: Literal["user", "assistant"], content: str) -> str:
+        match role:
+            case "user":
+                label = "You"
+            case "assistant":
+                label = "AI"
+            case _:
+                assert_never(role)
+        return f"{label} > {content}"
+
+    def _event_line(self, event: EventTimelineView) -> str:
+        line = (
+            f"[event:{event.event_id}] {event.status} ({event.delivery}) "
+            f"{event.summary}"
+        )
+        if event.failure_reason:
+            line += f" - {event.failure_reason}"
+        return line
 
     def _episode_heading(self, episode: EpisodeSummaryView) -> str:
         time_range = format_episode_time_range(

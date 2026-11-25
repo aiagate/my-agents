@@ -25,6 +25,7 @@ from my_agents.contracts.ports.episode_summarizer import (
     EpisodeSummaryRequest,
     IEpisodeSummarizer,
 )
+from my_agents.contracts.ports.event_ledger import IEventLedger
 from my_agents.contracts.ports.logger import NOOP_LOGGER
 from my_agents.contracts.secret import SecretStr
 from my_agents.domain.context_assembler import assemble_instructions
@@ -79,7 +80,9 @@ def _patch_runner(
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
             chat_recall: IChatRecall | None = None,
+            event_ledger: IEventLedger | None = None,
         ) -> PydanticAIAgentRunner:
+            _ = event_ledger
             captured["model_name"] = settings.model_name
             captured["base_url"] = settings.base_url
             captured["api_key"] = settings.api_key
@@ -131,7 +134,9 @@ def _patch_core_memory_runner(
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
             chat_recall: IChatRecall | None = None,
+            event_ledger: IEventLedger | None = None,
         ) -> PydanticAIAgentRunner:
+            _ = event_ledger
             captured["memory_dir"] = settings.memory_dir
             captured["updater"] = core_profile_updater
             captured["chat_recall"] = chat_recall
@@ -369,7 +374,9 @@ def test_run_cli_debug_and_explicit_log_file_record_runtime_errors(
             *,
             core_profile_updater: ICoreProfileUpdater | None = None,
             chat_recall: IChatRecall | None = None,
+            event_ledger: IEventLedger | None = None,
         ) -> PydanticAIAgentRunner:
+            _ = event_ledger
             return PydanticAIAgentRunner(
                 FunctionModel(failing_respond),
                 api_key=settings.api_key,

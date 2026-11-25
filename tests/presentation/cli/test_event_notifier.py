@@ -18,7 +18,7 @@ def test_notifies_completed_event_to_main_chat_output() -> None:
 
     notifier.notify(EventNotification("evt_one", "analysis body", failed=False))
 
-    assert outputs == ["\n[Event evt_one: completed]\nanalysis body"]
+    assert outputs == ["\nanalysis body"]
     assert logger.entries[0] == LogEntry(
         level=LogLevel.INFO,
         event="event_completed",
@@ -33,7 +33,7 @@ def test_notifies_failed_event_at_error_level() -> None:
 
     notifier.notify(EventNotification("evt_two", "failure body", failed=True))
 
-    assert outputs == ["\n[Event evt_two: failed]\nfailure body"]
+    assert outputs == ["\nfailure body"]
     assert logger.entries[0].level is LogLevel.ERROR
     assert logger.entries[0].event == "event_failed"
     assert logger.entries[0].message == "evt_two failed"

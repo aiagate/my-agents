@@ -31,6 +31,4 @@ class CliEventNotifier(IEventNotifier):
                 message=f"{notification.event_id} {status}",
             )
         )
-        self._write_output(
-            f"\n[Event {notification.event_id}: {status}]\n{notification.content}"
-        )
+        self._write_output(f"\n{notification.content}")

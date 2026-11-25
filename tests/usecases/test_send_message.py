@@ -2,13 +2,18 @@ import sqlite3
 from collections.abc import Sequence
 from contextlib import closing
 from dataclasses import dataclass
-from datetime import UTC, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 from flow_res import Err, Ok, Result, is_ok
 
 from my_agents.contracts.errors import AppError, DisplayableError, TypedError
+from my_agents.contracts.events import (
+    EventDelivery,
+    EventRecord,
+    EventStatus,
+)
 from my_agents.contracts.messages import AgentReply, ChatMessage
 from my_agents.contracts.ports.agent_runner import (
     AgentRunnerError,
@@ -20,6 +25,11 @@ from my_agents.contracts.ports.episode_summarizer import (
     EpisodeSummarizerError,
     EpisodeSummarizerErrorType,
     EpisodeSummaryRequest,
+)
+from my_agents.contracts.ports.event_ledger import (
+    EventLedgerError,
+    EventLedgerErrorType,
+    IEventLedger,
 )
 from my_agents.domain.context_assembler import assemble_instructions
 from my_agents.domain.core_profile import CoreProfile
@@ -607,7 +617,7 @@ async def test_first_rollover_reply_uses_current_summary_without_queuing_it(
     (run,) = runner.runs
     assert run.history == ()
     assert (
-        "## 直近の話題のサマリー\n\n### [11/22 22:48] new title\n\nsummary"
+        "## 直近の話題のサマリー\n\n### [2026-11-22] new title\n\nsummary"
         in run.instructions
     )
     assert "## 過去の会話サマリー一覧" not in run.instructions
@@ -881,6 +891,7 @@ async def test_episode_index_applies_character_budget_to_more_than_200_episodes(
         chat_store=repo,
         chat_query=repo,
         summary_index_char_budget=100_000,
+        prompt_index_char_budget=100_000,
         clock=lambda: NOW,
     )
     (await handler.execute(SendMessageRequest("next"))).unwrap()
@@ -915,7 +926,7 @@ async def test_prompt_index_preserves_sqlite_recency_for_equal_timestamps(
     (await handler.execute(SendMessageRequest("next"))).unwrap()
     (run,) = runner.runs
     assert run.instructions.endswith(
-        "- [11/22 00:00] (id:a-second) Second\n- [11/22 00:00] (id:z-first) First"
+        "- [2026-11-22] (id:a-second) Second\n- [2026-11-22] (id:z-first) First"
     )
 
 
@@ -952,3 +963,188 @@ async def test_corrupt_previous_episode_warns_without_losing_reply(
         (ChatMessage("user", "question"),) if has_open else ()
     )
     assert "## 直近の話題のサマリー" not in runner.runs[-1].instructions
+
+
+class StubEventLedger(IEventLedger):
+    def __init__(
+        self,
+        *,
+        pending: Result[tuple[EventRecord, ...], EventLedgerError] | None = None,
+        recent: Result[tuple[EventRecord, ...], EventLedgerError] | None = None,
+        mark: Result[None, EventLedgerError] | None = None,
+    ) -> None:
+        self.pending: Result[tuple[EventRecord, ...], EventLedgerError] = (
+            Ok(()) if pending is None else pending
+        )
+        self.recent: Result[tuple[EventRecord, ...], EventLedgerError] = (
+            Ok(()) if recent is None else recent
+        )
+        self.mark: Result[None, EventLedgerError] = Ok(None) if mark is None else mark
+        self.marked: list[tuple[tuple[str, ...], datetime]] = []
+
+    def record(self, entry: EventRecord) -> Result[None, EventLedgerError]:
+        raise AssertionError(entry)
+
+    def list_recent(
+        self, *, limit: int = 10, unsurfaced_only: bool = False
+    ) -> Result[tuple[EventRecord, ...], EventLedgerError]:
+        _ = limit
+        return self.pending if unsurfaced_only else self.recent
+
+    def get_event(self, event_id: str) -> Result[EventRecord | None, EventLedgerError]:
+        raise AssertionError(event_id)
+
+    def mark_surfaced(
+        self, event_ids: Sequence[str], *, surfaced_at: datetime
+    ) -> Result[None, EventLedgerError]:
+        self.marked.append((tuple(event_ids), surfaced_at))
+        return self.mark
+
+
+def _event_record(
+    event_id: str,
+    *,
+    delivery: EventDelivery,
+    failure_reason: str = "",
+) -> EventRecord:
+    return EventRecord(
+        event_id,
+        "email.received",
+        NOW - timedelta(minutes=1),
+        NOW,
+        EventStatus.FAILED if failure_reason else EventStatus.COMPLETED,
+        delivery,
+        '{"subject": "定例"}',
+        "メールを受信しました。",
+        (),
+        "内容を確認する。",
+        failure_reason,
+        NOW if delivery is EventDelivery.PROACTIVE else None,
+    )
+
+
+@pytest.mark.anyio
+async def test_merges_ambient_and_proactive_events_into_instructions() -> None:
+    ledger = StubEventLedger(
+        pending=Ok((_event_record("evt_ambient", delivery=EventDelivery.AMBIENT),)),
+        recent=Ok(
+            (
+                _event_record("evt_proactive", delivery=EventDelivery.PROACTIVE),
+                _event_record("evt_ambient", delivery=EventDelivery.AMBIENT),
+            )
+        ),
+    )
+    runner = FakeAgentRunner(Ok(AgentReply("reply")))
+    handler = SendMessageHandler(
+        runner,
+        FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty()))),
+        event_ledger=ledger,
+        clock=lambda: NOW,
+    )
+
+    response = (await handler.execute(SendMessageRequest("hello"))).unwrap()
+
+    assert response.warnings == ()
+    instructions = runner.runs[-1].instructions
+    assert "[event:evt_ambient] completed" in instructions
+    assert "[event:evt_proactive] completed" in instructions
+    assert "未言及の背景イベント（ambient）" in instructions
+    assert "直近の割り込みイベント（proactive）" in instructions
+    assert ledger.marked == [(("evt_ambient",), NOW)]
+
+
+@pytest.mark.anyio
+async def test_event_ledger_read_failures_warn_and_keep_the_chat() -> None:
+    pending_error = EventLedgerError(
+        EventLedgerErrorType.READ_FAILED, "pending unavailable"
+    )
+    recent_error = EventLedgerError(EventLedgerErrorType.CORRUPT_DATA, "recent corrupt")
+    ledger = StubEventLedger(
+        pending=Err(pending_error),
+        recent=Err(recent_error),
+    )
+    runner = FakeAgentRunner(Ok(AgentReply("reply")))
+    handler = SendMessageHandler(
+        runner,
+        FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty()))),
+        event_ledger=ledger,
+        clock=lambda: NOW,
+    )
+
+    response = (await handler.execute(SendMessageRequest("hello"))).unwrap()
+
+    assert response.reply == "reply"
+    assert [
+        (warning.event, warning.error_type, warning.message)
+        for warning in response.warnings
+    ] == [
+        ("event_ledger_read_failed", "READ_FAILED", "pending unavailable"),
+        ("event_ledger_read_failed", "CORRUPT_DATA", "recent corrupt"),
+    ]
+    assert "[event:" not in runner.runs[-1].instructions
+    assert ledger.marked == []
+
+
+@pytest.mark.anyio
+async def test_recent_event_read_failure_warns_without_pending_events() -> None:
+    ledger = StubEventLedger(
+        recent=Err(EventLedgerError(EventLedgerErrorType.READ_FAILED, "offline"))
+    )
+    runner = FakeAgentRunner(Ok(AgentReply("reply")))
+    handler = SendMessageHandler(
+        runner,
+        FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty()))),
+        event_ledger=ledger,
+        clock=lambda: NOW,
+    )
+
+    response = (await handler.execute(SendMessageRequest("hello"))).unwrap()
+
+    assert [warning.message for warning in response.warnings] == ["offline"]
+    assert "[event:" not in runner.runs[-1].instructions
+
+
+@pytest.mark.anyio
+async def test_mark_surfaced_failure_warns_after_the_reply() -> None:
+    ledger = StubEventLedger(
+        pending=Ok((_event_record("evt_ambient", delivery=EventDelivery.AMBIENT),)),
+        mark=Err(
+            EventLedgerError(EventLedgerErrorType.WRITE_FAILED, "read-only ledger")
+        ),
+    )
+    runner = FakeAgentRunner(Ok(AgentReply("reply")))
+    handler = SendMessageHandler(
+        runner,
+        FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty()))),
+        event_ledger=ledger,
+        clock=lambda: NOW,
+    )
+
+    response = (await handler.execute(SendMessageRequest("hello"))).unwrap()
+
+    assert response.reply == "reply"
+    assert [(warning.event, warning.message) for warning in response.warnings] == [
+        ("event_ledger_write_failed", "read-only ledger")
+    ]
+    assert "[event:evt_ambient]" in runner.runs[-1].instructions
+
+
+@pytest.mark.anyio
+async def test_pending_event_read_failure_warns_when_recent_read_succeeds() -> None:
+    ledger = StubEventLedger(
+        pending=Err(
+            EventLedgerError(EventLedgerErrorType.READ_FAILED, "pending offline")
+        )
+    )
+    runner = FakeAgentRunner(Ok(AgentReply("reply")))
+    handler = SendMessageHandler(
+        runner,
+        FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty()))),
+        event_ledger=ledger,
+        clock=lambda: NOW,
+    )
+
+    response = (await handler.execute(SendMessageRequest("hello"))).unwrap()
+
+    assert [warning.message for warning in response.warnings] == ["pending offline"]
+    assert "[event:" not in runner.runs[-1].instructions

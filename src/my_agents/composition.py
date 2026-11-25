@@ -31,9 +31,7 @@ from my_agents.infrastructure.settings import (
     load_app_settings,
 )
 from my_agents.infrastructure.sqlite_chat_repository import SqliteChatRepository
-from my_agents.infrastructure.sqlite_event_chat_recorder import (
-    SqliteEventChatRecorder,
-)
+from my_agents.infrastructure.sqlite_event_ledger import SqliteEventLedger
 from my_agents.presentation.cli.args import (
     CliArgsError,
     CliHelp,
@@ -60,7 +58,7 @@ from my_agents.usecases.update_core_profile import UpdateCoreProfileHandler
 
 def _build_event_webhook(
     settings: AppSettings,
-    chat_repository: SqliteChatRepository,
+    event_ledger: SqliteEventLedger,
     *,
     write_output: Callable[[str], None],
     logger: IAppLogger,
@@ -68,9 +66,8 @@ def _build_event_webhook(
     if settings.event_webhook_port is None:
         return None
     notifier = CliEventNotifier(write_output, logger=logger)
-    recorder = SqliteEventChatRecorder(chat_repository)
     scheduler = BackgroundEventScheduler(
-        HandleEventHandler(recorder, notifier),
+        HandleEventHandler(event_ledger, notifier),
         delay_ms=settings.event_analysis_delay_ms,
         logger=logger,
     )
@@ -105,6 +102,7 @@ def build_cli(
     get_core_profile = GetCoreProfileHandler(store)
     update_core_profile = UpdateCoreProfileHandler(store)
     chat_repository = SqliteChatRepository.from_settings(settings)
+    event_ledger = SqliteEventLedger.from_settings(settings)
     chat_recall = RecallChatHandler(chat_repository)
     if episode_summarizer is not None:
         summarizer: IEpisodeSummarizer = episode_summarizer
@@ -119,6 +117,7 @@ def build_cli(
             settings,
             core_profile_updater=update_core_profile,
             chat_recall=chat_recall,
+            event_ledger=event_ledger,
         )
     send_message = SendMessageHandler(
         agent_runner,
@@ -126,6 +125,7 @@ def build_cli(
         chat_store=chat_repository,
         chat_query=chat_repository,
         episode_summarizer=summarizer,
+        event_ledger=event_ledger,
         summary_index_char_budget=settings.summary_index_char_budget,
         summary_every_messages=settings.summary_every_messages,
         recent_messages_limit=settings.recent_messages_limit,
@@ -136,7 +136,9 @@ def build_cli(
         CliRepl(
             send_message,
             get_core_profile,
-            get_chat_history=GetChatHistoryHandler(chat_repository),
+            get_chat_history=GetChatHistoryHandler(
+                chat_repository, event_ledger=event_ledger
+            ),
             clear_chat=ClearChatHandler(chat_repository, chat_repository, summarizer),
             finalize_chat=FinalizeChatHandler(
                 chat_repository, chat_repository, summarizer
@@ -151,7 +153,7 @@ def build_cli(
             logger=logger,
             event_webhook=_build_event_webhook(
                 settings,
-                chat_repository,
+                event_ledger,
                 write_output=write_output,
                 logger=logger,
             ),

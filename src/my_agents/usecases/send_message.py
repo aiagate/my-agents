@@ -6,6 +6,7 @@ from typing import Protocol, assert_never
 
 from flow_res import Err, Ok, Result, is_err
 
+from my_agents.contracts.events import EventDelivery, EventRecord
 from my_agents.contracts.messages import ChatMessage, ChatWarning
 from my_agents.contracts.ports.agent_runner import (
     AgentRunnerError,
@@ -20,6 +21,7 @@ from my_agents.contracts.ports.chat_history import (
     NewDialogueTurn,
 )
 from my_agents.contracts.ports.episode_summarizer import IEpisodeSummarizer
+from my_agents.contracts.ports.event_ledger import EventLedgerError, IEventLedger
 from my_agents.domain.chat_history import (
     DEFAULT_EPISODE_GAP_MINUTES,
     DEFAULT_EPISODE_MAX_MESSAGES,
@@ -33,11 +35,21 @@ from my_agents.domain.chat_history import (
     should_rollover_episode,
     should_summarize_episode,
 )
-from my_agents.domain.context_assembler import assemble_instructions
+from my_agents.domain.context_assembler import (
+    DEFAULT_PROMPT_INDEX_CHAR_BUDGET,
+    assemble_context,
+)
+from my_agents.domain.event_context import (
+    EventContext,
+    EventContextItem,
+    EventDeliveryKind,
+)
 from my_agents.usecases._episode_summary import storage_warning, summarize_episode
 from my_agents.usecases.get_core_profile import (
     GetCoreProfileUseCase,
 )
+
+EVENT_CONTEXT_LIMIT = 10
 
 
 class SendMessageErrorType(Enum):
@@ -118,6 +130,82 @@ def _to_send_message_error(error: AgentRunnerError) -> SendMessageError:
             assert_never(error.type)
 
 
+def _event_context_item(record: EventRecord) -> EventContextItem:
+    return EventContextItem(
+        event_id=record.event_id,
+        name=record.name,
+        delivery=EventDeliveryKind(record.delivery.value),
+        occurred_at=record.occurred_at,
+        summary=record.summary,
+        findings=record.findings,
+        recommended_action=record.recommended_action,
+        failure_reason=record.failure_reason,
+        payload_json=record.payload_json,
+    )
+
+
+def _ledger_warning(
+    error: EventLedgerError, *, event: str, display_message: str
+) -> ChatWarning:
+    return ChatWarning(
+        event,
+        error.type.name,
+        error.message,
+        display_message,
+    )
+
+
+def _read_event_context(
+    ledger: IEventLedger,
+) -> tuple[EventContext | None, tuple[str, ...], tuple[ChatWarning, ...]]:
+    pending = ledger.list_recent(limit=EVENT_CONTEXT_LIMIT, unsurfaced_only=True)
+    recent = ledger.list_recent(limit=EVENT_CONTEXT_LIMIT)
+    if is_err(pending):
+        warnings = [
+            _ledger_warning(
+                pending.error,
+                event="event_ledger_read_failed",
+                display_message="未言及のイベントを読み込めませんでした。",
+            )
+        ]
+        if is_err(recent):
+            warnings.append(
+                _ledger_warning(
+                    recent.error,
+                    event="event_ledger_read_failed",
+                    display_message="イベント台帳を読み込めませんでした。",
+                )
+            )
+        return None, (), tuple(warnings)
+    if is_err(recent):
+        return (
+            None,
+            (),
+            (
+                _ledger_warning(
+                    recent.error,
+                    event="event_ledger_read_failed",
+                    display_message="イベント台帳を読み込めませんでした。",
+                ),
+            ),
+        )
+    ambient_records = tuple(
+        record for record in pending.value if record.delivery is EventDelivery.AMBIENT
+    )
+    proactive_records = tuple(
+        record for record in recent.value if record.delivery is EventDelivery.PROACTIVE
+    )
+    context = EventContext(
+        tuple(map(_event_context_item, ambient_records)),
+        tuple(map(_event_context_item, proactive_records)),
+    )
+    return (
+        None if context.is_empty else context,
+        tuple(record.event_id for record in ambient_records),
+        (),
+    )
+
+
 class SendMessageHandler:
     def __init__(
         self,
@@ -127,9 +215,11 @@ class SendMessageHandler:
         chat_store: IChatStore | None = None,
         chat_query: IChatQuery | None = None,
         episode_summarizer: IEpisodeSummarizer | None = None,
+        event_ledger: IEventLedger | None = None,
         display_tz: tzinfo | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         summary_index_char_budget: int = DEFAULT_SUMMARY_INDEX_CHAR_BUDGET,
+        prompt_index_char_budget: int = DEFAULT_PROMPT_INDEX_CHAR_BUDGET,
         summary_every_messages: int = DEFAULT_SUMMARY_EVERY_MESSAGES,
         recent_messages_limit: int = DEFAULT_RECENT_MESSAGES_LIMIT,
         episode_max_messages: int = DEFAULT_EPISODE_MAX_MESSAGES,
@@ -137,8 +227,10 @@ class SendMessageHandler:
     ) -> None:
         self._agent_runner = agent_runner
         self._get_core_profile = get_core_profile
+        self._event_ledger = event_ledger
         self._clock = clock
         self._display_tz = display_tz
+        self._prompt_index_char_budget = prompt_index_char_budget
         self._chat = (
             None
             if chat_store is None or chat_query is None
@@ -185,15 +277,23 @@ class SendMessageHandler:
         )
         if prepared is not None:
             history = prepared.history
+        event_context, pending_event_ids, event_warnings = (
+            (None, (), ())
+            if self._event_ledger is None
+            else _read_event_context(self._event_ledger)
+        )
+        context = assemble_context(
+            profile_result.value.profile,
+            conversation_context=None if prepared is None else prepared.context,
+            event_context=event_context,
+            recall_tools_enabled=self._chat is not None,
+            display_tz=self._display_tz,
+            prompt_index_char_budget=self._prompt_index_char_budget,
+        )
         result = await self._agent_runner.run(
             normalized_input,
             history=history,
-            instructions=assemble_instructions(
-                profile_result.value.profile,
-                conversation_context=None if prepared is None else prepared.context,
-                recall_tools_enabled=self._chat is not None,
-                display_tz=self._display_tz,
-            ),
+            instructions=context.instructions,
         )
         if is_err(result):
             return Err(_to_send_message_error(result.error))
@@ -202,18 +302,31 @@ class SendMessageHandler:
         user = ChatMessage(role="user", content=normalized_input)
         assistant = ChatMessage(role="assistant", content=reply.content)
         next_history = (*history, user, assistant)
-        warnings: tuple[ChatWarning, ...] = ()
+        warnings: list[ChatWarning] = list(event_warnings)
         summary_ids: tuple[str, ...] = ()
         if self._chat is not None and prepared is not None:
             next_history = self._chat.recent_history(next_history)
             save_warnings, summary_ids = self._chat.save(prepared, user, assistant, now)
-            warnings = (*prepared.warnings, *save_warnings)
+            warnings.extend(prepared.warnings)
+            warnings.extend(save_warnings)
+        if self._event_ledger is not None and pending_event_ids:
+            marked = self._event_ledger.mark_surfaced(
+                pending_event_ids, surfaced_at=now
+            )
+            if is_err(marked):
+                warnings.append(
+                    _ledger_warning(
+                        marked.error,
+                        event="event_ledger_write_failed",
+                        display_message="イベント台帳を更新できませんでした。",
+                    )
+                )
         return Ok(
             SendMessageResponse(
                 reply.content,
                 next_history,
                 reply.core_memory_updates,
-                warnings,
+                tuple(warnings),
                 summary_ids,
             )
         )

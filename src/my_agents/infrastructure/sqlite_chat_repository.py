@@ -1,7 +1,7 @@
 import sqlite3
 from collections.abc import Callable, Sequence
 from contextlib import closing, suppress
-from datetime import UTC, datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -19,6 +19,7 @@ from my_agents.contracts.ports.chat_history import (
     NewDialogueTurn,
 )
 from my_agents.infrastructure.settings import AppSettings
+from my_agents.infrastructure.sqlite_time import format_timestamp, parse_timestamp
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS episodes (
@@ -51,19 +52,6 @@ _EPISODE_COLUMNS = (
 _ORDER = "ORDER BY updated_at DESC, rowid DESC"
 
 
-def _timestamp(value: datetime) -> str:
-    if value.utcoffset() != timedelta(0):
-        raise ValueError("Timestamp must use UTC.")
-    return value.astimezone(UTC).isoformat(timespec="microseconds")
-
-
-def _read_timestamp(value: str) -> datetime:
-    stamp = datetime.fromisoformat(value)
-    if stamp.utcoffset() != timedelta(0):
-        raise ValueError("Timestamp must use UTC.")
-    return stamp.replace(tzinfo=UTC)
-
-
 def _decode_episode(row: tuple[object, ...]) -> EpisodeRecord:
     match row:
         case (
@@ -93,7 +81,7 @@ def _decode_episode(row: tuple[object, ...]) -> EpisodeRecord:
         case None:
             closed_at = None
         case str(stamp):
-            closed_at = _read_timestamp(stamp)
+            closed_at = parse_timestamp(stamp)
         case _:
             raise ValueError("Invalid episode close timestamp.")
     if (closed_at is None) != (
@@ -105,8 +93,8 @@ def _decode_episode(row: tuple[object, ...]) -> EpisodeRecord:
         title,
         overview,
         summary,
-        _read_timestamp(started),
-        _read_timestamp(updated),
+        parse_timestamp(started),
+        parse_timestamp(updated),
         closed_at,
         close_reason,
         turn_count,
@@ -129,7 +117,7 @@ def _decode_turn(row: tuple[object, ...]) -> DialogueTurnRecord:
         case _:
             raise ValueError("Invalid dialogue turn role.")
     return DialogueTurnRecord(
-        episode_id, index, valid_role, content, _read_timestamp(created)
+        episode_id, index, valid_role, content, parse_timestamp(created)
     )
 
 
@@ -207,7 +195,7 @@ class SqliteChatRepository(IChatStore, IChatQuery):
         def record(
             connection: sqlite3.Connection,
         ) -> Result[EpisodeRecord, ChatStorageError]:
-            stamp = _timestamp(updated_at)
+            stamp = format_timestamp(updated_at)
             if close_episode_id is not None:
                 connection.execute(
                     "UPDATE episodes SET closed_at = ?, close_reason = 'rollover' WHERE id = ? AND closed_at IS NULL",
@@ -250,7 +238,7 @@ class SqliteChatRepository(IChatStore, IChatQuery):
                         idx,
                         turn.role,
                         turn.content,
-                        _timestamp(turn.created_at),
+                        format_timestamp(turn.created_at),
                     )
                     for idx, turn in enumerate(turns, target.turn_count + 1)
                 ),
@@ -259,7 +247,7 @@ class SqliteChatRepository(IChatStore, IChatQuery):
                 "UPDATE episodes SET turn_count = ?, updated_at = ? WHERE id = ?",
                 (
                     target.turn_count + len(turns),
-                    _timestamp(max(target.updated_at, updated_at)),
+                    format_timestamp(max(target.updated_at, updated_at)),
                     target_id,
                 ),
             )
@@ -338,7 +326,7 @@ class SqliteChatRepository(IChatStore, IChatQuery):
         def close(connection: sqlite3.Connection, episode: EpisodeRecord) -> None:
             connection.execute(
                 "UPDATE episodes SET closed_at = CASE WHEN closed_at IS NULL THEN ? ELSE closed_at END, close_reason = ? WHERE id = ? AND (closed_at IS NULL OR (close_reason = 'rollover' AND ? = 'clear'))",
-                (_timestamp(closed_at), reason, episode.id, reason),
+                (format_timestamp(closed_at), reason, episode.id, reason),
             )
 
         return self._update_episode(episode_id, close)

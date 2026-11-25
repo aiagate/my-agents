@@ -9,6 +9,17 @@ class EventKind(StrEnum):
     WORKER_FAULT = "spike.worker_failure"
 
 
+class EventStatus(StrEnum):
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class EventDelivery(StrEnum):
+    PROACTIVE = "proactive"
+    AMBIENT = "ambient"
+    SILENT = "silent"
+
+
 @dataclass(frozen=True, slots=True)
 class TemperatureThresholdExceeded:
     sensor_id: str
@@ -38,7 +49,22 @@ class InboundEvent:
     kind: EventKind
     occurred_at: datetime
     payload: EventPayload
-    data_block: str
+
+
+@dataclass(frozen=True, slots=True)
+class EventRecord:
+    event_id: str
+    name: str
+    occurred_at: datetime
+    recorded_at: datetime
+    status: EventStatus
+    delivery: EventDelivery
+    payload_json: str
+    summary: str
+    findings: tuple[str, ...]
+    recommended_action: str
+    failure_reason: str
+    surfaced_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)

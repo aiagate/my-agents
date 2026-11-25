@@ -9,57 +9,68 @@ from my_agents.contracts.events import (
     TemperatureThresholdExceeded,
     WorkerFault,
 )
-from my_agents.usecases._event_rules import (
-    EventAnalysis,
-    EventAnalysisError,
+from my_agents.domain.event_context import (
+    decide_event_delivery,
+    sanitize_single_line,
     sanitize_untrusted_text,
 )
+from my_agents.usecases._event_rules import EventAnalysis, EventAnalysisError
 
 URGENT_EMAIL_TERMS = ("至急", "障害", "請求", "期限")
+EMAIL_BODY_EXCERPT_CHARS = 200
 
 
 def _temperature_analysis(
     payload: TemperatureThresholdExceeded,
 ) -> EventAnalysis:
+    sensor = sanitize_single_line(payload.sensor_id)
     delta = payload.celsius - payload.threshold_celsius
     if delta > 0:
         return EventAnalysis(
-            summary=(
-                f"{payload.sensor_id} の温度が閾値を {delta:.1f}°C 超過しています。"
-            ),
+            summary=f"{sensor} の温度が閾値を {delta:.1f}°C 超過しています。",
             findings=(
                 f"計測値: {payload.celsius:.1f}°C",
                 f"閾値: {payload.threshold_celsius:.1f}°C",
             ),
             recommended_action="換気・空調設定を確認し、継続する場合は設備担当へ連絡する。",
+            delivery=decide_event_delivery(temperature_delta=delta),
         )
     return EventAnalysis(
-        summary=f"{payload.sensor_id} の温度は閾値内です。",
+        summary=f"{sensor} の温度は閾値内です。",
         findings=(
             f"計測値: {payload.celsius:.1f}°C",
             f"閾値: {payload.threshold_celsius:.1f}°C",
         ),
         recommended_action="追加の対応は不要です。次回の計測を待つ。",
+        delivery=decide_event_delivery(temperature_delta=delta),
     )
 
 
 def _email_analysis(payload: EmailReceived) -> EventAnalysis:
     searchable = f"{payload.subject}\n{payload.body}"
     urgent = any(term in searchable for term in URGENT_EMAIL_TERMS)
-    safe_subject = sanitize_untrusted_text(payload.subject)[:120]
+    sender = sanitize_single_line(payload.sender)
+    subject = sanitize_single_line(payload.subject)
+    body = sanitize_untrusted_text(payload.body)[:EMAIL_BODY_EXCERPT_CHARS]
+    findings = (
+        f"件名（データ）: {subject}",
+        f"本文（データ）: {body}",
+    )
     if urgent:
         return EventAnalysis(
-            summary=f"要対応の可能性があるメールを {payload.sender} から受信しました。",
+            summary=f"要対応の可能性があるメールを {sender} から受信しました。",
             findings=(
-                f"件名（データ）: {safe_subject}",
+                *findings,
                 "件名または本文に緊急語（至急・障害・請求・期限）を含みます。",
             ),
             recommended_action="内容を確認し、必要なら返信・起票・関係者共有を行う。",
+            delivery=decide_event_delivery(urgent_email=True),
         )
     return EventAnalysis(
-        summary=f"{payload.sender} からメールを受信しました。",
-        findings=(f"件名（データ）: {safe_subject}",),
+        summary=f"{sender} からメールを受信しました。",
+        findings=findings,
         recommended_action="通常の受信箱として内容を確認する。",
+        delivery=decide_event_delivery(urgent_email=False),
     )
 
 

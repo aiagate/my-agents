@@ -1,11 +1,14 @@
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
+from contextlib import closing
 from http.client import HTTPConnection
 from pathlib import Path
 
@@ -56,6 +59,47 @@ class Reader:
             return self._buffer.index(needle, start) + len(needle)
 
 
+class Database:
+    def __init__(self, path: Path) -> None:
+        self._path = path
+
+    def rows(
+        self, sql: str, parameters: tuple[object, ...] = ()
+    ) -> list[tuple[object, ...]]:
+        if not self._path.exists():
+            return []
+        with closing(sqlite3.connect(self._path)) as connection:
+            try:
+                return connection.execute(sql, parameters).fetchall()
+            except sqlite3.OperationalError:
+                return []
+
+    def scalar(self, sql: str, parameters: tuple[object, ...] = ()) -> object | None:
+        rows = self.rows(sql, parameters)
+        return None if not rows else rows[0][0]
+
+    def event(self, event_id: str) -> tuple[object, ...] | None:
+        rows = self.rows(
+            "SELECT status, delivery, occurred_at, recorded_at, surfaced_at, "
+            "failure_reason FROM events WHERE event_id = ?",
+            (event_id,),
+        )
+        return None if not rows else rows[0]
+
+
+def wait_until[T](
+    description: str, probe: Callable[[], T | None], *, timeout: float = 15.0
+) -> T:
+    deadline = time.monotonic() + timeout
+    while True:
+        value = probe()
+        if value is not None:
+            return value
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {description}")
+        time.sleep(0.05)
+
+
 def free_port() -> int:
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -89,13 +133,15 @@ def send(process: subprocess.Popen[str], line: str) -> None:
 def main() -> int:
     port = free_port()
     with tempfile.TemporaryDirectory(prefix="my-agents-e2e-") as tmp:
+        memory_dir = Path(tmp)
+        database = Database(memory_dir / "chats.db")
         env = {
             **os.environ,
             "PYTHONUNBUFFERED": "1",
             "MAGPIE_MODEL": "local-e2e-model",
             "MAGPIE_BASE_URL": "http://127.0.0.1:9/v1",
             "MAGPIE_API_KEY": "local-e2e-key",
-            "MEMORY_PATH": tmp,
+            "MEMORY_PATH": str(memory_dir),
             "HOME": str(Path(tmp) / "home"),
             "XDG_STATE_HOME": str(Path(tmp) / "state"),
             "CHAT_BACKEND": "local",
@@ -156,31 +202,87 @@ def main() -> int:
                 f"chat_during_worker=ok chat_elapsed_ms={chat_elapsed * 1000:.1f} "
                 f"completion_present_while_pending={completion_present}\n"
             )
+            assert status == 202
             assert accepted_elapsed < 0.5
             assert chat_elapsed < DELAY_MS / 1000
             assert not completion_present
 
             completion_mark = reader.wait_for(f"[Event {event_id}: completed]")
             sys.stdout.write(
-                f"completion_notification=ok at_buffer_offset={completion_mark}\n"
+                f"proactive_notification=ok at_buffer_offset={completion_mark}\n"
             )
 
             mark = len(reader.text())
             send(process, "直近のイベントIDを教えて")
-            reader.wait_for(f"直近のイベントは {event_id} です", start=mark)
+            reader.wait_for(f"参照できるイベントは {event_id} です", start=mark)
             sys.stdout.write("followup_chat_references_event_id=ok\n")
+
+            proactive = database.event(event_id)
+            assert proactive is not None
+            assert proactive[0] == "completed"
+            assert proactive[1] == "proactive"
+            assert proactive[2] is not None
+            assert proactive[3] is not None
+            assert proactive[4] is not None
+            assert proactive[5] == ""
+
+            ambient = {
+                "name": "email.received",
+                "data": {
+                    "sender": "alerts@example.com",
+                    "subject": "定例のお知らせ",
+                    "body": "次回の定例は金曜日です。",
+                },
+            }
+            mark = len(reader.text())
+            status, ambient_accepted, ambient_elapsed = post(
+                port, json.dumps(ambient).encode()
+            )
+            ambient_id = str(ambient_accepted["event_id"])
+            ambient_record = wait_until(
+                "ambient event processing",
+                lambda: database.event(ambient_id),
+            )
+            sys.stdout.write(
+                f"ambient_status={status} event_id={ambient_id} "
+                f"accept_elapsed_ms={ambient_elapsed * 1000:.1f} "
+                f"notification_absent={f'[Event {ambient_id}: completed]' not in reader.text()} "
+                f"delivery={ambient_record[1]}\n"
+            )
+            assert status == 202
+            assert ambient_record[0] == "completed"
+            assert ambient_record[1] == "ambient"
+            assert ambient_record[4] is None
+            assert f"[Event {ambient_id}: completed]" not in reader.text()
+
+            mark = len(reader.text())
+            send(process, "背景イベントを教えて")
+            reader.wait_for(f"参照できるイベントは {ambient_id} です", start=mark)
+            surfaced = wait_until(
+                "ambient event surfaced_at update",
+                lambda: database.scalar(
+                    "SELECT surfaced_at FROM events WHERE event_id = ?",
+                    (ambient_id,),
+                ),
+            )
+            sys.stdout.write(
+                f"ambient_chat_references_event_id=ok ambient_surfaced_at={surfaced}\n"
+            )
 
             mark = len(reader.text())
             send(process, "/history 1")
-            reader.wait_for(f"[event:{event_id}] completed", start=mark)
-            sys.stdout.write("history_detail_contains_event_id=ok\n")
+            reader.wait_for(f"[event:{event_id}] completed (proactive)", start=mark)
+            reader.wait_for(f"[event:{ambient_id}] completed (ambient)", start=mark)
+            sys.stdout.write("history_detail_contains_event_ledger=ok\n")
 
             status, malformed, _ = post(port, b"{")
             sys.stdout.write(f"malformed_json_status={status} body={malformed}\n")
+            assert status == 400
             status, schema, _ = post(
                 port, json.dumps({"name": "email.received", "data": {}}).encode()
             )
             sys.stdout.write(f"schema_violation_status={status} body={schema}\n")
+            assert status == 422
 
             fault = {
                 "name": "spike.worker_failure",
@@ -199,15 +301,45 @@ def main() -> int:
             sys.stdout.write(
                 f"failure_notification=ok process_alive={process.poll() is None}\n"
             )
+            assert status == 202
+            failed = wait_until(
+                "failed event ledger record",
+                lambda: database.event(fault_id),
+            )
+            assert failed[0] == "failed"
+            assert failed[1] == "proactive"
+            assert "injected analyzer failure" in str(failed[5])
 
             mark = len(reader.text())
             send(process, "/history 1")
-            reader.wait_for(f"[event:{fault_id}] failed", start=mark)
+            reader.wait_for(f"[event:{fault_id}] failed (proactive)", start=mark)
             sys.stdout.write("history_detail_contains_failure_event=ok\n")
+
+            event_rows = database.rows(
+                "SELECT event_id, status, delivery, occurred_at, surfaced_at "
+                "FROM events ORDER BY recorded_at"
+            )
+            dialogue_event_rows = database.scalar(
+                "SELECT COUNT(*) FROM dialogue_turns WHERE content LIKE '%[event:%'"
+            )
+            turn_count = database.scalar(
+                "SELECT turn_count FROM episodes ORDER BY rowid DESC LIMIT 1"
+            )
+            sys.stdout.write(
+                f"db_events={event_rows} db_dialogue_event_rows={dialogue_event_rows} "
+                f"db_episode_turn_count={turn_count}\n"
+            )
+            assert dialogue_event_rows == 0
+            assert turn_count == 8
+            assert {str(row[1]) for row in event_rows} == {"completed", "failed"}
+            assert {str(row[2]) for row in event_rows} == {"proactive", "ambient"}
+            assert all(row[3] is not None for row in event_rows)
+            assert all(row[4] is not None for row in event_rows)
 
             send(process, "exit")
             exit_code = process.wait(timeout=20)
             sys.stdout.write(f"process_exit_code={exit_code}\n")
+            assert exit_code == 0
         finally:
             if process.poll() is None:
                 process.kill()

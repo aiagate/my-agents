@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 from flow_res import Err, Ok, Result
 
+from my_agents.contracts.events import EventDelivery, EventStatus
 from my_agents.contracts.messages import AgentReply, ChatMessage, ChatWarning
 from my_agents.contracts.ports.agent_runner import (
     AgentRunnerError,
@@ -30,7 +31,15 @@ from my_agents.usecases.clear_chat import (
     ClearChatResponse,
 )
 from my_agents.usecases.finalize_chat import FinalizeChatResponse
-from my_agents.usecases.get_chat_history import GetChatHistoryHandler
+from my_agents.usecases.get_chat_history import (
+    ChatHistoryDetailResponse,
+    ChatHistoryListResponse,
+    DialogueTurnView,
+    EpisodeSummaryView,
+    EventTimelineView,
+    GetChatHistoryError,
+    GetChatHistoryHandler,
+)
 from my_agents.usecases.get_core_profile import (
     GetCoreProfileError,
     GetCoreProfileErrorType,
@@ -1059,3 +1068,82 @@ def test_webhook_start_failure_without_debug_omits_details() -> None:
 
     assert outputs == [_START_BANNER, _END_BANNER]
     assert errors == ["\nError: 起動できませんでした。"]
+
+
+def test_history_detail_interleaves_event_ledger_records() -> None:
+    now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+    episode = EpisodeSummaryView(
+        1,
+        "episode",
+        "会話",
+        "",
+        "",
+        now,
+        now,
+        None,
+        None,
+        2,
+        0,
+        True,
+    )
+    detail = ChatHistoryDetailResponse(
+        episode,
+        (
+            DialogueTurnView(1, "user", "質問", now),
+            DialogueTurnView(2, "assistant", "回答", now + timedelta(minutes=1)),
+        ),
+        (
+            EventTimelineView(
+                "evt_ambient",
+                EventStatus.COMPLETED,
+                EventDelivery.AMBIENT,
+                now,
+                now - timedelta(minutes=1),
+                "背景イベント",
+                "",
+                None,
+            ),
+            EventTimelineView(
+                "evt_failed",
+                EventStatus.FAILED,
+                EventDelivery.PROACTIVE,
+                now,
+                now + timedelta(minutes=2),
+                "失敗イベント",
+                "boom",
+                now + timedelta(minutes=2),
+            ),
+        ),
+    )
+
+    class StaticHistory:
+        def list_episodes(self) -> Result[ChatHistoryListResponse, GetChatHistoryError]:
+            raise AssertionError("not used")
+
+        def get_episode_detail(
+            self, index: int
+        ) -> Result[ChatHistoryDetailResponse, GetChatHistoryError]:
+            assert index == 1
+            return Ok(detail)
+
+    outputs: list[str] = []
+    CliRepl(
+        FakeSendMessageUseCase([]),
+        _empty_get_core_profile(),
+        get_chat_history=StaticHistory(),
+        read_input=_read_inputs(["/history 1", "exit"]),
+        write_output=outputs.append,
+        write_error=lambda _text: None,
+    ).run()
+
+    lines = [
+        output
+        for output in outputs
+        if output.startswith(("You > ", "AI > ", "[event:"))
+    ]
+    assert lines == [
+        "[event:evt_ambient] completed (ambient) 背景イベント",
+        "You > 質問",
+        "AI > 回答",
+        "[event:evt_failed] failed (proactive) 失敗イベント - boom",
+    ]

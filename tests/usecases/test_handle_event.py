@@ -1,12 +1,19 @@
-from datetime import datetime
+from collections.abc import Sequence
+from datetime import UTC, datetime
 
 import pytest
 from flow_res import Err, Ok, Result, is_ok
 
-from my_agents.contracts.events import InboundEvent
-from my_agents.contracts.ports.event_chat import (
-    EventChatRecordError,
-    IEventChatRecorder,
+from my_agents.contracts.events import (
+    EventDelivery,
+    EventRecord,
+    EventStatus,
+    InboundEvent,
+)
+from my_agents.contracts.ports.event_ledger import (
+    EventLedgerError,
+    EventLedgerErrorType,
+    IEventLedger,
 )
 from my_agents.contracts.ports.event_notifier import (
     EventNotification,
@@ -24,19 +31,38 @@ from tests.event_fixtures import (
 )
 from tests.helpers import assert_err
 
+_NOW = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
-class FakeRecorder(IEventChatRecorder):
-    def __init__(
-        self, result: Result[None, EventChatRecordError] | None = None
-    ) -> None:
+
+class FakeLedger(IEventLedger):
+    def __init__(self, result: Result[None, EventLedgerError] | None = None) -> None:
         self.result = Ok(None) if result is None else result
-        self.calls: list[tuple[str, str, datetime]] = []
+        self.records: list[EventRecord] = []
 
-    def record(
-        self, event_id: str, content: str, *, occurred_at: datetime
-    ) -> Result[None, EventChatRecordError]:
-        self.calls.append((event_id, content, occurred_at))
+    def record(self, entry: EventRecord) -> Result[None, EventLedgerError]:
+        self.records.append(entry)
         return self.result
+
+    def list_recent(
+        self, *, limit: int = 10, unsurfaced_only: bool = False
+    ) -> Result[tuple[EventRecord, ...], EventLedgerError]:
+        _ = (limit, unsurfaced_only)
+        raise AssertionError("not used")
+
+    def get_event(self, event_id: str) -> Result[EventRecord | None, EventLedgerError]:
+        raise AssertionError(event_id)
+
+    def mark_surfaced(
+        self, event_ids: Sequence[str], *, surfaced_at: datetime
+    ) -> Result[None, EventLedgerError]:
+        _ = (event_ids, surfaced_at)
+        raise AssertionError("not used")
+
+
+class RaisingLedger(FakeLedger):
+    def record(self, entry: EventRecord) -> Result[None, EventLedgerError]:
+        self.records.append(entry)
+        raise RuntimeError("write exploded")
 
 
 class RecordingNotifier(IEventNotifier):
@@ -47,47 +73,87 @@ class RecordingNotifier(IEventNotifier):
         self.notifications.append(notification)
 
 
-def test_completed_event_is_recorded_and_notified() -> None:
-    recorder = FakeRecorder()
-    notifier = RecordingNotifier()
-    event = validated(temperature_event())
+def _handler(ledger: FakeLedger, notifier: RecordingNotifier) -> HandleEventHandler:
+    return HandleEventHandler(ledger, notifier, clock=lambda: _NOW)
 
-    result = HandleEventHandler(recorder, notifier).execute(event)
+
+def test_proactive_completion_is_recorded_and_notified() -> None:
+    ledger = FakeLedger()
+    notifier = RecordingNotifier()
+    event = validated(temperature_event(celsius=33.2, threshold=30.0))
+
+    result = _handler(ledger, notifier).execute(event)
 
     assert is_ok(result)
     assert result.value.event_id == event.event_id
-    assert recorder.calls[0][0] == event.event_id
-    assert "[event:evt_fixture] completed" in recorder.calls[0][1]
-    assert len(recorder.calls[0]) == 3
+    (record,) = ledger.records
+    assert record.event_id == event.event_id
+    assert record.status is EventStatus.COMPLETED
+    assert record.delivery is EventDelivery.PROACTIVE
+    assert record.occurred_at == event.occurred_at
+    assert record.recorded_at == record.surfaced_at == _NOW
+    assert record.summary == "kitchen の温度が閾値を 3.2°C 超過しています。"
+    assert record.findings == ("計測値: 33.2°C", "閾値: 30.0°C")
+    assert "換気" in record.recommended_action
+    assert record.failure_reason == ""
+    assert record.payload_json == (
+        '{"celsius": 33.2, "sensor_id": "kitchen", "threshold_celsius": 30.0}'
+    )
     assert notifier.notifications == [
-        EventNotification(event.event_id, recorder.calls[0][1], failed=False)
+        EventNotification(event.event_id, result.value.content, failed=False)
     ]
+    assert result.value.content.startswith(f"[Event {event.event_id}: completed]")
+    assert "推奨: 換気" in result.value.content
+    assert f"event_id: {event.event_id}" in result.value.content
+
+
+def test_ambient_completion_is_recorded_silently() -> None:
+    ledger = FakeLedger()
+    notifier = RecordingNotifier()
+    event = validated(email_event(subject="定例のお知らせ"))
+
+    result = _handler(ledger, notifier).execute(event)
+
+    assert is_ok(result)
+    (record,) = ledger.records
+    assert record.status is EventStatus.COMPLETED
+    assert record.delivery is EventDelivery.AMBIENT
+    assert record.surfaced_at is None
+    assert notifier.notifications == []
 
 
 def test_analysis_failure_is_recorded_and_notified() -> None:
-    recorder = FakeRecorder()
+    ledger = FakeLedger()
     notifier = RecordingNotifier()
     event = validated(worker_fault_event(reason="boom"))
 
-    result = HandleEventHandler(recorder, notifier).execute(event)
+    result = _handler(ledger, notifier).execute(event)
 
-    error = assert_err(
+    assert_err(
         result,
         expected_type=EventProcessingErrorType.ANALYSIS_FAILED,
         message_contains="Injected worker failure: boom",
         display_message_contains="ワーカーが失敗",
     )
-    assert error.type is EventProcessingErrorType.ANALYSIS_FAILED
-    assert "[event:evt_fixture] failed" in recorder.calls[0][1]
+    (record,) = ledger.records
+    assert record.status is EventStatus.FAILED
+    assert record.delivery is EventDelivery.PROACTIVE
+    assert record.failure_reason == "Injected worker failure: boom"
+    assert record.surfaced_at == _NOW
     assert notifier.notifications[0].failed is True
+    assert notifier.notifications[0].content.startswith(
+        f"[Event {event.event_id}: failed]"
+    )
     assert "boom" in notifier.notifications[0].content
 
 
-def test_analysis_failure_still_notifies_when_recording_fails() -> None:
-    recorder = FakeRecorder(Err(EventChatRecordError("disk full")))
+def test_analysis_failure_notifies_when_recording_fails() -> None:
+    ledger = FakeLedger(
+        Err(EventLedgerError(EventLedgerErrorType.WRITE_FAILED, "disk full"))
+    )
     notifier = RecordingNotifier()
 
-    result = HandleEventHandler(recorder, notifier).execute(
+    result = _handler(ledger, notifier).execute(
         validated(worker_fault_event(reason="boom"))
     )
 
@@ -98,33 +164,43 @@ def test_analysis_failure_still_notifies_when_recording_fails() -> None:
         display_message_contains="ワーカーが失敗",
     )
     assert notifier.notifications[0].failed is True
-    assert "履歴保存にも失敗しました: disk full" in notifier.notifications[0].content
-
-
-def test_record_failure_after_analysis_is_notified_as_failed() -> None:
-    recorder = FakeRecorder(Err(EventChatRecordError("read-only database")))
-    notifier = RecordingNotifier()
-
-    result = HandleEventHandler(recorder, notifier).execute(validated(email_event()))
-
-    assert_err(
-        result,
-        expected_type=EventProcessingErrorType.RECORD_FAILED,
-        message_contains="read-only database",
-        display_message_contains="保存できませんでした",
-    )
-    assert notifier.notifications[0].failed is True
-    assert "完了結果を会話履歴に保存できませんでした" in (
+    assert "（台帳保存にも失敗しました: disk full）" in (
         notifier.notifications[0].content
     )
 
 
-class RaisingRecorder(IEventChatRecorder):
-    def record(
-        self, event_id: str, content: str, *, occurred_at: datetime
-    ) -> Result[None, EventChatRecordError]:
-        _ = (event_id, content, occurred_at)
-        raise RuntimeError("write exploded")
+def test_completion_record_failure_is_notified_as_failed() -> None:
+    ledger = FakeLedger(
+        Err(EventLedgerError(EventLedgerErrorType.WRITE_FAILED, "read-only"))
+    )
+    notifier = RecordingNotifier()
+
+    result = _handler(ledger, notifier).execute(validated(email_event()))
+
+    assert_err(
+        result,
+        expected_type=EventProcessingErrorType.RECORD_FAILED,
+        message_contains="read-only",
+        display_message_contains="台帳に保存できませんでした",
+    )
+    assert notifier.notifications[0].failed is True
+    assert "完了結果をイベント台帳に保存できませんでした: read-only" in (
+        notifier.notifications[0].content
+    )
+
+
+def test_failure_reason_is_sanitized_and_truncated() -> None:
+    ledger = FakeLedger()
+    notifier = RecordingNotifier()
+    event = validated(worker_fault_event(reason="<" * 500))
+
+    _handler(ledger, notifier).execute(event)
+
+    (record,) = ledger.records
+    assert record.failure_reason.startswith("Injected worker failure: \\u003c")
+    assert "\\u003c\\u003c" in record.failure_reason
+    assert len(record.failure_reason) == 500
+    assert "\x00" not in record.failure_reason
 
 
 def test_unexpected_worker_exception_is_recorded_and_notified(
@@ -134,12 +210,11 @@ def test_unexpected_worker_exception_is_recorded_and_notified(
         raise RuntimeError("boom")
 
     monkeypatch.setattr("my_agents.usecases.handle_event.analyze_event", explode)
-    recorder = FakeRecorder()
+    ledger = FakeLedger()
     notifier = RecordingNotifier()
+    event = validated(temperature_event())
 
-    result = HandleEventHandler(recorder, notifier).execute(
-        validated(temperature_event())
-    )
+    result = _handler(ledger, notifier).execute(event)
 
     assert_err(
         result,
@@ -147,11 +222,13 @@ def test_unexpected_worker_exception_is_recorded_and_notified(
         message_contains="boom",
         display_message_contains="予期しないエラー",
     )
-    assert "[event:evt_fixture] failed" in recorder.calls[0][1]
+    (record,) = ledger.records
+    assert record.status is EventStatus.FAILED
+    assert record.failure_reason == "予期しないワーカー例外: RuntimeError: boom"
+    assert notifier.notifications[0].failed is True
     assert "予期しないワーカー例外: RuntimeError: boom" in (
         notifier.notifications[0].content
     )
-    assert notifier.notifications[0].failed is True
 
 
 def test_unexpected_failure_reports_recording_failure(
@@ -163,9 +240,7 @@ def test_unexpected_failure_reports_recording_failure(
     monkeypatch.setattr("my_agents.usecases.handle_event.analyze_event", explode)
     notifier = RecordingNotifier()
 
-    result = HandleEventHandler(RaisingRecorder(), notifier).execute(
-        validated(temperature_event())
-    )
+    result = _handler(RaisingLedger(), notifier).execute(validated(temperature_event()))
 
     assert_err(
         result,
@@ -173,6 +248,6 @@ def test_unexpected_failure_reports_recording_failure(
         message_contains="boom",
         display_message_contains="予期しないエラー",
     )
-    assert "履歴保存にも失敗しました: write exploded" in (
+    assert "（台帳保存にも失敗しました: write exploded）" in (
         notifier.notifications[0].content
     )
