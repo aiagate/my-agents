@@ -22,8 +22,15 @@ from my_agents.usecases.get_chat_history import (
     GetChatHistoryError,
     GetChatHistoryUseCase,
 )
-from my_agents.usecases.get_core_profile import GetCoreProfileUseCase
-from my_agents.usecases.send_message import SendMessageRequest, SendMessageUseCase
+from my_agents.usecases.get_core_profile import (
+    GetCoreProfileError,
+    GetCoreProfileUseCase,
+)
+from my_agents.usecases.send_message import (
+    SendMessageError,
+    SendMessageRequest,
+    SendMessageUseCase,
+)
 from my_agents.usecases.summarize_episodes import SummarizeEpisodesUseCase
 
 
@@ -162,23 +169,7 @@ class CliRepl:
                                 break
                             self._show_warnings(summary.warnings)
                     else:
-                        error = result.error
-                        self._logger.log(
-                            LogEntry(
-                                level=LogLevel.ERROR,
-                                event="send_message_failed",
-                                error_type=error.type.name,
-                                message=error.message,
-                                detail=error.detail,
-                            )
-                        )
-                        self._write_error(f"\nError: {error.display_message}")
-                        if self._debug:
-                            self._write_error(
-                                f"Debug [{error.type.name}]: {error.message}"
-                            )
-                            if error.detail is not None:
-                                self._write_error(error.detail.rstrip("\n"))
+                        self._show_error("send_message_failed", result.error)
 
         if self._finalize_chat is not None:
             try:
@@ -205,27 +196,38 @@ class CliRepl:
                 if warning.detail is not None:
                     self._write_error(warning.detail.rstrip("\n"))
 
-    def _show_chat_error(
-        self, event: str, error: ClearChatError | GetChatHistoryError
+    def _show_error(
+        self,
+        event: str,
+        error: (
+            ClearChatError
+            | GetChatHistoryError
+            | GetCoreProfileError
+            | SendMessageError
+        ),
     ) -> None:
+        detail = error.detail if isinstance(error, SendMessageError) else None
         self._logger.log(
             LogEntry(
                 level=LogLevel.ERROR,
                 event=event,
                 error_type=error.type.name,
                 message=error.message,
+                detail=detail,
             )
         )
         self._write_error(f"\nError: {error.display_message}")
         if self._debug:
             self._write_error(f"Debug [{error.type.name}]: {error.message}")
+            if detail is not None:
+                self._write_error(detail.rstrip("\n"))
 
     def _close_active_episode(self, runner: asyncio.Runner) -> bool:
         if self._clear_chat is not None:
             result = runner.run(self._clear_chat.execute())
             if is_err(result):
                 self._show_warnings(result.error.warnings)
-                self._show_chat_error("clear_chat_failed", result.error)
+                self._show_error("clear_chat_failed", result.error)
                 return False
             else:
                 self._show_warnings(result.value.warnings)
@@ -238,7 +240,7 @@ class CliRepl:
         if not arguments:
             result = self._get_chat_history.list_episodes()
             if is_err(result):
-                self._show_chat_error("chat_history_list_failed", result.error)
+                self._show_error("chat_history_list_failed", result.error)
                 return
             self._write_output(f"\n会話履歴: {result.value.location}")
             if not result.value.episodes:
@@ -260,7 +262,7 @@ class CliRepl:
             return
         detail = self._get_chat_history.get_episode_detail(index)
         if is_err(detail):
-            self._show_chat_error("chat_history_detail_failed", detail.error)
+            self._show_error("chat_history_detail_failed", detail.error)
             return
         episode = detail.value.episode
         self._write_output(f"\n{self._episode_heading(episode)}")
@@ -294,18 +296,7 @@ class CliRepl:
                 f"\n{content}"
             )
         else:
-            error = result.error
-            self._logger.log(
-                LogEntry(
-                    level=LogLevel.ERROR,
-                    event="get_core_profile_failed",
-                    error_type=error.type.name,
-                    message=error.message,
-                )
-            )
-            self._write_error(f"\nError: {error.display_message}")
-            if self._debug:
-                self._write_error(f"Debug [{error.type.name}]: {error.message}")
+            self._show_error("get_core_profile_failed", result.error)
 
     def _show_help(self) -> None:
         self._write_output(

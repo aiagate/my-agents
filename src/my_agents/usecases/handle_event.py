@@ -61,6 +61,19 @@ class HandleEventHandler:
         )
         return result.error if is_err(result) else None
 
+    def _notify_failure(
+        self,
+        event: InboundEvent,
+        failure: str,
+        record_error: EventChatRecordError | None,
+    ) -> None:
+        notified = (
+            failure
+            if record_error is None
+            else f"{failure}\n（履歴保存にも失敗しました: {record_error.message}）"
+        )
+        self._notifier.notify(EventNotification(event.event_id, notified, failed=True))
+
     def execute(
         self, event: InboundEvent
     ) -> Result[EventCompletion, EventProcessingError]:
@@ -81,12 +94,7 @@ class HandleEventHandler:
             record_error = self._record(event, failure)
         except Exception as record_exc:
             record_error = EventChatRecordError(str(record_exc))
-        notified = (
-            failure
-            if record_error is None
-            else f"{failure}\n（履歴保存にも失敗しました: {record_error.message}）"
-        )
-        self._notifier.notify(EventNotification(event.event_id, notified, failed=True))
+        self._notify_failure(event, failure, record_error)
         return Err(
             EventProcessingError(
                 type=EventProcessingErrorType.UNEXPECTED,
@@ -104,14 +112,7 @@ class HandleEventHandler:
                 event.event_id, event.name, analysis.error.message
             )
             record_error = self._record(event, failure)
-            notified = (
-                failure
-                if record_error is None
-                else f"{failure}\n（履歴保存にも失敗しました: {record_error.message}）"
-            )
-            self._notifier.notify(
-                EventNotification(event.event_id, notified, failed=True)
-            )
+            self._notify_failure(event, failure, record_error)
             return Err(
                 EventProcessingError(
                     type=EventProcessingErrorType.ANALYSIS_FAILED,
@@ -128,9 +129,7 @@ class HandleEventHandler:
                 event.name,
                 f"完了結果を会話履歴に保存できませんでした: {record_error.message}",
             )
-            self._notifier.notify(
-                EventNotification(event.event_id, failure, failed=True)
-            )
+            self._notify_failure(event, failure, None)
             return Err(
                 EventProcessingError(
                     type=EventProcessingErrorType.RECORD_FAILED,

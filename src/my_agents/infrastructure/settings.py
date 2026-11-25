@@ -2,10 +2,17 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from os import environ
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from dotenv import dotenv_values
-from flow_res import Err, Ok, Result, is_err
+from flow_res import Err, Ok, Result
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    ValidationError,
+)
 
 from my_agents.contracts.secret import SecretStr
 from my_agents.domain.chat_history import (
@@ -16,10 +23,23 @@ from my_agents.domain.chat_history import (
     DEFAULT_SUMMARY_INDEX_CHAR_BUDGET,
 )
 
-_SETTING_NAMES = ("MAGPIE_MODEL", "MAGPIE_BASE_URL", "MAGPIE_API_KEY")
 type ChatBackend = Literal["openai", "local"]
 DEFAULT_MEMORY_DIR_NAME = "memory"
 DEFAULT_MLX_LORA_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
+_INVALID_INT = "\x00invalid-int"
+_REQUIRED_ENV = ("MAGPIE_MODEL", "MAGPIE_BASE_URL", "MAGPIE_API_KEY")
+_ERROR_MESSAGES = {
+    "SUMMARY_INDEX_CHAR_BUDGET": "SUMMARY_INDEX_CHAR_BUDGET must be a positive integer.",
+    "SUMMARY_EVERY_MESSAGES": "SUMMARY_EVERY_MESSAGES must be a positive integer.",
+    "RECENT_MESSAGES_LIMIT": "RECENT_MESSAGES_LIMIT must be a positive integer.",
+    "EPISODE_MAX_MESSAGES": "EPISODE_MAX_MESSAGES must be a positive integer.",
+    "EPISODE_GAP_MINUTES": "EPISODE_GAP_MINUTES must be a positive integer.",
+    "CHAT_BACKEND": "CHAT_BACKEND must be 'openai' or 'local'.",
+    "EVENT_WEBHOOK_PORT": "EVENT_WEBHOOK_PORT must be an integer from 0 to 65535.",
+    "EVENT_ANALYSIS_DELAY_MS": (
+        "EVENT_ANALYSIS_DELAY_MS must be a non-negative integer."
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,88 +85,100 @@ class AppSettings:
         return self.api_key if self.summary_api_key is None else self.summary_api_key
 
 
-def _optional_text(source: Mapping[str, str | None], name: str) -> str | None:
-    return (source.get(name) or "").strip() or None
+def _blank_to_none(value: str) -> str | None:
+    return None if not value.strip() else value
 
 
-def _optional_secret(source: Mapping[str, str | None], name: str) -> SecretStr | None:
-    value = _optional_text(source, name)
-    return None if value is None else SecretStr(value)
+def _python_int(value: str) -> int | str:
+    try:
+        return int(value)
+    except ValueError:
+        return _INVALID_INT
 
 
-def _resolve_mlx_lora_model(source: Mapping[str, str | None]) -> str:
-    value = source.get("MLX_LORA_MODEL")
-    if value is None or not value.strip():
-        return DEFAULT_MLX_LORA_MODEL
-    return value.strip()
+def _optional_python_int(value: str) -> int | str | None:
+    return None if not value.strip() else _python_int(value)
 
 
-def _resolve_optional_path(
-    source: Mapping[str, str | None],
-    name: str,
-) -> Path | None:
-    value = source.get(name)
-    if value is None or not value.strip():
+def _non_negative_python_int(value: str) -> int | str:
+    return 0 if not value.strip() else _python_int(value)
+
+
+def _chat_backend(value: str) -> str:
+    return value.strip() or "openai"
+
+
+def _optional_path(value: str) -> Path | None:
+    if not value.strip():
         return None
     return Path(value.strip()).expanduser()
 
 
-def _resolve_memory_dir(source: Mapping[str, str | None]) -> Path:
-    value = source.get("MEMORY_PATH")
-    if value is None or not value.strip():
-        return Path.cwd() / DEFAULT_MEMORY_DIR_NAME
-    return Path(value.strip()).expanduser()
+def _memory_dir(value: str) -> Path:
+    return _optional_path(value) or Path.cwd() / DEFAULT_MEMORY_DIR_NAME
 
 
-def _resolve_chat_backend(
-    source: Mapping[str, str | None],
-) -> Result[ChatBackend, SettingsError]:
-    value = _optional_text(source, "CHAT_BACKEND")
-    if value is None:
-        return Ok("openai")
-    match value:
-        case "openai" | "local":
-            return Ok(value)
-        case _:
-            return Err(SettingsError("CHAT_BACKEND must be 'openai' or 'local'."))
+def _mlx_lora_model(value: str) -> str:
+    return value.strip() or DEFAULT_MLX_LORA_MODEL
 
 
-def _resolve_event_webhook_port(
-    source: Mapping[str, str | None],
-) -> Result[int | None, SettingsError]:
-    value = _optional_text(source, "EVENT_WEBHOOK_PORT")
-    if value is None:
-        return Ok(None)
-    try:
-        port = int(value)
-    except ValueError:
-        return Err(
-            SettingsError("EVENT_WEBHOOK_PORT must be an integer from 0 to 65535.")
+class _EnvSettings(BaseModel):
+    model_config = ConfigDict(
+        str_strip_whitespace=True,
+        alias_generator=lambda name: name.upper(),
+    )
+
+    model_name: Annotated[str, Field(alias="MAGPIE_MODEL", min_length=1)]
+    base_url: Annotated[str, Field(alias="MAGPIE_BASE_URL", min_length=1)]
+    api_key: Annotated[SecretStr, Field(alias="MAGPIE_API_KEY", min_length=1)]
+    memory_dir: Annotated[
+        Path, Field(alias="MEMORY_PATH"), BeforeValidator(_memory_dir)
+    ] = Field(default_factory=lambda: Path.cwd() / DEFAULT_MEMORY_DIR_NAME)
+    mlx_lora_model: Annotated[str, BeforeValidator(_mlx_lora_model)] = (
+        DEFAULT_MLX_LORA_MODEL
+    )
+    mlx_lora_adapter_path: Annotated[Path | None, BeforeValidator(_optional_path)] = (
+        None
+    )
+    chats_db_path: Annotated[Path | None, BeforeValidator(_optional_path)] = None
+    summary_model_name: Annotated[
+        str | None, Field(alias="SUMMARY_MODEL"), BeforeValidator(_blank_to_none)
+    ] = None
+    summary_base_url: Annotated[str | None, BeforeValidator(_blank_to_none)] = None
+    summary_api_key: Annotated[SecretStr | None, BeforeValidator(_blank_to_none)] = None
+    summary_index_char_budget: Annotated[
+        int, Field(gt=0), BeforeValidator(_python_int)
+    ] = DEFAULT_SUMMARY_INDEX_CHAR_BUDGET
+    summary_every_messages: Annotated[
+        int, Field(gt=0), BeforeValidator(_python_int)
+    ] = DEFAULT_SUMMARY_EVERY_MESSAGES
+    recent_messages_limit: Annotated[int, Field(gt=0), BeforeValidator(_python_int)] = (
+        DEFAULT_RECENT_MESSAGES_LIMIT
+    )
+    episode_max_messages: Annotated[int, Field(gt=0), BeforeValidator(_python_int)] = (
+        DEFAULT_EPISODE_MAX_MESSAGES
+    )
+    episode_gap_minutes: Annotated[int, Field(gt=0), BeforeValidator(_python_int)] = (
+        DEFAULT_EPISODE_GAP_MINUTES
+    )
+    chat_backend: Annotated[ChatBackend, BeforeValidator(_chat_backend)] = "openai"
+    event_webhook_port: Annotated[
+        int | None, Field(ge=0, le=65535), BeforeValidator(_optional_python_int)
+    ] = None
+    event_analysis_delay_ms: Annotated[
+        int, Field(ge=0), BeforeValidator(_non_negative_python_int)
+    ] = 0
+
+
+def _settings_error(exc: ValidationError) -> SettingsError:
+    errors = exc.errors()
+    failed = {str(error["loc"][0]) for error in errors}
+    missing = [name for name in _REQUIRED_ENV if name in failed]
+    if missing:
+        return SettingsError(
+            f"Missing required environment variables: {', '.join(missing)}"
         )
-    if not 0 <= port <= 65535:
-        return Err(
-            SettingsError("EVENT_WEBHOOK_PORT must be an integer from 0 to 65535.")
-        )
-    return Ok(port)
-
-
-def _resolve_event_analysis_delay(
-    source: Mapping[str, str | None],
-) -> Result[int, SettingsError]:
-    value = _optional_text(source, "EVENT_ANALYSIS_DELAY_MS")
-    if value is None:
-        return Ok(0)
-    try:
-        delay = int(value)
-    except ValueError:
-        return Err(
-            SettingsError("EVENT_ANALYSIS_DELAY_MS must be a non-negative integer.")
-        )
-    if delay < 0:
-        return Err(
-            SettingsError("EVENT_ANALYSIS_DELAY_MS must be a non-negative integer.")
-        )
-    return Ok(delay)
+    return SettingsError(_ERROR_MESSAGES[str(errors[0]["loc"][0])])
 
 
 def load_app_settings(
@@ -157,73 +189,12 @@ def load_app_settings(
     source: Mapping[str, str | None] = environ if env is None else env
 
     if env_path is not None:
-        file_values: dict[str, str | None] = dotenv_values(env_path)
-        source = {**file_values, **source}
+        source = {**dotenv_values(env_path), **source}
 
-    missing: list[str] = []
-    collected: dict[str, str] = {}
-    for name in _SETTING_NAMES:
-        value = source.get(name)
-        if value is None or not value.strip():
-            missing.append(name)
-        else:
-            collected[name] = value.strip()
+    present = {name: value for name, value in source.items() if value is not None}
+    try:
+        parsed = _EnvSettings.model_validate(present)
+    except ValidationError as exc:
+        return Err(_settings_error(exc))
 
-    if missing:
-        return Err(
-            SettingsError(
-                f"Missing required environment variables: {', '.join(missing)}"
-            )
-        )
-
-    integers = {
-        "SUMMARY_INDEX_CHAR_BUDGET": DEFAULT_SUMMARY_INDEX_CHAR_BUDGET,
-        "SUMMARY_EVERY_MESSAGES": DEFAULT_SUMMARY_EVERY_MESSAGES,
-        "RECENT_MESSAGES_LIMIT": DEFAULT_RECENT_MESSAGES_LIMIT,
-        "EPISODE_MAX_MESSAGES": DEFAULT_EPISODE_MAX_MESSAGES,
-        "EPISODE_GAP_MINUTES": DEFAULT_EPISODE_GAP_MINUTES,
-    }
-    for name in integers:
-        raw = source.get(name)
-        if raw is not None:
-            try:
-                integers[name] = int(raw)
-            except ValueError:
-                integers[name] = 0
-            if integers[name] <= 0:
-                return Err(SettingsError(f"{name} must be a positive integer."))
-
-    chat_backend = _resolve_chat_backend(source)
-    if is_err(chat_backend):
-        return Err(chat_backend.error)
-    event_webhook_port = _resolve_event_webhook_port(source)
-    if is_err(event_webhook_port):
-        return Err(event_webhook_port.error)
-    event_analysis_delay = _resolve_event_analysis_delay(source)
-    if is_err(event_analysis_delay):
-        return Err(event_analysis_delay.error)
-
-    return Ok(
-        AppSettings(
-            model_name=collected["MAGPIE_MODEL"],
-            base_url=collected["MAGPIE_BASE_URL"],
-            api_key=SecretStr(collected["MAGPIE_API_KEY"]),
-            memory_dir=_resolve_memory_dir(source),
-            mlx_lora_model=_resolve_mlx_lora_model(source),
-            mlx_lora_adapter_path=_resolve_optional_path(
-                source, "MLX_LORA_ADAPTER_PATH"
-            ),
-            chats_db_path=_resolve_optional_path(source, "CHATS_DB_PATH"),
-            summary_model_name=_optional_text(source, "SUMMARY_MODEL"),
-            summary_base_url=_optional_text(source, "SUMMARY_BASE_URL"),
-            summary_api_key=_optional_secret(source, "SUMMARY_API_KEY"),
-            summary_index_char_budget=integers["SUMMARY_INDEX_CHAR_BUDGET"],
-            summary_every_messages=integers["SUMMARY_EVERY_MESSAGES"],
-            recent_messages_limit=integers["RECENT_MESSAGES_LIMIT"],
-            episode_max_messages=integers["EPISODE_MAX_MESSAGES"],
-            episode_gap_minutes=integers["EPISODE_GAP_MINUTES"],
-            chat_backend=chat_backend.value,
-            event_webhook_port=event_webhook_port.value,
-            event_analysis_delay_ms=event_analysis_delay.value,
-        )
-    )
+    return Ok(AppSettings(**parsed.model_dump()))

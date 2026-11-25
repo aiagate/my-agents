@@ -1,12 +1,12 @@
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum, auto
+from enum import StrEnum
 
 
-class EventKind(Enum):
-    TEMPERATURE_THRESHOLD_EXCEEDED = auto()
-    EMAIL_RECEIVED = auto()
-    WORKER_FAULT = auto()
+class EventKind(StrEnum):
+    TEMPERATURE_THRESHOLD_EXCEEDED = "temperature.threshold_exceeded"
+    EMAIL_RECEIVED = "email.received"
+    WORKER_FAULT = "spike.worker_failure"
 
 
 @dataclass(frozen=True, slots=True)

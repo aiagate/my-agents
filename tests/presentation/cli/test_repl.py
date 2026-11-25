@@ -22,11 +22,7 @@ from my_agents.contracts.ports.logger import IAppLogger, LogEntry, LogLevel
 from my_agents.domain.context_assembler import assemble_instructions
 from my_agents.domain.core_profile import CoreProfile
 from my_agents.infrastructure.sqlite_chat_repository import SqliteChatRepository
-from my_agents.presentation.cli import (
-    CliRepl,
-    GetCoreProfileUseCase,
-    SendMessageUseCase,
-)
+from my_agents.presentation.cli.repl import CliRepl
 from my_agents.usecases.clear_chat import (
     ClearChatError,
     ClearChatErrorType,
@@ -40,6 +36,7 @@ from my_agents.usecases.get_core_profile import (
     GetCoreProfileErrorType,
     GetCoreProfileHandler,
     GetCoreProfileResponse,
+    GetCoreProfileUseCase,
 )
 from my_agents.usecases.send_message import (
     SendMessageError,
@@ -47,6 +44,7 @@ from my_agents.usecases.send_message import (
     SendMessageHandler,
     SendMessageRequest,
     SendMessageResponse,
+    SendMessageUseCase,
 )
 from my_agents.usecases.summarize_episodes import SummarizeEpisodesResponse
 from tests.usecases.test_clear_chat import RecordingSummarizer

@@ -58,6 +58,18 @@ DEFAULT_USAGE_LIMITS = UsageLimits(
     request_limit=DEFAULT_REQUEST_LIMIT,
     tool_calls_limit=DEFAULT_TOOL_CALLS_LIMIT,
 )
+_ERROR_TYPES: tuple[tuple[type[BaseException], AgentRunnerErrorType], ...] = (
+    (ModelAPIError, AgentRunnerErrorType.API_ERROR),
+    (UnexpectedModelBehavior, AgentRunnerErrorType.UNEXPECTED_BEHAVIOR),
+    (UsageLimitExceeded, AgentRunnerErrorType.USAGE_LIMIT_EXCEEDED),
+)
+
+
+def _error_type_for(exc: Exception) -> AgentRunnerErrorType:
+    for exception_type, error_type in _ERROR_TYPES:
+        if isinstance(exc, exception_type):
+            return error_type
+    return AgentRunnerErrorType.UNEXPECTED
 
 
 def _to_model_messages(history: Sequence[ChatMessage]) -> list[ModelMessage]:
@@ -372,32 +384,15 @@ class PydanticAIAgentRunner(IAgentRunner):
                 toolsets=toolsets if toolsets else None,
                 usage_limits=self._usage_limits,
             )
-        except ModelAPIError as exc:
-            return Err(
-                AgentRunnerError(
-                    type=AgentRunnerErrorType.API_ERROR,
-                    message=redact_secret(format_exception(exc), self._api_key),
-                )
-            )
-        except UnexpectedModelBehavior as exc:
-            return Err(
-                AgentRunnerError(
-                    type=AgentRunnerErrorType.UNEXPECTED_BEHAVIOR,
-                    message=redact_secret(format_exception(exc), self._api_key),
-                )
-            )
-        except UsageLimitExceeded as exc:
-            return Err(
-                AgentRunnerError(
-                    type=AgentRunnerErrorType.USAGE_LIMIT_EXCEEDED,
-                    message=redact_secret(format_exception(exc), self._api_key),
-                )
-            )
         except Exception as exc:
+            error_type = _error_type_for(exc)
+            message = redact_secret(format_exception(exc), self._api_key)
+            if error_type is not AgentRunnerErrorType.UNEXPECTED:
+                return Err(AgentRunnerError(type=error_type, message=message))
             return Err(
                 AgentRunnerError(
-                    type=AgentRunnerErrorType.UNEXPECTED,
-                    message=redact_secret(format_exception(exc), self._api_key),
+                    type=error_type,
+                    message=message,
                     detail=redact_secret(traceback.format_exc(), self._api_key),
                 )
             )
