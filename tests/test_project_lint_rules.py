@@ -1,6 +1,7 @@
 from pathlib import Path
+from textwrap import dedent
 
-from tools.project_lint import (
+from tools.project_lint.rules import (
     check_adapter_port_surface,
     check_assert_error_message,
     check_exhaustive_branch,
@@ -29,74 +30,75 @@ from tools.project_lint import (
 
 def _write(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    path.write_text(dedent(content).removeprefix("\n"), encoding="utf-8")
     return path
+
+
+def _package(root: Path) -> Path:
+    return root / "src" / "my_agents"
 
 
 def test_pl001_flags_plain_str_secret_and_allows_vo_and_non_secrets(
     tmp_path: Path,
 ) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "contracts" / "secret.py",
-        (
-            "from dataclasses import dataclass, field\n"
-            "\n"
-            "class SecretStr:\n"
-            "    __slots__ = ('_value',)\n"
-            "    def __init__(self, value: str, /) -> None:\n"
-            "        self._value = value\n"
-            "    def __repr__(self) -> str:\n"
-            "        return 'SecretStr(***)'\n"
-            "    def __str__(self) -> str:\n"
-            "        return '***'\n"
-            "    def __eq__(self, other: object) -> bool:\n"
-            "        return isinstance(other, SecretStr) and self._value == other._value\n"
-            "    def __hash__(self) -> int:\n"
-            "        return hash(self._value)\n"
-            "    def get_secret_value(self) -> str:\n"
-            "        return self._value\n"
-            "\n"
-            "@dataclass(frozen=True)\n"
-            "class DataclassSecret:\n"
-            "    value: str = field(repr=False)\n"
-            "    def __repr__(self) -> str:\n"
-            "        return '***'\n"
-            "    def __str__(self) -> str:\n"
-            "        return '***'\n"
-            "    def __eq__(self, other: object) -> bool:\n"
-            "        return False\n"
-            "    def __hash__(self) -> int:\n"
-            "        return 0\n"
-            "\n"
-            "class IncompleteSecret:\n"
-            "    def __init__(self, value: str, /) -> None:\n"
-            "        self.value = value\n"
-        ),
+        """
+        from dataclasses import dataclass, field
+        class SecretStr:
+            __slots__ = ('_value',)
+            def __init__(self, value: str, /) -> None:
+                self._value = value
+            def __repr__(self) -> str:
+                return 'SecretStr(***)'
+            def __str__(self) -> str:
+                return '***'
+            def __eq__(self, other: object) -> bool:
+                return isinstance(other, SecretStr) and self._value == other._value
+            def __hash__(self) -> int:
+                return hash(self._value)
+            def get_secret_value(self) -> str:
+                return self._value
+        @dataclass(frozen=True)
+        class DataclassSecret:
+            value: str = field(repr=False)
+            def __repr__(self) -> str:
+                return '***'
+            def __str__(self) -> str:
+                return '***'
+            def __eq__(self, other: object) -> bool:
+                return False
+            def __hash__(self) -> int:
+                return 0
+        class IncompleteSecret:
+            def __init__(self, value: str, /) -> None:
+                self.value = value
+        """,
     )
     _write(
         src / "infrastructure" / "bad.py",
-        (
-            "from dataclasses import dataclass\n"
-            "@dataclass(frozen=True)\n"
-            "class BadConfig:\n"
-            "    api_key: str\n"
-            "    auth_token: str | None\n"
-            "    max_tokens: int\n"
-            "    token_count: str\n"
-            "    key_name: str\n"
-        ),
+        """
+        from dataclasses import dataclass
+        @dataclass(frozen=True)
+        class BadConfig:
+            api_key: str
+            auth_token: str | None
+            max_tokens: int
+            token_count: str
+            key_name: str
+        """,
     )
     _write(
         src / "infrastructure" / "good.py",
-        (
-            "from dataclasses import dataclass\n"
-            "from my_agents.contracts.secret import SecretStr\n"
-            "@dataclass(frozen=True)\n"
-            "class GoodConfig:\n"
-            "    api_key: SecretStr\n"
-            "    auth_token: SecretStr | None\n"
-        ),
+        """
+        from dataclasses import dataclass
+        from my_agents.contracts.secret import SecretStr
+        @dataclass(frozen=True)
+        class GoodConfig:
+            api_key: SecretStr
+            auth_token: SecretStr | None
+        """,
     )
 
     findings = check_no_plain_str_secrets(src)
@@ -115,19 +117,17 @@ def test_pl002_requires_error_message_check_with_error_type(tmp_path: Path) -> N
     tests_dir = tmp_path / "tests"
     _write(
         tests_dir / "test_sample.py",
-        (
-            "def test_bad() -> None:\n"
-            "    error = object()\n"
-            "    assert error.type == 1\n"
-            "\n"
-            "def test_good_direct() -> None:\n"
-            "    error = object()\n"
-            "    assert error.type == 1\n"
-            "    assert 'boom' in error.message\n"
-            "\n"
-            "def test_good_helper() -> None:\n"
-            "    assert_err(object(), expected_type=1, message_contains='boom')\n"
-        ),
+        """
+        def test_bad() -> None:
+            error = object()
+            assert error.type == 1
+        def test_good_direct() -> None:
+            error = object()
+            assert error.type == 1
+            assert 'boom' in error.message
+        def test_good_helper() -> None:
+            assert_err(object(), expected_type=1, message_contains='boom')
+        """,
     )
 
     findings = check_assert_error_message(tests_dir)
@@ -140,52 +140,49 @@ def test_pl002_requires_error_message_check_with_error_type(tmp_path: Path) -> N
 def test_pl003_flags_non_exhaustive_if_else_on_literal_and_enum(
     tmp_path: Path,
 ) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "contracts" / "types.py",
-        (
-            "from dataclasses import dataclass\n"
-            "from enum import Enum, auto\n"
-            "from typing import Literal\n"
-            "class Mode(Enum):\n"
-            "    FAST = auto()\n"
-            "    SLOW = auto()\n"
-            "@dataclass(frozen=True)\n"
-            "class Msg:\n"
-            "    role: Literal['user', 'assistant']\n"
-        ),
+        """
+        from dataclasses import dataclass
+        from enum import Enum, auto
+        from typing import Literal
+        class Mode(Enum):
+            FAST = auto()
+            SLOW = auto()
+        @dataclass(frozen=True)
+        class Msg:
+            role: Literal['user', 'assistant']
+        """,
     )
     _write(
         src / "infrastructure" / "sample.py",
-        (
-            "from typing import assert_never\n"
-            "def bad_literal(msg: object) -> int:\n"
-            "    if msg.role == 'user':\n"
-            "        return 1\n"
-            "    else:\n"
-            "        return 2\n"
-            "\n"
-            "def bad_enum(mode: object) -> int:\n"
-            "    if mode is Mode.FAST:\n"
-            "        return 1\n"
-            "    else:\n"
-            "        return 2\n"
-            "\n"
-            "def good_plain_str(prompt: str) -> int:\n"
-            "    if prompt == 'quit':\n"
-            "        return 0\n"
-            "    else:\n"
-            "        return 1\n"
-            "\n"
-            "def good_match(msg: object) -> int:\n"
-            "    match msg.role:\n"
-            "        case 'user':\n"
-            "            return 1\n"
-            "        case 'assistant':\n"
-            "            return 2\n"
-            "        case _:\n"
-            "            assert_never(msg.role)\n"
-        ),
+        """
+        from typing import assert_never
+        def bad_literal(msg: object) -> int:
+            if msg.role == 'user':
+                return 1
+            else:
+                return 2
+        def bad_enum(mode: object) -> int:
+            if mode is Mode.FAST:
+                return 1
+            else:
+                return 2
+        def good_plain_str(prompt: str) -> int:
+            if prompt == 'quit':
+                return 0
+            else:
+                return 1
+        def good_match(msg: object) -> int:
+            match msg.role:
+                case 'user':
+                    return 1
+                case 'assistant':
+                    return 2
+                case _:
+                    assert_never(msg.role)
+        """,
     )
 
     findings = check_exhaustive_branch(src)
@@ -198,26 +195,26 @@ def test_pl003_regression_ternary_ifexp_on_closed_literal(tmp_path: Path) -> Non
     # 2026-11-22 | thread mcp:launch:1a4040d4c0a04b9a800ad4bbe24f3bfa7c6c26d232c6018cca491c9cb0b465e0 | SHA 83ff9e4
     sample = _write(
         tmp_path / "sample.py",
-        (
-            "import typing\n"
-            "from enum import Enum, auto\n"
-            "from typing import Literal, assert_never\n"
-            "class ChatTurn:\n"
-            "    role: Literal['user', 'assistant']\n"
-            "class Mode(Enum):\n"
-            "    FAST = auto()\n"
-            "    SLOW = auto()\n"
-            "def labels(turn: ChatTurn, mode: Mode, prompt: str) -> None:\n"
-            '    label = "You" if turn.role == "user" else "AI"\n'
-            "    speed = 1 if mode is Mode.FAST else 2\n"
-            "    chained = 1 if mode is Mode.FAST else 2 if mode is Mode.SLOW else 0\n"
-            "    guarded = 1 if mode is Mode.FAST else assert_never(mode)\n"
-            "    qualified = 1 if mode is Mode.FAST else (\n"
-            "        2 if mode is Mode.SLOW else typing.assert_never(mode)\n"
-            "    )\n"
-            "    plain = 1 if prompt == 'quit' else 0\n"
-            "    flag = 1 if prompt else 0\n"
-        ),
+        """
+        import typing
+        from enum import Enum, auto
+        from typing import Literal, assert_never
+        class ChatTurn:
+            role: Literal['user', 'assistant']
+        class Mode(Enum):
+            FAST = auto()
+            SLOW = auto()
+        def labels(turn: ChatTurn, mode: Mode, prompt: str) -> None:
+            label = "You" if turn.role == "user" else "AI"
+            speed = 1 if mode is Mode.FAST else 2
+            chained = 1 if mode is Mode.FAST else 2 if mode is Mode.SLOW else 0
+            guarded = 1 if mode is Mode.FAST else assert_never(mode)
+            qualified = 1 if mode is Mode.FAST else (
+                2 if mode is Mode.SLOW else typing.assert_never(mode)
+            )
+            plain = 1 if prompt == 'quit' else 0
+            flag = 1 if prompt else 0
+        """,
     )
 
     findings = check_exhaustive_branch(tmp_path)
@@ -243,13 +240,13 @@ def test_pl003_regression_ternary_ifexp_on_closed_literal(tmp_path: Path) -> Non
 
 
 def test_pl004_enforces_clean_architecture_layer_boundaries(tmp_path: Path) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "contracts" / "bad.py",
-        (
-            "import pydantic_ai\n"
-            "from my_agents.infrastructure.settings import AppSettings\n"
-        ),
+        """
+        import pydantic_ai
+        from my_agents.infrastructure.settings import AppSettings
+        """,
     )
     _write(
         src / "domain" / "bad.py",
@@ -257,7 +254,7 @@ def test_pl004_enforces_clean_architecture_layer_boundaries(tmp_path: Path) -> N
     )
     _write(
         src / "infrastructure" / "ok.py",
-        ("import pydantic_ai\nfrom my_agents.contracts.messages import ChatMessage\n"),
+        "import pydantic_ai\nfrom my_agents.contracts.messages import ChatMessage\n",
     )
 
     findings = check_layer_boundaries(src)
@@ -274,16 +271,19 @@ def test_pl004_enforces_clean_architecture_layer_boundaries(tmp_path: Path) -> N
 def test_pl005_flags_weakened_ty_config(tmp_path: Path) -> None:
     bad_toml = _write(
         tmp_path / "bad.toml",
-        (
-            "[tool.ty.terminal]\n"
-            "error-on-warning = false\n"
-            "[tool.ty.rules]\n"
-            'invalid-assignment = "ignore"\n'
-        ),
+        """
+        [tool.ty.terminal]
+        error-on-warning = false
+        [tool.ty.rules]
+        invalid-assignment = "ignore"
+        """,
     )
     good_toml = _write(
         tmp_path / "good.toml",
-        "[tool.ty.terminal]\nerror-on-warning = true\n",
+        """
+        [tool.ty.terminal]
+        error-on-warning = true
+        """,
     )
 
     bad_findings = check_strict_ty_config(bad_toml)
@@ -297,54 +297,47 @@ def test_pl005_flags_weakened_ty_config(tmp_path: Path) -> None:
 def test_pl006_flags_docstrings_and_allows_runtime_decorator_exceptions(
     tmp_path: Path,
 ) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "bad.py",
-        (
-            '"""Module docstring."""\n'
-            "\n"
-            "class Sample:\n"
-            '    """Class docstring."""\n'
-            "\n"
-            "    value: int\n"
-            '    """Attribute docstring."""\n'
-            "\n"
-            "    def method(self) -> str:\n"
-            '        """Method docstring."""\n'
-            '        return "ok"\n'
-            "\n"
-            "async def fetch() -> str:\n"
-            '    """Async docstring."""\n'
-            '    return "ok"\n'
-        ),
+        '''
+        """Module docstring."""
+        class Sample:
+            """Class docstring."""
+            value: int
+            """Attribute docstring."""
+            def method(self) -> str:
+                """Method docstring."""
+                return "ok"
+        async def fetch() -> str:
+            """Async docstring."""
+            return "ok"
+        ''',
     )
     _write(
         src / "good.py",
-        (
-            "from abc import ABC, abstractmethod\n"
-            "\n"
-            "class Port(ABC):\n"
-            "    @abstractmethod\n"
-            "    async def run(self) -> str: ...\n"
-            "\n"
-            "def greet() -> str:\n"
-            '    message = "hello"\n'
-            "    return message\n"
-        ),
+        """
+        from abc import ABC, abstractmethod
+        class Port(ABC):
+            @abstractmethod
+            async def run(self) -> str: ...
+        def greet() -> str:
+            message = "hello"
+            return message
+        """,
     )
     _write(
         src / "runtime_tool.py",
-        (
-            "@agent.tool\n"
-            "def lookup_weather(city: str) -> str:\n"
-            '    """Look up current weather for a city."""\n'
-            "    return city\n"
-            "\n"
-            "@other.decorator\n"
-            "def regular_helper() -> str:\n"
-            '    """Unallowed docstring."""\n'
-            '    return "ok"\n'
-        ),
+        '''
+        @agent.tool
+        def lookup_weather(city: str) -> str:
+            """Look up current weather for a city."""
+            return city
+        @other.decorator
+        def regular_helper() -> str:
+            """Unallowed docstring."""
+            return "ok"
+        ''',
     )
 
     default_findings = check_no_docstrings((src,))
@@ -365,25 +358,25 @@ def test_pl006_flags_docstrings_and_allows_runtime_decorator_exceptions(
 def test_pl007_flags_weakened_coverage_config(tmp_path: Path) -> None:
     bad_toml = _write(
         tmp_path / "bad.toml",
-        (
-            "[tool.coverage.run]\n"
-            "branch = false\n"
-            'omit = ["src/my_agents/__init__.py", "src/my_agents/infrastructure/a.py"]\n'
-            "[tool.coverage.report]\n"
-            "fail_under = 80\n"
-            'exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError"]\n'
-        ),
+        """
+        [tool.coverage.run]
+        branch = false
+        omit = ["src/my_agents/__init__.py", "src/my_agents/infrastructure/a.py"]
+        [tool.coverage.report]
+        fail_under = 80
+        exclude_also = ["if TYPE_CHECKING:", "raise NotImplementedError"]
+        """,
     )
     good_toml = _write(
         tmp_path / "good.toml",
-        (
-            "[tool.coverage.run]\n"
-            "branch = true\n"
-            'omit = ["src/my_agents/__init__.py"]\n'
-            "[tool.coverage.report]\n"
-            "fail_under = 100\n"
-            'exclude_also = ["if TYPE_CHECKING:", "assert_never\\\\("]\n'
-        ),
+        """
+        [tool.coverage.run]
+        branch = true
+        omit = ["src/my_agents/__init__.py"]
+        [tool.coverage.report]
+        fail_under = 100
+        exclude_also = ["if TYPE_CHECKING:", "assert_never\\\\("]
+        """,
     )
 
     bad_findings = check_strict_coverage_config(bad_toml)
@@ -395,22 +388,22 @@ def test_pl007_flags_weakened_coverage_config(tmp_path: Path) -> None:
 
 
 def test_pl008_flags_inline_suppressions_and_ignores_strings(tmp_path: Path) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "bad.py",
-        (
-            "a = 1  # type: ignore[assignment]\n"
-            "b = 2  # ty: ignore[invalid-argument-type]\n"
-            "c = 3  # noqa: TID251\n"
-            "d = 4  # pragma: no cover\n"
-        ),
+        """
+        a = 1  # type: ignore[assignment]
+        b = 2  # ty: ignore[invalid-argument-type]
+        c = 3  # noqa: TID251
+        d = 4  # pragma: no cover
+        """,
     )
     _write(
         src / "good.py",
-        (
-            'text = "# noqa: TID251 # type: ignore # pragma: no cover"\n'
-            "value = 1  # regular why note\n"
-        ),
+        """
+        text = "# noqa: TID251 # type: ignore # pragma: no cover"
+        value = 1  # regular why note
+        """,
     )
 
     findings = check_no_inline_suppressions((src,))
@@ -421,25 +414,31 @@ def test_pl008_flags_inline_suppressions_and_ignores_strings(tmp_path: Path) -> 
 
 
 def test_pl009_flags_typing_cast_in_src(tmp_path: Path) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "bad_import.py",
-        (
-            "from typing import cast\ndef f(x: object) -> int:\n    return cast(int, x)\n"
-        ),
+        """
+        from typing import cast
+        def f(x: object) -> int:
+            return cast(int, x)
+        """,
     )
     _write(
         src / "bad_attr.py",
-        ("import typing as t\ndef f(x: object) -> int:\n    return t.cast(int, x)\n"),
+        """
+        import typing as t
+        def f(x: object) -> int:
+            return t.cast(int, x)
+        """,
     )
     _write(
         src / "good.py",
-        (
-            "def f(x: object) -> int:\n"
-            "    if isinstance(x, int):\n"
-            "        return x\n"
-            "    return 0\n"
-        ),
+        """
+        def f(x: object) -> int:
+            if isinstance(x, int):
+                return x
+            return 0
+        """,
     )
 
     findings = check_no_cast_in_src(src)
@@ -453,30 +452,25 @@ def test_pl010_flags_shallow_or_assertionless_tests(tmp_path: Path) -> None:
     tests_dir = tmp_path / "tests"
     _write(
         tests_dir / "test_sample.py",
-        (
-            "def test_only_isinstance() -> None:\n"
-            "    value = object()\n"
-            "    assert isinstance(value, object)\n"
-            "\n"
-            "def test_only_not_none() -> None:\n"
-            "    value = object()\n"
-            "    assert value is not None\n"
-            "\n"
-            "def test_no_assert() -> None:\n"
-            "    _ = 1 + 1\n"
-            "\n"
-            "def test_good_equality() -> None:\n"
-            "    value = 1 + 1\n"
-            "    assert isinstance(value, int)\n"
-            "    assert value == 2\n"
-            "\n"
-            "def test_good_raises() -> None:\n"
-            "    with pytest.raises(ValueError):\n"
-            "        int('bad')\n"
-            "\n"
-            "def test_good_helper() -> None:\n"
-            "    assert_err(object(), message_contains='boom')\n"
-        ),
+        """
+        def test_only_isinstance() -> None:
+            value = object()
+            assert isinstance(value, object)
+        def test_only_not_none() -> None:
+            value = object()
+            assert value is not None
+        def test_no_assert() -> None:
+            _ = 1 + 1
+        def test_good_equality() -> None:
+            value = 1 + 1
+            assert isinstance(value, int)
+            assert value == 2
+        def test_good_raises() -> None:
+            with pytest.raises(ValueError):
+                int('bad')
+        def test_good_helper() -> None:
+            assert_err(object(), message_contains='boom')
+        """,
     )
 
     findings = check_no_shallow_tests(tests_dir)
@@ -490,29 +484,26 @@ def test_pl010_flags_shallow_or_assertionless_tests(tmp_path: Path) -> None:
 
 
 def test_pl011_flags_private_dataclass_init_fields(tmp_path: Path) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "sample.py",
-        (
-            "from dataclasses import dataclass, field\n"
-            "from typing import ClassVar\n"
-            "\n"
-            "@dataclass(frozen=True, slots=True)\n"
-            "class BadSecret:\n"
-            "    _value: str\n"
-            "\n"
-            "@dataclass(frozen=True, slots=True)\n"
-            "class GoodPublicField:\n"
-            "    value: str = field(repr=False)\n"
-            "    _cache: int = field(default=0, init=False)\n"
-            "    _tag: ClassVar[str] = 'ok'\n"
-            "\n"
-            "@dataclass(frozen=True, slots=True, init=False)\n"
-            "class GoodExplicitInit:\n"
-            "    _value: str\n"
-            "    def __init__(self, value: str, /) -> None:\n"
-            "        object.__setattr__(self, '_value', value)\n"
-        ),
+        """
+        from dataclasses import dataclass, field
+        from typing import ClassVar
+        @dataclass(frozen=True, slots=True)
+        class BadSecret:
+            _value: str
+        @dataclass(frozen=True, slots=True)
+        class GoodPublicField:
+            value: str = field(repr=False)
+            _cache: int = field(default=0, init=False)
+            _tag: ClassVar[str] = 'ok'
+        @dataclass(frozen=True, slots=True, init=False)
+        class GoodExplicitInit:
+            _value: str
+            def __init__(self, value: str, /) -> None:
+                object.__setattr__(self, '_value', value)
+        """,
     )
 
     findings = check_no_private_dataclass_init_fields(src)
@@ -524,16 +515,15 @@ def test_pl011_flags_private_dataclass_init_fields(tmp_path: Path) -> None:
 
 
 def test_pl012_flags_object_in_contravariant_agent_type_arg(tmp_path: Path) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "sample.py",
-        (
-            "def bad(agent: Agent[object, str]) -> Agent[object, str]:\n"
-            "    return agent\n"
-            "\n"
-            "def good(agent: Agent[None, str], data: dict[str, object]) -> None:\n"
-            "    _ = (agent, data)\n"
-        ),
+        """
+        def bad(agent: Agent[object, str]) -> Agent[object, str]:
+            return agent
+        def good(agent: Agent[None, str], data: dict[str, object]) -> None:
+            _ = (agent, data)
+        """,
     )
 
     findings = check_no_object_in_contravariant_type_args(src)
@@ -545,36 +535,36 @@ def test_pl012_flags_object_in_contravariant_agent_type_arg(tmp_path: Path) -> N
 def test_pl013_flags_adapter_public_members_outside_port_contract(
     tmp_path: Path,
 ) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "contracts" / "ports" / "runner.py",
-        (
-            "from abc import ABC, abstractmethod\n"
-            "class IRunner(ABC):\n"
-            "    @abstractmethod\n"
-            "    async def run(self) -> str: ...\n"
-        ),
+        """
+        from abc import ABC, abstractmethod
+        class IRunner(ABC):
+            @abstractmethod
+            async def run(self) -> str: ...
+        """,
     )
     _write(
         src / "infrastructure" / "runner.py",
-        (
-            "from my_agents.contracts.ports.runner import IRunner\n"
-            "class ConcreteRunner(IRunner):\n"
-            "    def __init__(self) -> None:\n"
-            "        self._inner = object()\n"
-            "    @classmethod\n"
-            "    def from_settings(cls) -> ConcreteRunner:\n"
-            "        return cls()\n"
-            "    @property\n"
-            "    def model(self) -> object:\n"
-            "        return self._inner\n"
-            "    def extra_helper(self) -> None:\n"
-            "        return None\n"
-            "    def _private_helper(self) -> None:\n"
-            "        return None\n"
-            "    async def run(self) -> str:\n"
-            "        return 'ok'\n"
-        ),
+        """
+        from my_agents.contracts.ports.runner import IRunner
+        class ConcreteRunner(IRunner):
+            def __init__(self) -> None:
+                self._inner = object()
+            @classmethod
+            def from_settings(cls) -> ConcreteRunner:
+                return cls()
+            @property
+            def model(self) -> object:
+                return self._inner
+            def extra_helper(self) -> None:
+                return None
+            def _private_helper(self) -> None:
+                return None
+            async def run(self) -> str:
+                return 'ok'
+        """,
     )
 
     findings = check_adapter_port_surface(src)
@@ -591,54 +581,49 @@ def test_pl013_flags_adapter_public_members_outside_port_contract(
 def test_pl002_requires_display_message_check_for_displayable_error(
     tmp_path: Path,
 ) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     tests_dir = tmp_path / "tests"
     _write(
         src / "usecases" / "errors.py",
-        (
-            "from dataclasses import dataclass\n"
-            "from enum import Enum, auto\n"
-            "\n"
-            "class UseCaseErrorType(Enum):\n"
-            "    INVALID = auto()\n"
-            "\n"
-            "@dataclass(frozen=True, slots=True)\n"
-            "class UseCaseError:\n"
-            "    type: UseCaseErrorType\n"
-            "    message: str\n"
-            "    display_message: str\n"
-        ),
+        """
+        from dataclasses import dataclass
+        from enum import Enum, auto
+        class UseCaseErrorType(Enum):
+            INVALID = auto()
+        @dataclass(frozen=True, slots=True)
+        class UseCaseError:
+            type: UseCaseErrorType
+            message: str
+            display_message: str
+        """,
     )
     _write(
         tests_dir / "test_usecase.py",
-        (
-            "def test_bad_missing_display_check() -> None:\n"
-            "    assert_err(object(), expected_type=UseCaseErrorType.INVALID, message_contains='bad')\n"
-            "\n"
-            "def test_good_helper_display_check() -> None:\n"
-            "    assert_err(\n"
-            "        object(),\n"
-            "        expected_type=UseCaseErrorType.INVALID,\n"
-            "        message_contains='bad',\n"
-            "        display_message_contains='user msg',\n"
-            "    )\n"
-            "\n"
-            "def test_good_attr_display_check() -> None:\n"
-            "    error = assert_err(\n"
-            "        object(),\n"
-            "        expected_type=UseCaseErrorType.INVALID,\n"
-            "        message_contains='bad',\n"
-            "    )\n"
-            "    assert error.display_message == 'user msg'\n"
-            "\n"
-            "def test_ignored_fake_instantiation_without_assert() -> None:\n"
-            "    fake_err = UseCaseError(\n"
-            "        type=UseCaseErrorType.INVALID,\n"
-            "        message='internal',\n"
-            "        display_message='user msg',\n"
-            "    )\n"
-            "    assert fake_err.display_message == 'user msg'\n"
-        ),
+        """
+        def test_bad_missing_display_check() -> None:
+            assert_err(object(), expected_type=UseCaseErrorType.INVALID, message_contains='bad')
+        def test_good_helper_display_check() -> None:
+            assert_err(
+                object(),
+                expected_type=UseCaseErrorType.INVALID,
+                message_contains='bad',
+                display_message_contains='user msg',
+            )
+        def test_good_attr_display_check() -> None:
+            error = assert_err(
+                object(),
+                expected_type=UseCaseErrorType.INVALID,
+                message_contains='bad',
+            )
+            assert error.display_message == 'user msg'
+        def test_ignored_fake_instantiation_without_assert() -> None:
+            fake_err = UseCaseError(
+                type=UseCaseErrorType.INVALID,
+                message='internal',
+                display_message='user msg',
+            )
+            assert fake_err.display_message == 'user msg'
+        """,
     )
 
     findings = check_assert_error_message(tests_dir)
@@ -652,35 +637,32 @@ def test_pl014_enforces_thin_entrypoint(tmp_path: Path) -> None:
     bad_src = tmp_path / "bad" / "src" / "my_agents"
     _write(
         bad_src / "__init__.py",
-        (
-            "import os\n"
-            "from .composition import run_cli\n"
-            "\n"
-            "def main() -> int:\n"
-            "    if os.environ.get('DEBUG'):\n"
-            "        return 1\n"
-            "    return run_cli()\n"
-        ),
+        """
+        import os
+        from .composition import run_cli
+        def main() -> int:
+            if os.environ.get('DEBUG'):
+                return 1
+            return run_cli()
+        """,
     )
     good_src = tmp_path / "good" / "src" / "my_agents"
     _write(
         good_src / "__init__.py",
-        (
-            "from my_agents.composition import run_cli\n"
-            "\n"
-            "def main() -> int:\n"
-            "    return run_cli()\n"
-        ),
+        """
+        from my_agents.composition import run_cli
+        def main() -> int:
+            return run_cli()
+        """,
     )
     good_rel_src = tmp_path / "good_rel" / "src" / "my_agents"
     _write(
         good_rel_src / "__init__.py",
-        (
-            "from .composition import run_cli\n"
-            "\n"
-            "def main() -> int:\n"
-            "    return run_cli()\n"
-        ),
+        """
+        from .composition import run_cli
+        def main() -> int:
+            return run_cli()
+        """,
     )
 
     bad_findings = check_thin_entrypoint(bad_src)
@@ -693,28 +675,26 @@ def test_pl014_enforces_thin_entrypoint(tmp_path: Path) -> None:
 def test_pl015_flags_global_environ_mutation_and_allows_reads(
     tmp_path: Path,
 ) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "bad.py",
-        (
-            "import os\n"
-            "from os import environ\n"
-            "\n"
-            "def mutate() -> None:\n"
-            "    os.environ['FOO'] = '1'\n"
-            "    environ.setdefault('BAR', '2')\n"
-            "    os.putenv('BAZ', '3')\n"
-            "    del os.environ['FOO']\n"
-        ),
+        """
+        import os
+        from os import environ
+        def mutate() -> None:
+            os.environ['FOO'] = '1'
+            environ.setdefault('BAR', '2')
+            os.putenv('BAZ', '3')
+            del os.environ['FOO']
+        """,
     )
     _write(
         src / "good.py",
-        (
-            "from os import environ\n"
-            "\n"
-            "def read_value(name: str) -> str | None:\n"
-            "    return environ.get(name)\n"
-        ),
+        """
+        from os import environ
+        def read_value(name: str) -> str | None:
+            return environ.get(name)
+        """,
     )
 
     findings = check_no_global_environ_mutation(src)
@@ -727,27 +707,25 @@ def test_pl015_flags_global_environ_mutation_and_allows_reads(
 def test_pl016_flags_mutable_or_abstract_collections_in_frozen_dataclass(
     tmp_path: Path,
 ) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "dtos.py",
-        (
-            "from collections.abc import Callable, Sequence\n"
-            "from dataclasses import dataclass\n"
-            "from typing import ClassVar\n"
-            "\n"
-            "@dataclass(frozen=True, slots=True)\n"
-            "class BadDto:\n"
-            "    items: list[str]\n"
-            "    history: Sequence[str]\n"
-            "    mapping: dict[str, int] | None\n"
-            "\n"
-            "@dataclass(frozen=True, slots=True)\n"
-            "class GoodDto:\n"
-            "    items: tuple[str, ...]\n"
-            "    tags: frozenset[str]\n"
-            "    callback: Callable[[list[str]], None]\n"
-            "    cache: ClassVar[dict[str, str]] = {}\n"
-        ),
+        """
+        from collections.abc import Callable, Sequence
+        from dataclasses import dataclass
+        from typing import ClassVar
+        @dataclass(frozen=True, slots=True)
+        class BadDto:
+            items: list[str]
+            history: Sequence[str]
+            mapping: dict[str, int] | None
+        @dataclass(frozen=True, slots=True)
+        class GoodDto:
+            items: tuple[str, ...]
+            tags: frozenset[str]
+            callback: Callable[[list[str]], None]
+            cache: ClassVar[dict[str, str]] = {}
+        """,
     )
 
     findings = check_immutable_frozen_dataclass_fields(src)
@@ -763,14 +741,14 @@ def test_pl016_flags_mutable_or_abstract_collections_in_frozen_dataclass(
 
 
 def test_pl017_flags_subpackage_reexports_at_layer_root(tmp_path: Path) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(src / "presentation" / "cli" / "repl.py", "class CliRepl: ...\n")
     _write(
         src / "presentation" / "__init__.py",
-        (
-            "from .cli import CliRepl\n"
-            "from my_agents.presentation.cli.repl import CliRepl as Repl\n"
-        ),
+        """
+        from .cli import CliRepl
+        from my_agents.presentation.cli.repl import CliRepl as Repl
+        """,
     )
     _write(src / "usecases" / "send.py", "class SendHandler: ...\n")
     _write(
@@ -791,19 +769,18 @@ def test_pl018_flags_cross_layer_monkeypatch_and_allows_own_module(
     tests_dir = tmp_path / "tests"
     _write(
         tests_dir / "test_composition.py",
-        (
-            "import pydantic_ai\n"
-            "import pytest\n"
-            "from my_agents import composition\n"
-            "from my_agents.infrastructure import runner as runner_mod\n"
-            "\n"
-            "def test_sample(monkeypatch: pytest.MonkeyPatch) -> None:\n"
-            "    monkeypatch.setattr('my_agents.composition.Runner', object())\n"
-            "    monkeypatch.setattr(composition, 'Runner', object())\n"
-            "    monkeypatch.setattr(pydantic_ai, 'BANNER_ENABLED', True)\n"
-            "    monkeypatch.setattr('my_agents.infrastructure.runner.Client', object())\n"
-            "    monkeypatch.setattr(runner_mod, 'Client', object())\n"
-        ),
+        """
+        import pydantic_ai
+        import pytest
+        from my_agents import composition
+        from my_agents.infrastructure import runner as runner_mod
+        def test_sample(monkeypatch: pytest.MonkeyPatch) -> None:
+            monkeypatch.setattr('my_agents.composition.Runner', object())
+            monkeypatch.setattr(composition, 'Runner', object())
+            monkeypatch.setattr(pydantic_ai, 'BANNER_ENABLED', True)
+            monkeypatch.setattr('my_agents.infrastructure.runner.Client', object())
+            monkeypatch.setattr(runner_mod, 'Client', object())
+        """,
     )
 
     findings = check_no_cross_layer_internal_monkeypatch(tests_dir)
@@ -816,22 +793,19 @@ def test_pl018_flags_cross_layer_monkeypatch_and_allows_own_module(
 
 
 def test_pl019_flags_exception_subclasses_in_src(tmp_path: Path) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "errors.py",
-        (
-            "from dataclasses import dataclass\n"
-            "\n"
-            "class BadDomainError(Exception):\n"
-            "    pass\n"
-            "\n"
-            "class BadDerivedError(BadDomainError):\n"
-            "    pass\n"
-            "\n"
-            "@dataclass(frozen=True, slots=True)\n"
-            "class GoodDomainError:\n"
-            "    message: str\n"
-        ),
+        """
+        from dataclasses import dataclass
+        class BadDomainError(Exception):
+            pass
+        class BadDerivedError(BadDomainError):
+            pass
+        @dataclass(frozen=True, slots=True)
+        class GoodDomainError:
+            message: str
+        """,
     )
 
     findings = check_no_exception_result_errors(src)
@@ -847,10 +821,13 @@ def test_pl019_flags_exception_subclasses_in_src(tmp_path: Path) -> None:
 def test_pl020_restricts_direct_logging_imports_and_global_apis(
     tmp_path: Path,
 ) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "usecases" / "bad_usecase.py",
-        ("import logging\nfrom logging import Formatter\n"),
+        """
+        import logging
+        from logging import Formatter
+        """,
     )
     _write(
         src / "composition.py",
@@ -858,34 +835,34 @@ def test_pl020_restricts_direct_logging_imports_and_global_apis(
     )
     _write(
         src / "infrastructure" / "bad_infra.py",
-        (
-            "import logging\n"
-            "import logging as lg\n"
-            "import logging.handlers\n"
-            "import logging.config\n"
-            "from logging import config, getLogger\n"
-            "from logging.config import dictConfig\n"
-            "from logging import *\n"
-            "from logging.handlers import *\n"
-            "logger = logging.getLogger(__name__)\n"
-            "lg.basicConfig()\n"
-            "logging.error('oops')\n"
-            "logging.config.dictConfig({})\n"
-            "handler.emit(record)\n"
-        ),
+        """
+        import logging
+        import logging as lg
+        import logging.handlers
+        import logging.config
+        from logging import config, getLogger
+        from logging.config import dictConfig
+        from logging import *
+        from logging.handlers import *
+        logger = logging.getLogger(__name__)
+        lg.basicConfig()
+        logging.error('oops')
+        logging.config.dictConfig({})
+        handler.emit(record)
+        """,
     )
     _write(
         src / "infrastructure" / "good_infra.py",
-        (
-            "from logging import ERROR, Formatter, LogRecord\n"
-            "from logging.handlers import RotatingFileHandler\n"
-            "import logging.handlers as lh\n"
-            "class CustomHandler(RotatingFileHandler):\n"
-            "    def emit(self, record: LogRecord) -> None:\n"
-            "        super().emit(record)\n"
-            "formatter = Formatter('%(message)s')\n"
-            "handler.handle(record)\n"
-        ),
+        """
+        from logging import ERROR, Formatter, LogRecord
+        from logging.handlers import RotatingFileHandler
+        import logging.handlers as lh
+        class CustomHandler(RotatingFileHandler):
+            def emit(self, record: LogRecord) -> None:
+                super().emit(record)
+        formatter = Formatter('%(message)s')
+        handler.handle(record)
+        """,
     )
     _write(
         src / "infrastructure" / "non_logging_infra.py",
@@ -910,45 +887,40 @@ def test_pl020_restricts_direct_logging_imports_and_global_apis(
 
 
 def test_pl002_requires_expected_type_for_typed_error(tmp_path: Path) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     tests_dir = tmp_path / "tests"
     _write(
         src / "usecases" / "errors.py",
-        (
-            "from dataclasses import dataclass\n"
-            "from enum import Enum, auto\n"
-            "\n"
-            "class UseCaseErrorType(Enum):\n"
-            "    INVALID = auto()\n"
-            "\n"
-            "@dataclass(frozen=True, slots=True)\n"
-            "class UseCaseError:\n"
-            "    type: UseCaseErrorType\n"
-            "    message: str\n"
-            "\n"
-            "@dataclass(frozen=True, slots=True)\n"
-            "class SettingsError:\n"
-            "    message: str\n"
-        ),
+        """
+        from dataclasses import dataclass
+        from enum import Enum, auto
+        class UseCaseErrorType(Enum):
+            INVALID = auto()
+        @dataclass(frozen=True, slots=True)
+        class UseCaseError:
+            type: UseCaseErrorType
+            message: str
+        @dataclass(frozen=True, slots=True)
+        class SettingsError:
+            message: str
+        """,
     )
     _write(
         tests_dir / "test_sample.py",
-        (
-            "def test_bad_missing_expected_type() -> None:\n"
-            "    error = UseCaseError(type=UseCaseErrorType.INVALID, message='bad')\n"
-            "    assert isinstance(error, UseCaseError)\n"
-            "    assert_err(object(), message_contains='bad')\n"
-            "\n"
-            "def test_good_with_expected_type() -> None:\n"
-            "    assert_err(\n"
-            "        object(),\n"
-            "        expected_type=UseCaseErrorType.INVALID,\n"
-            "        message_contains='bad',\n"
-            "    )\n"
-            "\n"
-            "def test_allows_untyped_app_error() -> None:\n"
-            "    assert_err(object(), message_contains='missing')\n"
-        ),
+        """
+        def test_bad_missing_expected_type() -> None:
+            error = UseCaseError(type=UseCaseErrorType.INVALID, message='bad')
+            assert isinstance(error, UseCaseError)
+            assert_err(object(), message_contains='bad')
+        def test_good_with_expected_type() -> None:
+            assert_err(
+                object(),
+                expected_type=UseCaseErrorType.INVALID,
+                message_contains='bad',
+            )
+        def test_allows_untyped_app_error() -> None:
+            assert_err(object(), message_contains='missing')
+        """,
     )
 
     findings = check_assert_error_message(tests_dir)
@@ -960,33 +932,28 @@ def test_pl002_requires_expected_type_for_typed_error(tmp_path: Path) -> None:
 
 
 def test_pl021_requires_usecase_protocol_to_match_module_name(tmp_path: Path) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "usecases" / "send_message.py",
-        (
-            "from typing import Protocol\n"
-            "\n"
-            "class SendMessageUseCase(Protocol):\n"
-            "    def execute(self) -> None: ...\n"
-            "\n"
-            "class _LocalUseCase(Protocol):\n"
-            "    def execute(self) -> None: ...\n"
-            "\n"
-            "class SendMessageHandler(Protocol):\n"
-            "    def execute(self) -> None: ...\n"
-        ),
+        """
+        from typing import Protocol
+        class SendMessageUseCase(Protocol):
+            def execute(self) -> None: ...
+        class _LocalUseCase(Protocol):
+            def execute(self) -> None: ...
+        class SendMessageHandler(Protocol):
+            def execute(self) -> None: ...
+        """,
     )
     _write(
         src / "usecases" / "get_core_profile.py",
-        (
-            "from typing import Protocol\n"
-            "\n"
-            "class GetCoreProfileUseCase(Protocol):\n"
-            "    def execute(self) -> None: ...\n"
-            "\n"
-            "class SendMessageUseCase(Protocol):\n"
-            "    def execute(self) -> None: ...\n"
-        ),
+        """
+        from typing import Protocol
+        class GetCoreProfileUseCase(Protocol):
+            def execute(self) -> None: ...
+        class SendMessageUseCase(Protocol):
+            def execute(self) -> None: ...
+        """,
     )
 
     findings = check_usecase_protocol_ownership(src)
@@ -999,43 +966,37 @@ def test_pl021_requires_usecase_protocol_to_match_module_name(tmp_path: Path) ->
 
 
 def test_pl022_requires_tool_and_parameter_descriptions(tmp_path: Path) -> None:
-    src = tmp_path / "src" / "my_agents"
+    src = _package(tmp_path)
     _write(
         src / "infrastructure" / "tools.py",
-        (
-            "from typing import Annotated\n"
-            "from pydantic import Field\n"
-            "from pydantic_ai import RunContext, Tool\n"
-            "\n"
-            "def described(value: Annotated[str, Field(description='ok')]) -> str:\n"
-            "    return value\n"
-            "\n"
-            "def bad_param(bad_value: str) -> str:\n"
-            "    return bad_value\n"
-            "\n"
-            "def empty_field(\n"
-            "    empty_value: Annotated[str, Field(description='   ')],\n"
-            ") -> str:\n"
-            "    return empty_value\n"
-            "\n"
-            "def build() -> object:\n"
-            "    def nested(nested_value: str) -> str:\n"
-            "        return nested_value\n"
-            "    return Tool(nested, description='nested tool')\n"
-            "\n"
-            "async def valid(\n"
-            "    ctx: RunContext[None],\n"
-            "    value: Annotated[str, Field(description='ok')],\n"
-            ") -> str:\n"
-            "    return value\n"
-            "\n"
-            "tool_missing = Tool(described)\n"
-            "tool_empty = Tool(described, description='   ')\n"
-            "tool_bad_param = Tool(bad_param, description='does things')\n"
-            "tool_empty_field = Tool(empty_field, description='does things')\n"
-            "tool_valid = Tool(valid, description='valid')\n"
-            "tool_none = Tool(described, description=None)\n"
-        ),
+        """
+        from typing import Annotated
+        from pydantic import Field
+        from pydantic_ai import RunContext, Tool
+        def described(value: Annotated[str, Field(description='ok')]) -> str:
+            return value
+        def bad_param(bad_value: str) -> str:
+            return bad_value
+        def empty_field(
+            empty_value: Annotated[str, Field(description='   ')],
+        ) -> str:
+            return empty_value
+        def build() -> object:
+            def nested(nested_value: str) -> str:
+                return nested_value
+            return Tool(nested, description='nested tool')
+        async def valid(
+            ctx: RunContext[None],
+            value: Annotated[str, Field(description='ok')],
+        ) -> str:
+            return value
+        tool_missing = Tool(described)
+        tool_empty = Tool(described, description='   ')
+        tool_bad_param = Tool(bad_param, description='does things')
+        tool_empty_field = Tool(empty_field, description='does things')
+        tool_valid = Tool(valid, description='valid')
+        tool_none = Tool(described, description=None)
+        """,
     )
 
     findings = check_tool_descriptions(src)
@@ -1054,40 +1015,40 @@ def test_pl023_regression_private_type_in_public_api(tmp_path: Path) -> None:
     # 2026-11-22 | thread mcp:launch:1a4040d4c0a04b9a800ad4bbe24f3bfa7c6c26d232c6018cca491c9cb0b465e0 | SHAs 56de693, 83ff9e4
     sample = _write(
         tmp_path / "sample.py",
-        (
-            "class JsonlFileLogger:\n"
-            "    def __init__(self, handler: _PrivateRotatingFileHandler) -> None: ...\n"
-            "class PydanticAIEpisodeSummarizer:\n"
-            "    def __init__(\n"
-            "        self, model_or_agent: Model | Agent[None, _EpisodeSummaryOutput],\n"
-            "    ) -> None:\n"
-            "        self._agent: Agent[None, _EpisodeSummaryOutput] = model_or_agent\n"
-            "class Public(_Base[models._Config]):\n"
-            "    attribute: Annotated[_Value | _Value, _META]\n"
-            "    _private: _Value\n"
-            "    def _build(self, value: _Value) -> _Value: ...\n"
-            "    def __str__(self: _Receiver) -> str: ...\n"
-            "    @classmethod\n"
-            "    def create(cls: _Receiver) -> str: ...\n"
-            "    class Nested:\n"
-            "        async def get(self) -> _namespace._NestedValue: ...\n"
-            "        type LocalAlias = _Value\n"
-            "class _Internal:\n"
-            "    attribute: _Value\n"
-            "async def fetch() -> _Result:\n"
-            "    def local() -> _Result: ...\n"
-            "    return local()\n"
-            "type PublicAlias = dict[str, _Value]\n"
-            "type _PrivateAlias = _Value\n"
-            "public_value: list[_Value]\n"
-            "_private_value: _Value\n"
-            "def parameters(self: _Pos, /, regular: _Regular, *items: _Item,\n"
-            "               flag: _Flag, **options: _Option): ...\n"
-            "def valid(value: Annotated[str, _META], raw: Literal['_raw'],\n"
-            "          qualified: typing.Annotated[str, Field(_META)],\n"
-            "          sentinel: typing.Literal[constants._RAW],\n"
-            "          dunder: __Public__) -> Public: ...\n"
-        ),
+        """
+        class JsonlFileLogger:
+            def __init__(self, handler: _PrivateRotatingFileHandler) -> None: ...
+        class PydanticAIEpisodeSummarizer:
+            def __init__(
+                self, model_or_agent: Model | Agent[None, _EpisodeSummaryOutput],
+            ) -> None:
+                self._agent: Agent[None, _EpisodeSummaryOutput] = model_or_agent
+        class Public(_Base[models._Config]):
+            attribute: Annotated[_Value | _Value, _META]
+            _private: _Value
+            def _build(self, value: _Value) -> _Value: ...
+            def __str__(self: _Receiver) -> str: ...
+            @classmethod
+            def create(cls: _Receiver) -> str: ...
+            class Nested:
+                async def get(self) -> _namespace._NestedValue: ...
+                type LocalAlias = _Value
+        class _Internal:
+            attribute: _Value
+        async def fetch() -> _Result:
+            def local() -> _Result: ...
+            return local()
+        type PublicAlias = dict[str, _Value]
+        type _PrivateAlias = _Value
+        public_value: list[_Value]
+        _private_value: _Value
+        def parameters(self: _Pos, /, regular: _Regular, *items: _Item,
+                       flag: _Flag, **options: _Option): ...
+        def valid(value: Annotated[str, _META], raw: Literal['_raw'],
+                  qualified: typing.Annotated[str, Field(_META)],
+                  sentinel: typing.Literal[constants._RAW],
+                  dunder: __Public__) -> Public: ...
+        """,
     )
     _write(tmp_path / "_helper.py", "def hidden() -> _Value: ...\n")
     _write(tmp_path / "_helpers" / "api.py", "def hidden() -> _Value: ...\n")

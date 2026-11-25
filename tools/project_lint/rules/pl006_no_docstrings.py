@@ -3,8 +3,6 @@ from ast import (
     AnnAssign,
     Assign,
     AsyncFunctionDef,
-    Attribute,
-    Call,
     ClassDef,
     Constant,
     Expr,
@@ -23,6 +21,8 @@ from tools.project_lint.common import (
     TESTS_DIR,
     TOOLS_DIR,
     LintFinding,
+    decorator_target,
+    dotted_name,
     iter_python_files,
     parse_file,
 )
@@ -49,19 +49,13 @@ def _decorator_matches_allowed(
 ) -> bool:
     if not allowed_decorators:
         return False
-    target = decorator.func if isinstance(decorator, Call) else decorator
-    parts: list[str] = []
-    while isinstance(target, Attribute):
-        parts.append(target.attr)
-        target = target.value
-    if isinstance(target, Name):
-        parts.append(target.id)
-    if not parts:
+    full_name = dotted_name(decorator_target(decorator))
+    if full_name is None:
         return False
-    parts.reverse()
-    full_name = ".".join(parts)
-    leaf_name = parts[-1]
-    return full_name in allowed_decorators or leaf_name in allowed_decorators
+    return (
+        full_name in allowed_decorators
+        or full_name.rsplit(".", 1)[-1] in allowed_decorators
+    )
 
 
 def _assignment_target_name(node: Assign | AnnAssign) -> str:

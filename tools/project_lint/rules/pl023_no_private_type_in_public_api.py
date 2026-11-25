@@ -21,6 +21,7 @@ from pathlib import Path
 from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
+    function_arguments,
     iter_python_files,
     parse_file,
 )
@@ -58,16 +59,7 @@ def _function_annotations(
     function: FunctionDef | AsyncFunctionDef, prefix: str
 ) -> Iterator[_AnnotationSite]:
     symbol = f"{prefix}{function.name}"
-    arguments = [
-        *function.args.posonlyargs,
-        *function.args.args,
-        *function.args.kwonlyargs,
-    ]
-    if function.args.vararg is not None:
-        arguments.append(function.args.vararg)
-    if function.args.kwarg is not None:
-        arguments.append(function.args.kwarg)
-    for argument in arguments:
+    for argument in function_arguments(function):
         if prefix and argument.arg in {"self", "cls"}:
             continue
         yield f"{symbol}({argument.arg})", argument, argument.annotation

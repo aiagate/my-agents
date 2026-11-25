@@ -1,34 +1,15 @@
-from ast import (
-    AnnAssign,
-    AsyncFunctionDef,
-    Attribute,
-    ClassDef,
-    FunctionDef,
-    Name,
-    Subscript,
-    walk,
-)
+from ast import AnnAssign, AsyncFunctionDef, ClassDef, FunctionDef, Name, walk
 from pathlib import Path
 
 from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
     annotation_is_non_init_marker,
+    base_class_names,
     has_decorator_name,
     iter_python_files,
     parse_file,
 )
-
-
-def _base_class_names(node: ClassDef) -> list[str]:
-    names: list[str] = []
-    for base in node.bases:
-        target = base.value if isinstance(base, Subscript) else base
-        if isinstance(target, Name):
-            names.append(target.id)
-        elif isinstance(target, Attribute):
-            names.append(target.attr)
-    return names
 
 
 def _collect_port_contracts(src_dir: Path) -> dict[str, set[str]]:
@@ -40,7 +21,7 @@ def _collect_port_contracts(src_dir: Path) -> dict[str, set[str]]:
         for node in walk(tree):
             if not isinstance(node, ClassDef):
                 continue
-            bases = _base_class_names(node)
+            bases = base_class_names(node)
             is_port = any(
                 base in {"ABC", "Protocol"} for base in bases
             ) or node.name.startswith("I")
@@ -84,7 +65,7 @@ def check_adapter_port_surface(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFind
             if not isinstance(node, ClassDef):
                 continue
             matched_ports = [
-                base for base in _base_class_names(node) if base in port_contracts
+                base for base in base_class_names(node) if base in port_contracts
             ]
             if not matched_ports:
                 continue

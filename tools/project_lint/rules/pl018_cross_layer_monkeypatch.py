@@ -4,6 +4,7 @@ from pathlib import Path
 from tools.project_lint.common import (
     TESTS_DIR,
     LintFinding,
+    dotted_name,
     iter_python_files,
     parse_file,
 )
@@ -35,16 +36,6 @@ def _collect_my_agents_imports(tree: AST) -> dict[str, str]:
                 bound = alias.asname or alias.name
                 imported[bound] = f"{node.module}.{alias.name}"
     return imported
-
-
-def _dotted_name(node: AST) -> str | None:
-    if isinstance(node, Name):
-        return node.id
-    if isinstance(node, Attribute):
-        parent = _dotted_name(node.value)
-        if parent is not None:
-            return f"{parent}.{node.attr}"
-    return None
 
 
 def _is_within_subject(module_path: str, subject_module: str) -> bool:
@@ -111,7 +102,7 @@ def check_no_cross_layer_internal_monkeypatch(
                         )
                     )
             else:
-                dotted = _dotted_name(target_arg)
+                dotted = dotted_name(target_arg)
                 if dotted is None:
                     continue
                 head, *tail = dotted.split(".")

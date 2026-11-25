@@ -4,7 +4,6 @@ from ast import (
     Assign,
     AsyncFunctionDef,
     Attribute,
-    Call,
     ClassDef,
     FunctionDef,
     Name,
@@ -17,6 +16,8 @@ from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
     annotation_is_non_init_marker,
+    base_class_names,
+    has_dataclass_decorator,
     has_decorator_name,
     iter_python_files,
     parse_file,
@@ -70,26 +71,11 @@ def _annotation_uses_plain_str(annotation: AST | None) -> bool:
 
 
 def _inherits_secret_vo(node: ClassDef) -> bool:
-    for base in node.bases:
-        if isinstance(base, Name) and "secret" in base.id.lower():
-            return True
-        if isinstance(base, Attribute) and "secret" in base.attr.lower():
-            return True
-    return False
+    return any("secret" in name.lower() for name in base_class_names(node))
 
 
 def _is_secret_vo_class(node: ClassDef) -> bool:
     return "secret" in node.name.lower() or _inherits_secret_vo(node)
-
-
-def _has_dataclass_decorator(node: ClassDef) -> bool:
-    for decorator in node.decorator_list:
-        target = decorator.func if isinstance(decorator, Call) else decorator
-        if (isinstance(target, Name) and target.id == "dataclass") or (
-            isinstance(target, Attribute) and target.attr == "dataclass"
-        ):
-            return True
-    return False
 
 
 def _find_secret_public_attributes(node: ClassDef) -> list[tuple[str, int, int]]:
@@ -166,7 +152,7 @@ def check_no_plain_str_secrets(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFind
                 for child in walk(node):
                     exempt_nodes.add(id(child))
                 if not _inherits_secret_vo(node):
-                    if _has_dataclass_decorator(node):
+                    if has_dataclass_decorator(node):
                         findings.append(
                             LintFinding(
                                 rule="PL001",

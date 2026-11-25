@@ -6,7 +6,6 @@ from ast import (
     BoolOp,
     Call,
     Compare,
-    Constant,
     FunctionDef,
     Is,
     IsNot,
@@ -20,6 +19,7 @@ from pathlib import Path
 from tools.project_lint.common import (
     TESTS_DIR,
     LintFinding,
+    constant_is,
     iter_python_files,
     parse_file,
 )
@@ -40,10 +40,6 @@ def _has_assertion_helper_call(func: FunctionDef | AsyncFunctionDef) -> bool:
     return False
 
 
-def _is_none_constant(node: AST) -> bool:
-    return isinstance(node, Constant) and node.value is None
-
-
 def _is_shallow_assert_expr(expr: AST) -> bool:
     if isinstance(expr, UnaryOp) and isinstance(expr.op, Not):
         return _is_shallow_assert_expr(expr.operand)
@@ -59,7 +55,7 @@ def _is_shallow_assert_expr(expr: AST) -> bool:
         return True
     if isinstance(expr, Compare) and all(isinstance(op, Is | IsNot) for op in expr.ops):
         operands: list[AST] = [expr.left, *expr.comparators]
-        return any(_is_none_constant(operand) for operand in operands)
+        return any(constant_is(operand, None) for operand in operands)
     return False
 
 

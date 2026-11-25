@@ -1,7 +1,7 @@
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from tools.project_lint.common import LintFinding, LintRule
+from tools.project_lint.common import LintFinding, LintRule, dirs_rule, path_rule
 from tools.project_lint.rules.pl001_secrets import check_no_plain_str_secrets
 from tools.project_lint.rules.pl002_error_message_assert import (
     check_assert_error_message,
@@ -50,138 +50,88 @@ from tools.project_lint.rules.pl023_no_private_type_in_public_api import (
     check_no_private_type_in_public_api,
 )
 
+type _PathCheck = Callable[[Path], list[LintFinding]]
+type _DirsCheck = Callable[[Sequence[Path]], list[LintFinding]]
 
-def _src_rule(
-    code: str,
-    name: str,
-    check: Callable[[Path], list[LintFinding]],
-) -> LintRule:
-    def _run(root: Path) -> list[LintFinding]:
-        return check(root / "src" / "my_agents")
+_SRC = ("src", "my_agents")
+_ALL_DIRS = (_SRC, ("tests",), ("tools",))
 
-    return LintRule(code=code, name=name, check_root=_run)
-
-
-def _tests_rule(
-    code: str,
-    name: str,
-    check: Callable[[Path], list[LintFinding]],
-) -> LintRule:
-    def _run(root: Path) -> list[LintFinding]:
-        return check(root / "tests")
-
-    return LintRule(code=code, name=name, check_root=_run)
-
-
-def _pyproject_rule(
-    code: str,
-    name: str,
-    check: Callable[[Path], list[LintFinding]],
-) -> LintRule:
-    def _run(root: Path) -> list[LintFinding]:
-        return check(root / "pyproject.toml")
-
-    return LintRule(code=code, name=name, check_root=_run)
-
-
-def _all_dirs_rule(
-    code: str,
-    name: str,
-    check: Callable[[Sequence[Path]], list[LintFinding]],
-) -> LintRule:
-    def _run(root: Path) -> list[LintFinding]:
-        return check((root / "src" / "my_agents", root / "tests", root / "tools"))
-
-    return LintRule(code=code, name=name, check_root=_run)
-
-
-RULES: tuple[LintRule, ...] = (
-    _src_rule("PL001", "no_plain_str_secrets", check_no_plain_str_secrets),
-    _tests_rule("PL002", "assert_error_message", check_assert_error_message),
-    _src_rule("PL003", "exhaustive_branch", check_exhaustive_branch),
-    _src_rule("PL004", "layer_boundaries", check_layer_boundaries),
-    _pyproject_rule("PL005", "strict_ty_config", check_strict_ty_config),
-    _all_dirs_rule("PL006", "no_docstrings", check_no_docstrings),
-    _pyproject_rule("PL007", "strict_coverage_config", check_strict_coverage_config),
-    _all_dirs_rule("PL008", "no_inline_suppressions", check_no_inline_suppressions),
-    _src_rule("PL009", "no_cast_in_src", check_no_cast_in_src),
-    _tests_rule("PL010", "no_shallow_tests", check_no_shallow_tests),
-    _src_rule(
+_PATH_RULES: tuple[tuple[str, str, tuple[str, ...], _PathCheck], ...] = (
+    ("PL001", "no_plain_str_secrets", _SRC, check_no_plain_str_secrets),
+    ("PL002", "assert_error_message", ("tests",), check_assert_error_message),
+    ("PL003", "exhaustive_branch", _SRC, check_exhaustive_branch),
+    ("PL004", "layer_boundaries", _SRC, check_layer_boundaries),
+    ("PL005", "strict_ty_config", ("pyproject.toml",), check_strict_ty_config),
+    (
+        "PL007",
+        "strict_coverage_config",
+        ("pyproject.toml",),
+        check_strict_coverage_config,
+    ),
+    ("PL009", "no_cast_in_src", _SRC, check_no_cast_in_src),
+    ("PL010", "no_shallow_tests", ("tests",), check_no_shallow_tests),
+    (
         "PL011",
         "no_private_dataclass_init_fields",
+        _SRC,
         check_no_private_dataclass_init_fields,
     ),
-    _src_rule(
+    (
         "PL012",
         "no_object_in_contravariant_type_args",
+        _SRC,
         check_no_object_in_contravariant_type_args,
     ),
-    _src_rule("PL013", "adapter_port_surface", check_adapter_port_surface),
-    _src_rule("PL014", "thin_entrypoint", check_thin_entrypoint),
-    _src_rule(
-        "PL015",
-        "no_global_environ_mutation",
-        check_no_global_environ_mutation,
-    ),
-    _src_rule(
+    ("PL013", "adapter_port_surface", _SRC, check_adapter_port_surface),
+    ("PL014", "thin_entrypoint", _SRC, check_thin_entrypoint),
+    ("PL015", "no_global_environ_mutation", _SRC, check_no_global_environ_mutation),
+    (
         "PL016",
         "immutable_frozen_dataclass_fields",
+        _SRC,
         check_immutable_frozen_dataclass_fields,
     ),
-    _src_rule(
+    (
         "PL017",
         "no_adapter_reexport_at_layer_root",
+        _SRC,
         check_no_adapter_reexport_at_layer_root,
     ),
-    _tests_rule(
+    (
         "PL018",
         "no_cross_layer_internal_monkeypatch",
+        ("tests",),
         check_no_cross_layer_internal_monkeypatch,
     ),
-    _src_rule(
-        "PL019",
-        "no_exception_result_errors",
-        check_no_exception_result_errors,
-    ),
-    _src_rule(
-        "PL020",
-        "no_direct_logging",
-        check_no_direct_logging,
-    ),
-    _src_rule(
-        "PL021",
-        "usecase_protocol_ownership",
-        check_usecase_protocol_ownership,
-    ),
-    _src_rule("PL022", "tool_descriptions", check_tool_descriptions),
-    _src_rule(
-        "PL023", "no_private_type_in_public_api", check_no_private_type_in_public_api
+    ("PL019", "no_exception_result_errors", _SRC, check_no_exception_result_errors),
+    ("PL020", "no_direct_logging", _SRC, check_no_direct_logging),
+    ("PL021", "usecase_protocol_ownership", _SRC, check_usecase_protocol_ownership),
+    ("PL022", "tool_descriptions", _SRC, check_tool_descriptions),
+    (
+        "PL023",
+        "no_private_type_in_public_api",
+        _SRC,
+        check_no_private_type_in_public_api,
     ),
 )
 
-__all__ = [
-    "RULES",
-    "check_adapter_port_surface",
-    "check_assert_error_message",
-    "check_exhaustive_branch",
-    "check_immutable_frozen_dataclass_fields",
-    "check_layer_boundaries",
-    "check_no_adapter_reexport_at_layer_root",
-    "check_no_cast_in_src",
-    "check_no_cross_layer_internal_monkeypatch",
-    "check_no_direct_logging",
-    "check_no_docstrings",
-    "check_no_exception_result_errors",
-    "check_no_global_environ_mutation",
-    "check_no_inline_suppressions",
-    "check_no_object_in_contravariant_type_args",
-    "check_no_plain_str_secrets",
-    "check_no_private_dataclass_init_fields",
-    "check_no_private_type_in_public_api",
-    "check_no_shallow_tests",
-    "check_strict_coverage_config",
-    "check_strict_ty_config",
-    "check_thin_entrypoint",
-    "check_tool_descriptions",
-    "check_usecase_protocol_ownership",
-]
+_DIRS_RULES: tuple[tuple[str, str, _DirsCheck], ...] = (
+    ("PL006", "no_docstrings", check_no_docstrings),
+    ("PL008", "no_inline_suppressions", check_no_inline_suppressions),
+)
+
+RULES: tuple[LintRule, ...] = tuple(
+    sorted(
+        (
+            *(
+                path_rule(code, name, parts, check)
+                for code, name, parts, check in _PATH_RULES
+            ),
+            *(
+                dirs_rule(code, name, _ALL_DIRS, check)
+                for code, name, check in _DIRS_RULES
+            ),
+        ),
+        key=lambda rule: rule.code,
+    )
+)

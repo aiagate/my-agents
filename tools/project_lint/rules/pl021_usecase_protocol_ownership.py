@@ -1,22 +1,13 @@
-from ast import Attribute, ClassDef, Name, Subscript, walk
+from ast import ClassDef, walk
 from pathlib import Path
 
 from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
+    is_protocol_class,
     iter_python_files,
     parse_file,
 )
-
-
-def _is_protocol_class(node: ClassDef) -> bool:
-    for base in node.bases:
-        target = base.value if isinstance(base, Subscript) else base
-        if isinstance(target, Name) and target.id == "Protocol":
-            return True
-        if isinstance(target, Attribute) and target.attr == "Protocol":
-            return True
-    return False
 
 
 def _pascal_case(stem: str) -> str:
@@ -38,7 +29,7 @@ def check_usecase_protocol_ownership(
                 continue
             if node.name.startswith("_") or not node.name.endswith("UseCase"):
                 continue
-            if not _is_protocol_class(node):
+            if not is_protocol_class(node):
                 continue
             if node.name == expected_name:
                 continue

@@ -3,15 +3,20 @@ from ast import (
     AsyncFunctionDef,
     Attribute,
     Call,
+    ClassDef,
+    Constant,
     FunctionDef,
     Import,
     ImportFrom,
     Name,
     Subscript,
+    Tuple,
+    arg,
     parse,
 )
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import cast
 
@@ -53,30 +58,113 @@ def iter_python_files(directory: Path) -> list[Path]:
     return sorted(p for p in directory.rglob("*.py") if "__pycache__" not in p.parts)
 
 
+@cache
 def parse_file(path: Path) -> AST:
     return parse(path.read_text(encoding="utf-8"), filename=str(path))
+
+
+def node_name(node: AST | None) -> str | None:
+    if isinstance(node, Name):
+        return node.id
+    if isinstance(node, Attribute):
+        return node.attr
+    return None
+
+
+def dotted_name(node: AST | None) -> str | None:
+    if isinstance(node, Name):
+        return node.id
+    if isinstance(node, Attribute):
+        parent = dotted_name(node.value)
+        if parent is not None:
+            return f"{parent}.{node.attr}"
+    return None
+
+
+def call_name(node: AST) -> str | None:
+    return node_name(node.func) if isinstance(node, Call) else None
+
+
+def keyword_value(call: Call, keyword: str) -> AST | None:
+    for kw in call.keywords:
+        if kw.arg == keyword:
+            return kw.value
+    return None
+
+
+def constant_is(node: AST | None, value: object) -> bool:
+    return isinstance(node, Constant) and node.value is value
+
+
+def subscript_arguments(node: Subscript) -> list[AST]:
+    return list(node.slice.elts) if isinstance(node.slice, Tuple) else [node.slice]
+
+
+def function_arguments(
+    function: FunctionDef | AsyncFunctionDef,
+) -> list[arg]:
+    arguments = [
+        *function.args.posonlyargs,
+        *function.args.args,
+        *function.args.kwonlyargs,
+    ]
+    if function.args.vararg is not None:
+        arguments.append(function.args.vararg)
+    if function.args.kwarg is not None:
+        arguments.append(function.args.kwarg)
+    return arguments
+
+
+def decorator_target(decorator: AST) -> AST:
+    return decorator.func if isinstance(decorator, Call) else decorator
 
 
 def has_decorator_name(
     stmt: FunctionDef | AsyncFunctionDef,
     names: frozenset[str],
 ) -> bool:
-    for decorator in stmt.decorator_list:
-        target = decorator.func if isinstance(decorator, Call) else decorator
-        if isinstance(target, Name) and target.id in names:
-            return True
-        if isinstance(target, Attribute) and target.attr in names:
-            return True
-    return False
+    return any(
+        node_name(decorator_target(decorator)) in names
+        for decorator in stmt.decorator_list
+    )
+
+
+def is_dataclass_decorator(decorator: AST) -> bool:
+    return node_name(decorator_target(decorator)) == "dataclass"
+
+
+def has_dataclass_decorator(node: ClassDef) -> bool:
+    return any(is_dataclass_decorator(decorator) for decorator in node.decorator_list)
+
+
+def dataclass_keyword(node: ClassDef, keyword: str) -> AST | None:
+    for decorator in node.decorator_list:
+        if isinstance(decorator, Call) and is_dataclass_decorator(decorator):
+            value = keyword_value(decorator, keyword)
+            if value is not None:
+                return value
+    return None
+
+
+def base_class_name(base: AST) -> str | None:
+    return node_name(base.value if isinstance(base, Subscript) else base)
+
+
+def base_class_names(node: ClassDef) -> list[str]:
+    return [name for base in node.bases if (name := base_class_name(base)) is not None]
+
+
+def is_protocol_class(node: ClassDef) -> bool:
+    return any(name == "Protocol" for name in base_class_names(node))
 
 
 def annotation_is_non_init_marker(annotation: AST) -> bool:
-    target = annotation.value if isinstance(annotation, Subscript) else annotation
-    if isinstance(target, Name):
-        return target.id in {"ClassVar", "InitVar"}
-    if isinstance(target, Attribute):
-        return target.attr in {"ClassVar", "InitVar"}
-    return False
+    return node_name(
+        annotation.value if isinstance(annotation, Subscript) else annotation
+    ) in {
+        "ClassVar",
+        "InitVar",
+    }
 
 
 def find_line_number(content: str, token: str) -> int:
@@ -109,3 +197,27 @@ def resolve_import_targets(
     if node.module:
         return [".".join([*prefix, node.module])]
     return [".".join([*prefix, alias.name]) for alias in node.names]
+
+
+def path_rule(
+    code: str,
+    name: str,
+    parts: tuple[str, ...],
+    check: Callable[[Path], list[LintFinding]],
+) -> LintRule:
+    def _run(root: Path) -> list[LintFinding]:
+        return check(root.joinpath(*parts))
+
+    return LintRule(code=code, name=name, check_root=_run)
+
+
+def dirs_rule(
+    code: str,
+    name: str,
+    parts: tuple[tuple[str, ...], ...],
+    check: Callable[[Sequence[Path]], list[LintFinding]],
+) -> LintRule:
+    def _run(root: Path) -> list[LintFinding]:
+        return check(tuple(root.joinpath(*part) for part in parts))
+
+    return LintRule(code=code, name=name, check_root=_run)

@@ -1,11 +1,13 @@
-from ast import Attribute, Name, Subscript, Tuple, walk
+from ast import Name, Subscript, walk
 from pathlib import Path
 
 from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
     iter_python_files,
+    node_name,
     parse_file,
+    subscript_arguments,
 )
 
 _CONTRAVARIANT_TYPE_ARG_POSITIONS: dict[str, tuple[int, ...]] = {
@@ -22,19 +24,11 @@ def check_no_object_in_contravariant_type_args(
         for node in walk(tree):
             if not isinstance(node, Subscript):
                 continue
-            type_name = (
-                node.value.id
-                if isinstance(node.value, Name)
-                else node.value.attr
-                if isinstance(node.value, Attribute)
-                else ""
-            )
+            type_name = node_name(node.value) or ""
             positions = _CONTRAVARIANT_TYPE_ARG_POSITIONS.get(type_name)
             if positions is None:
                 continue
-            args = (
-                list(node.slice.elts) if isinstance(node.slice, Tuple) else [node.slice]
-            )
+            args = subscript_arguments(node)
             for pos in positions:
                 if pos >= len(args):
                     continue

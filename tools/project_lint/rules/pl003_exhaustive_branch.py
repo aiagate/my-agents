@@ -2,7 +2,6 @@ from ast import (
     AST,
     AnnAssign,
     Attribute,
-    Call,
     ClassDef,
     Compare,
     Constant,
@@ -18,18 +17,18 @@ from pathlib import Path
 from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
+    base_class_name,
+    call_name,
     iter_python_files,
+    node_name,
     parse_file,
 )
 
 
 def _annotation_is_literal(annotation: AST | None) -> bool:
-    if not isinstance(annotation, Subscript):
-        return False
-    value = annotation.value
-    if isinstance(value, Name) and value.id == "Literal":
-        return True
-    return isinstance(value, Attribute) and value.attr == "Literal"
+    return (
+        isinstance(annotation, Subscript) and node_name(annotation.value) == "Literal"
+    )
 
 
 def _collect_closed_types(src_dir: Path) -> tuple[set[str], set[str]]:
@@ -40,14 +39,7 @@ def _collect_closed_types(src_dir: Path) -> tuple[set[str], set[str]]:
         for node in walk(tree):
             if isinstance(node, ClassDef):
                 for base in node.bases:
-                    base_name = (
-                        base.id
-                        if isinstance(base, Name)
-                        else base.attr
-                        if isinstance(base, Attribute)
-                        else ""
-                    )
-                    if base_name in {"Enum", "StrEnum", "IntEnum"}:
+                    if base_class_name(base) in {"Enum", "StrEnum", "IntEnum"}:
                         enum_names.add(node.name)
                 for stmt in node.body:
                     if (
@@ -84,14 +76,7 @@ def _compare_targets_closed_type(
 
 
 def _expr_calls_assert_never(expr: AST) -> bool:
-    for child in walk(expr):
-        if isinstance(child, Call):
-            callee = child.func
-            if isinstance(callee, Name) and callee.id == "assert_never":
-                return True
-            if isinstance(callee, Attribute) and callee.attr == "assert_never":
-                return True
-    return False
+    return any(call_name(child) == "assert_never" for child in walk(expr))
 
 
 def _is_defensive_else(orelse: list[AST]) -> bool:

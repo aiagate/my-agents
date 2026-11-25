@@ -1,10 +1,11 @@
 import builtins
-from ast import AST, Attribute, ClassDef, Name, Subscript, walk
+from ast import ClassDef, walk
 from pathlib import Path
 
 from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
+    base_class_name,
     iter_python_files,
     parse_file,
 )
@@ -14,15 +15,6 @@ _BUILTIN_EXCEPTION_NAMES = frozenset(
     for name, obj in vars(builtins).items()
     if isinstance(obj, type) and issubclass(obj, BaseException)
 )
-
-
-def _base_name(base: AST) -> str | None:
-    target = base.value if isinstance(base, Subscript) else base
-    if isinstance(target, Name):
-        return target.id
-    if isinstance(target, Attribute):
-        return target.attr
-    return None
 
 
 def _is_exception_base(base_name: str, known_exceptions: set[str]) -> bool:
@@ -49,7 +41,7 @@ def check_no_exception_result_errors(
                 if node.name in flagged_names:
                     continue
                 for base in node.bases:
-                    name = _base_name(base)
+                    name = base_class_name(base)
                     if name is not None and _is_exception_base(name, flagged_names):
                         flagged_names.add(node.name)
                         findings.append(

@@ -6,10 +6,8 @@ from ast import (
     Attribute,
     Call,
     ClassDef,
-    Constant,
     FunctionDef,
     Name,
-    Subscript,
     walk,
 )
 from pathlib import Path
@@ -18,28 +16,15 @@ from typing import TypeIs
 from tools.project_lint.common import (
     TESTS_DIR,
     LintFinding,
+    call_name,
+    constant_is,
     has_decorator_name,
+    is_protocol_class,
     iter_python_files,
+    keyword_value,
+    node_name,
     parse_file,
 )
-
-
-def _is_protocol_class(node: ClassDef) -> bool:
-    for base in node.bases:
-        target = base.value if isinstance(base, Subscript) else base
-        if isinstance(target, Name) and target.id == "Protocol":
-            return True
-        if isinstance(target, Attribute) and target.attr == "Protocol":
-            return True
-    return False
-
-
-def _annotation_leaf_name(annotation: AST | None) -> str | None:
-    if isinstance(annotation, Name):
-        return annotation.id
-    if isinstance(annotation, Attribute):
-        return annotation.attr
-    return None
 
 
 def _collect_displayable_error_symbols(
@@ -50,7 +35,7 @@ def _collect_displayable_error_symbols(
     for path in iter_python_files(src_dir):
         tree = parse_file(path)
         for node in walk(tree):
-            if not isinstance(node, ClassDef) or _is_protocol_class(node):
+            if not isinstance(node, ClassDef) or is_protocol_class(node):
                 continue
             has_display_message = False
             error_type_name: str | None = None
@@ -59,14 +44,14 @@ def _collect_displayable_error_symbols(
                     if stmt.target.id == "display_message":
                         has_display_message = True
                     elif stmt.target.id == "type":
-                        error_type_name = _annotation_leaf_name(stmt.annotation)
+                        error_type_name = node_name(stmt.annotation)
                 elif isinstance(
                     stmt, FunctionDef | AsyncFunctionDef
                 ) and has_decorator_name(stmt, frozenset({"property"})):
                     if stmt.name == "display_message":
                         has_display_message = True
                     elif stmt.name == "type":
-                        error_type_name = _annotation_leaf_name(stmt.returns)
+                        error_type_name = node_name(stmt.returns)
             if has_display_message:
                 displayable_classes.add(node.name)
                 if error_type_name is not None:
@@ -82,7 +67,7 @@ def _collect_typed_error_symbols(
     for path in iter_python_files(src_dir):
         tree = parse_file(path)
         for node in walk(tree):
-            if not isinstance(node, ClassDef) or _is_protocol_class(node):
+            if not isinstance(node, ClassDef) or is_protocol_class(node):
                 continue
             has_message = False
             error_type_name: str | None = None
@@ -91,14 +76,14 @@ def _collect_typed_error_symbols(
                     if stmt.target.id == "message":
                         has_message = True
                     elif stmt.target.id == "type":
-                        error_type_name = _annotation_leaf_name(stmt.annotation)
+                        error_type_name = node_name(stmt.annotation)
                 elif isinstance(
                     stmt, FunctionDef | AsyncFunctionDef
                 ) and has_decorator_name(stmt, frozenset({"property"})):
                     if stmt.name == "message":
                         has_message = True
                     elif stmt.name == "type":
-                        error_type_name = _annotation_leaf_name(stmt.returns)
+                        error_type_name = node_name(stmt.returns)
             if has_message and error_type_name is not None:
                 typed_classes.add(node.name)
                 typed_error_types.add(error_type_name)
@@ -106,15 +91,7 @@ def _collect_typed_error_symbols(
 
 
 def _is_error_assert_helper_call(node: AST) -> TypeIs[Call]:
-    if not isinstance(node, Call):
-        return False
-    callee = node.func
-    if isinstance(callee, Name) and callee.id in {"assert_err", "assert_error"}:
-        return True
-    return isinstance(callee, Attribute) and callee.attr in {
-        "assert_err",
-        "assert_error",
-    }
+    return call_name(node) in {"assert_err", "assert_error"}
 
 
 def _assert_checks_error_type(assert_node: Assert) -> bool:
@@ -125,10 +102,8 @@ def _assert_checks_error_type(assert_node: Assert) -> bool:
 
 
 def _helper_has_expected_type(call: Call) -> bool:
-    for kw in call.keywords:
-        if kw.arg == "expected_type":
-            return not (isinstance(kw.value, Constant) and kw.value.value is None)
-    return False
+    expected_type = keyword_value(call, "expected_type")
+    return expected_type is not None and not constant_is(expected_type, None)
 
 
 def _test_verifies_error_message(func: FunctionDef | AsyncFunctionDef) -> bool:
@@ -154,11 +129,9 @@ def _test_verifies_error_message(func: FunctionDef | AsyncFunctionDef) -> bool:
 def _test_verifies_display_message(func: FunctionDef | AsyncFunctionDef) -> bool:
     for node in walk(func):
         if isinstance(node, Call) and _is_error_assert_helper_call(node):
-            for kw in node.keywords:
-                if kw.arg == "display_message_contains" and not (
-                    isinstance(kw.value, Constant) and kw.value.value is None
-                ):
-                    return True
+            display_message = keyword_value(node, "display_message_contains")
+            if display_message is not None and not constant_is(display_message, None):
+                return True
         if isinstance(node, Assert):
             for child in walk(node.test):
                 if isinstance(child, Attribute) and child.attr == "display_message":

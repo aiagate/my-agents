@@ -18,7 +18,10 @@ from typing import TypeIs
 from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
+    call_name,
+    function_arguments,
     iter_python_files,
+    node_name,
     parse_file,
 )
 
@@ -58,21 +61,14 @@ def _is_tool_call(
 
 
 def _is_run_context(annotation: AST) -> bool:
-    target = annotation.value if isinstance(annotation, Subscript) else annotation
-    if isinstance(target, Name):
-        return target.id == "RunContext"
-    if isinstance(target, Attribute):
-        return target.attr == "RunContext"
-    return False
+    return (
+        node_name(annotation.value if isinstance(annotation, Subscript) else annotation)
+        == "RunContext"
+    )
 
 
 def _is_field_call(node: AST) -> TypeIs[Call]:
-    if not isinstance(node, Call):
-        return False
-    callee = node.func
-    if isinstance(callee, Name):
-        return callee.id == "Field"
-    return isinstance(callee, Attribute) and callee.attr == "Field"
+    return call_name(node) == "Field"
 
 
 def _has_field_description(annotation: AST) -> bool:
@@ -164,16 +160,7 @@ def _parameter_finding(
     path: Path,
     function: FunctionDef | AsyncFunctionDef,
 ) -> LintFinding | None:
-    arguments = [
-        *function.args.posonlyargs,
-        *function.args.args,
-        *function.args.kwonlyargs,
-    ]
-    if function.args.vararg is not None:
-        arguments.append(function.args.vararg)
-    if function.args.kwarg is not None:
-        arguments.append(function.args.kwarg)
-    for argument in arguments:
+    for argument in function_arguments(function):
         if argument.arg in {"self", "cls"}:
             continue
         annotation = argument.annotation

@@ -1,44 +1,24 @@
-from ast import (
-    AST,
-    AnnAssign,
-    Attribute,
-    Call,
-    ClassDef,
-    Constant,
-    FunctionDef,
-    Name,
-    walk,
-)
+from ast import AST, AnnAssign, Call, ClassDef, FunctionDef, Name, walk
 from pathlib import Path
 
 from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
     annotation_is_non_init_marker,
+    call_name,
+    constant_is,
+    dataclass_keyword,
+    has_dataclass_decorator,
     iter_python_files,
+    keyword_value,
     parse_file,
 )
 
 
 def _is_dataclass_with_generated_init(node: ClassDef) -> bool:
-    has_dataclass_decorator = False
-    for decorator in node.decorator_list:
-        target = decorator.func if isinstance(decorator, Call) else decorator
-        is_dataclass = (isinstance(target, Name) and target.id == "dataclass") or (
-            isinstance(target, Attribute) and target.attr == "dataclass"
-        )
-        if not is_dataclass:
-            continue
-        if isinstance(decorator, Call):
-            for kw in decorator.keywords:
-                if (
-                    kw.arg == "init"
-                    and isinstance(kw.value, Constant)
-                    and kw.value.value is False
-                ):
-                    return False
-        has_dataclass_decorator = True
-    if not has_dataclass_decorator:
+    if not has_dataclass_decorator(node):
+        return False
+    if constant_is(dataclass_keyword(node, "init"), False):
         return False
     return not any(
         isinstance(stmt, FunctionDef) and stmt.name == "__init__" for stmt in node.body
@@ -46,18 +26,9 @@ def _is_dataclass_with_generated_init(node: ClassDef) -> bool:
 
 
 def _field_disables_init(value: AST | None) -> bool:
-    if not isinstance(value, Call):
+    if not isinstance(value, Call) or call_name(value) != "field":
         return False
-    callee = value.func
-    is_field = (isinstance(callee, Name) and callee.id == "field") or (
-        isinstance(callee, Attribute) and callee.attr == "field"
-    )
-    if not is_field:
-        return False
-    return any(
-        kw.arg == "init" and isinstance(kw.value, Constant) and kw.value.value is False
-        for kw in value.keywords
-    )
+    return constant_is(keyword_value(value, "init"), False)
 
 
 def check_no_private_dataclass_init_fields(

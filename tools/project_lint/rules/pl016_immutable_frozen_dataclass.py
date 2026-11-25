@@ -1,23 +1,14 @@
-from ast import (
-    AST,
-    AnnAssign,
-    Attribute,
-    BinOp,
-    Call,
-    ClassDef,
-    Constant,
-    Name,
-    Subscript,
-    Tuple,
-    walk,
-)
+from ast import AST, AnnAssign, BinOp, ClassDef, Name, Subscript, Tuple, walk
 from pathlib import Path
 
 from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
     annotation_is_non_init_marker,
+    constant_is,
+    dataclass_keyword,
     iter_python_files,
+    node_name,
     parse_file,
 )
 
@@ -44,34 +35,12 @@ _DISALLOWED_COLLECTION_TYPES = frozenset(
 
 
 def _is_frozen_dataclass(node: ClassDef) -> bool:
-    for decorator in node.decorator_list:
-        target = decorator.func if isinstance(decorator, Call) else decorator
-        is_dataclass = (isinstance(target, Name) and target.id == "dataclass") or (
-            isinstance(target, Attribute) and target.attr == "dataclass"
-        )
-        if not is_dataclass or not isinstance(decorator, Call):
-            continue
-        for kw in decorator.keywords:
-            if (
-                kw.arg == "frozen"
-                and isinstance(kw.value, Constant)
-                and kw.value.value is True
-            ):
-                return True
-    return False
-
-
-def _type_node_name(node: AST) -> str | None:
-    if isinstance(node, Name):
-        return node.id
-    if isinstance(node, Attribute):
-        return node.attr
-    return None
+    return constant_is(dataclass_keyword(node, "frozen"), True)
 
 
 def _find_disallowed_collection_types(annotation: AST) -> list[str]:
     if isinstance(annotation, Subscript):
-        outer_name = _type_node_name(annotation.value)
+        outer_name = node_name(annotation.value)
         # Parameter/return types of callbacks do not affect field immutability.
         if outer_name == "Callable":
             return []
@@ -90,7 +59,7 @@ def _find_disallowed_collection_types(annotation: AST) -> list[str]:
         for elt in annotation.elts:
             found.extend(_find_disallowed_collection_types(elt))
         return found
-    leaf_name = _type_node_name(annotation)
+    leaf_name = node_name(annotation)
     if leaf_name is not None and leaf_name in _DISALLOWED_COLLECTION_TYPES:
         return [leaf_name]
     return []
