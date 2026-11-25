@@ -265,6 +265,7 @@ class CliRepl:
         if is_err(detail):
             self._show_error("chat_history_detail_failed", detail.error)
             return
+        self._show_warnings(detail.value.warnings)
         episode = detail.value.episode
         self._write_output(f"\n{self._episode_heading(episode)}")
         if episode.summary:

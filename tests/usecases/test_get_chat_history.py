@@ -136,13 +136,14 @@ def _event(
     event_id: str,
     *,
     recorded_at: datetime,
+    occurred_at: datetime | None = None,
     delivery: EventDelivery = EventDelivery.PROACTIVE,
     failure_reason: str = "",
 ) -> EventRecord:
     return EventRecord(
         event_id,
         "email.received",
-        recorded_at,
+        recorded_at if occurred_at is None else occurred_at,
         recorded_at,
         EventStatus.FAILED if failure_reason else EventStatus.COMPLETED,
         delivery,
@@ -212,10 +213,57 @@ def test_detail_reports_event_ledger_failure(tmp_path: Path) -> None:
         Err(EventLedgerError(EventLedgerErrorType.READ_FAILED, "ledger offline"))
     )
 
-    error = assert_err(
-        GetChatHistoryHandler(repo, event_ledger=ledger).get_episode_detail(1),
-        expected_type=GetChatHistoryErrorType.STORAGE_ERROR,
-        message_contains="ledger offline",
-        display_message_contains="イベント台帳を読み込めませんでした",
+    detail = GetChatHistoryHandler(repo, event_ledger=ledger).get_episode_detail(1)
+
+    response = detail.unwrap()
+    assert response.episode.episode_id
+    assert response.events == ()
+    (warning,) = response.warnings
+    assert (
+        warning.event,
+        warning.error_type,
+        warning.message,
+        warning.display_message,
+    ) == (
+        "event_ledger_read_failed",
+        "READ_FAILED",
+        "ledger offline",
+        "イベント台帳を読み込めませんでした。",
     )
-    assert error.message == "ledger offline"
+
+
+def test_detail_correlates_delayed_events_by_occurrence_time(tmp_path: Path) -> None:
+    path = tmp_path / "chats.db"
+    repo = SqliteChatRepository(path)
+    episode = repo.record_turns(
+        None,
+        (
+            NewDialogueTurn("user", "first question", _NOW),
+            NewDialogueTurn("assistant", "first answer", _NOW),
+        ),
+        title="first",
+        updated_at=_NOW,
+    ).unwrap()
+    repo.close_episode(
+        episode.id, closed_at=_NOW + timedelta(minutes=1), reason="clear"
+    ).unwrap()
+    delayed = _event(
+        "evt_delayed",
+        occurred_at=_NOW + timedelta(seconds=30),
+        recorded_at=_NOW + timedelta(minutes=30),
+    )
+    too_early = _event(
+        "evt_early",
+        occurred_at=_NOW - timedelta(minutes=1),
+        recorded_at=_NOW + timedelta(seconds=10),
+    )
+    too_late = _event(
+        "evt_late",
+        occurred_at=_NOW + timedelta(minutes=2),
+        recorded_at=_NOW + timedelta(seconds=5),
+    )
+    ledger = StubEventLedger(Ok((too_late, delayed, too_early)))
+
+    detail = GetChatHistoryHandler(repo, event_ledger=ledger).get_episode_detail(1)
+
+    assert [event.event_id for event in detail.unwrap().events] == ["evt_delayed"]

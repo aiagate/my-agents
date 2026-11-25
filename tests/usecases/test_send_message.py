@@ -31,7 +31,7 @@ from my_agents.contracts.ports.event_ledger import (
     EventLedgerErrorType,
     IEventLedger,
 )
-from my_agents.domain.context_assembler import assemble_instructions
+from my_agents.domain.context_assembler import assemble_context
 from my_agents.domain.core_profile import CoreProfile
 from my_agents.infrastructure.sqlite_chat_repository import SqliteChatRepository
 from my_agents.usecases.clear_chat import ClearChatHandler
@@ -141,7 +141,7 @@ async def test_execute_returns_reply_and_appends_history() -> None:
         RecordedRun(
             user_input="今日は？",
             history=(previous,),
-            instructions=assemble_instructions(profile),
+            instructions=assemble_context(profile).instructions,
         )
     ]
 
@@ -164,7 +164,7 @@ async def test_execute_uses_empty_profile_without_core_memory_updates() -> None:
         core_memory_updates=(),
     )
     instructions = runner.runs[0].instructions
-    assert instructions == assemble_instructions(CoreProfile.empty())
+    assert instructions == assemble_context(CoreProfile.empty()).instructions
     assert "まだ何も記録されていません。" in instructions
 
 
@@ -896,9 +896,11 @@ async def test_episode_index_applies_character_budget_to_more_than_200_episodes(
     )
     (await handler.execute(SendMessageRequest("next"))).unwrap()
     instructions = runner.runs[-1].instructions
-    assert instructions.index(f"(id:{episode_ids[-1]}) Topic 200") < instructions.index(
-        f"(id:{episode_ids[0]}) Topic 0"
-    )
+    assert instructions.count("(id:") == 201
+    positions = [
+        instructions.index(f"(id:{episode_id})") for episode_id in sorted(episode_ids)
+    ]
+    assert positions == sorted(positions)
 
 
 @pytest.mark.anyio
@@ -1082,6 +1084,35 @@ async def test_event_ledger_read_failures_warn_and_keep_the_chat() -> None:
         ("event_ledger_read_failed", "CORRUPT_DATA", "recent corrupt"),
     ]
     assert "[event:" not in runner.runs[-1].instructions
+    assert ledger.marked == []
+
+
+@pytest.mark.anyio
+async def test_pending_event_read_failure_keeps_recent_proactive_context() -> None:
+    ledger = StubEventLedger(
+        pending=Err(
+            EventLedgerError(EventLedgerErrorType.READ_FAILED, "pending offline")
+        ),
+        recent=Ok((_event_record("evt_proactive", delivery=EventDelivery.PROACTIVE),)),
+    )
+    runner = FakeAgentRunner(Ok(AgentReply("reply")))
+    handler = SendMessageHandler(
+        runner,
+        FakeGetCoreProfile(Ok(_profile_response(CoreProfile.empty()))),
+        event_ledger=ledger,
+        clock=lambda: NOW,
+    )
+
+    response = (await handler.execute(SendMessageRequest("hello"))).unwrap()
+
+    assert [
+        (warning.event, warning.error_type, warning.message)
+        for warning in response.warnings
+    ] == [("event_ledger_read_failed", "READ_FAILED", "pending offline")]
+    instructions = runner.runs[-1].instructions
+    assert "[event:evt_proactive]" in instructions
+    assert "直近の割り込みイベント（proactive）" in instructions
+    assert "未言及の背景イベント（ambient）" not in instructions
     assert ledger.marked == []
 
 

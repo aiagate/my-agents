@@ -160,41 +160,37 @@ def _read_event_context(
 ) -> tuple[EventContext | None, tuple[str, ...], tuple[ChatWarning, ...]]:
     pending = ledger.list_recent(limit=EVENT_CONTEXT_LIMIT, unsurfaced_only=True)
     recent = ledger.list_recent(limit=EVENT_CONTEXT_LIMIT)
+    warnings: list[ChatWarning] = []
     if is_err(pending):
-        warnings = [
+        warnings.append(
             _ledger_warning(
                 pending.error,
                 event="event_ledger_read_failed",
                 display_message="未言及のイベントを読み込めませんでした。",
             )
-        ]
-        if is_err(recent):
-            warnings.append(
-                _ledger_warning(
-                    recent.error,
-                    event="event_ledger_read_failed",
-                    display_message="イベント台帳を読み込めませんでした。",
-                )
-            )
-        return None, (), tuple(warnings)
-    if is_err(recent):
-        return (
-            None,
-            (),
-            (
-                _ledger_warning(
-                    recent.error,
-                    event="event_ledger_read_failed",
-                    display_message="イベント台帳を読み込めませんでした。",
-                ),
-            ),
         )
-    ambient_records = tuple(
-        record for record in pending.value if record.delivery is EventDelivery.AMBIENT
-    )
-    proactive_records = tuple(
-        record for record in recent.value if record.delivery is EventDelivery.PROACTIVE
-    )
+        ambient_records: tuple[EventRecord, ...] = ()
+    else:
+        ambient_records = tuple(
+            record
+            for record in pending.value
+            if record.delivery is EventDelivery.AMBIENT
+        )
+    if is_err(recent):
+        warnings.append(
+            _ledger_warning(
+                recent.error,
+                event="event_ledger_read_failed",
+                display_message="イベント台帳を読み込めませんでした。",
+            )
+        )
+        proactive_records: tuple[EventRecord, ...] = ()
+    else:
+        proactive_records = tuple(
+            record
+            for record in recent.value
+            if record.delivery is EventDelivery.PROACTIVE
+        )
     context = EventContext(
         tuple(map(_event_context_item, ambient_records)),
         tuple(map(_event_context_item, proactive_records)),
@@ -202,7 +198,7 @@ def _read_event_context(
     return (
         None if context.is_empty else context,
         tuple(record.event_id for record in ambient_records),
-        (),
+        tuple(warnings),
     )
 
 

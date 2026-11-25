@@ -116,6 +116,7 @@ class SqliteEventLedger(IEventLedger):
                 return Ok(empty)
             uri = f"{self._path.absolute().as_uri()}?mode=ro"
             with closing(sqlite3.connect(uri, uri=True)) as connection:
+                connection.execute("PRAGMA busy_timeout = 5000")
                 return Ok(operation(connection))
         except sqlite3.OperationalError as exc:
             if "no such table: events" in str(exc):

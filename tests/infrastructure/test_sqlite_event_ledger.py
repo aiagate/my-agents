@@ -1,4 +1,5 @@
 import sqlite3
+import threading
 from contextlib import closing
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -94,6 +95,25 @@ def test_from_settings_uses_the_resolved_chats_path(tmp_path: Path) -> None:
 
     assert is_ok(ledger.record(_record()))
     assert (tmp_path / "chats.db").is_file()
+
+
+def test_reads_wait_for_a_concurrent_checkpoint_lock(tmp_path: Path) -> None:
+    path = tmp_path / "chats.db"
+    ledger = SqliteEventLedger(path)
+    assert is_ok(ledger.record(_record()))
+    lock = sqlite3.connect(path, check_same_thread=False)
+    lock.execute("PRAGMA journal_mode = DELETE")
+    lock.execute("BEGIN EXCLUSIVE")
+    timer = threading.Timer(0.2, lock.commit)
+    timer.start()
+    try:
+        result = ledger.list_recent()
+    finally:
+        timer.join()
+        lock.close()
+
+    (event,) = result.unwrap()
+    assert event.event_id == "evt_one"
 
 
 def test_read_failures_are_typed(tmp_path: Path) -> None:

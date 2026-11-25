@@ -20,7 +20,7 @@ from my_agents.contracts.ports.event_webhook import (
     IEventWebhookServer,
 )
 from my_agents.contracts.ports.logger import IAppLogger, LogEntry, LogLevel
-from my_agents.domain.context_assembler import assemble_instructions
+from my_agents.domain.context_assembler import assemble_context
 from my_agents.domain.core_profile import CoreProfile
 from my_agents.infrastructure.sqlite_chat_repository import SqliteChatRepository
 from my_agents.presentation.cli.repl import CliRepl
@@ -639,7 +639,7 @@ def test_send_message_handler_satisfies_protocol_end_to_end() -> None:
         (
             "今日は？",
             (),
-            assemble_instructions(CoreProfile.empty()),
+            assemble_context(CoreProfile.empty()).instructions,
         )
     ]
 
@@ -1146,4 +1146,62 @@ def test_history_detail_interleaves_event_ledger_records() -> None:
         "You > 質問",
         "AI > 回答",
         "[event:evt_failed] failed (proactive) 失敗イベント - boom",
+    ]
+
+
+def test_history_detail_warns_and_still_renders_turns_without_the_event_ledger() -> (
+    None
+):
+    now = datetime(2026, 11, 22, 12, 0, tzinfo=UTC)
+    detail = ChatHistoryDetailResponse(
+        EpisodeSummaryView(
+            1,
+            "episode",
+            "会話",
+            "",
+            "",
+            now,
+            now,
+            None,
+            None,
+            1,
+            0,
+            True,
+        ),
+        (DialogueTurnView(1, "user", "質問", now),),
+        (),
+        (
+            ChatWarning(
+                "event_ledger_read_failed",
+                "READ_FAILED",
+                "ledger offline",
+                "イベント台帳を読み込めませんでした。",
+            ),
+        ),
+    )
+
+    class StaticHistory:
+        def list_episodes(self) -> Result[ChatHistoryListResponse, GetChatHistoryError]:
+            raise AssertionError("not used")
+
+        def get_episode_detail(
+            self, index: int
+        ) -> Result[ChatHistoryDetailResponse, GetChatHistoryError]:
+            assert index == 1
+            return Ok(detail)
+
+    outputs: list[str] = []
+    errors: list[str] = []
+    CliRepl(
+        FakeSendMessageUseCase([]),
+        _empty_get_core_profile(),
+        get_chat_history=StaticHistory(),
+        read_input=_read_inputs(["/history 1", "exit"]),
+        write_output=outputs.append,
+        write_error=errors.append,
+    ).run()
+
+    assert errors == ["Warning: イベント台帳を読み込めませんでした。"]
+    assert [output for output in outputs if output.startswith("You > ")] == [
+        "You > 質問"
     ]

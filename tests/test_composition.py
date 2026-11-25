@@ -28,7 +28,7 @@ from my_agents.contracts.ports.episode_summarizer import (
 from my_agents.contracts.ports.event_ledger import IEventLedger
 from my_agents.contracts.ports.logger import NOOP_LOGGER
 from my_agents.contracts.secret import SecretStr
-from my_agents.domain.context_assembler import assemble_instructions
+from my_agents.domain.context_assembler import assemble_context
 from my_agents.domain.core_profile import CoreProfile
 from my_agents.infrastructure.pydantic_ai_runner import PydanticAIAgentRunner
 from my_agents.infrastructure.settings import AppSettings, SettingsError
@@ -193,8 +193,9 @@ def test_build_cli_wires_runner_into_cli(
     assert captured["api_key"] == SecretStr("secret")
     assert captured["memory_dir"] == tmp_path / "agent-memory"
     assert captured["updater"] is not None
-    assert captured["instructions"] == assemble_instructions(
-        CoreProfile.empty(), recall_tools_enabled=True
+    assert (
+        captured["instructions"]
+        == assemble_context(CoreProfile.empty(), recall_tools_enabled=True).instructions
     )
     assert captured["prompt"] == "こんにちは"
     assert "\nAI > 配線済み" in outputs
@@ -270,8 +271,9 @@ def test_run_cli_returns_zero_and_uses_default_env_path(
     assert captured["base_url"] == "https://file.example.com/v1"
     assert captured["api_key"] == SecretStr("file-secret")
     assert captured["memory_dir"] == tmp_path / "memory"
-    assert captured["instructions"] == assemble_instructions(
-        CoreProfile.empty(), recall_tools_enabled=True
+    assert (
+        captured["instructions"]
+        == assemble_context(CoreProfile.empty(), recall_tools_enabled=True).instructions
     )
     assert captured["prompt"] == "質問"
     assert "\nAI > 応答" in outputs

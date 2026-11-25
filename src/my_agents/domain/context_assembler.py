@@ -98,7 +98,13 @@ def _prompt_index(
 ) -> tuple[str, int]:
     lines: list[str] = []
     used = 0
-    for entry in sorted(entries, key=lambda item: item.updated_at, reverse=True):
+    # Reverse only the day label so equal-day entries keep the deterministic
+    # ascending episode_id tiebreak instead of intra-day updated_at minutes.
+    ordered = sorted(entries, key=lambda item: item.episode_id)
+    ordered = sorted(
+        ordered, key=lambda item: _date_label(item.updated_at, tz=tz), reverse=True
+    )
+    for entry in ordered:
         line = f"- [{_date_label(entry.updated_at, tz=tz)}] (id:{entry.episode_id}) {entry.title}"
         if entry.overview:
             line += f": {entry.overview}"
@@ -187,22 +193,3 @@ def assemble_context(
         stable_prefix if not event_section else f"{stable_prefix}\n\n{event_section}"
     )
     return AssembledContext(stable_prefix, event_section, instructions)
-
-
-def assemble_instructions(
-    profile: CoreProfile,
-    *,
-    conversation_context: ConversationContext | None = None,
-    event_context: EventContext | None = None,
-    recall_tools_enabled: bool = False,
-    display_tz: tzinfo | None = None,
-    prompt_index_char_budget: int = DEFAULT_PROMPT_INDEX_CHAR_BUDGET,
-) -> str:
-    return assemble_context(
-        profile,
-        conversation_context=conversation_context,
-        event_context=event_context,
-        recall_tools_enabled=recall_tools_enabled,
-        display_tz=display_tz,
-        prompt_index_char_budget=prompt_index_char_budget,
-    ).instructions

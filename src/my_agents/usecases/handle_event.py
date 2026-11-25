@@ -24,7 +24,7 @@ from my_agents.contracts.ports.event_notifier import (
 from my_agents.domain.event_context import (
     EventDeliveryKind,
     decide_event_delivery,
-    sanitize_untrusted_text,
+    sanitize_single_line,
 )
 from my_agents.usecases._event_analysis import analyze_event
 from my_agents.usecases._event_rules import (
@@ -38,6 +38,7 @@ from my_agents.usecases._event_rules import (
 class EventProcessingErrorType(Enum):
     ANALYSIS_FAILED = auto()
     RECORD_FAILED = auto()
+    NOTIFY_FAILED = auto()
     UNEXPECTED = auto()
 
 
@@ -94,9 +95,7 @@ class HandleEventHandler:
         failure_reason: str,
     ) -> EventLedgerError | None:
         recorded_at = self._clock()
-        reason = sanitize_untrusted_text(failure_reason)[
-            :EVENT_FAILURE_REASON_MAX_CHARS
-        ]
+        reason = sanitize_single_line(failure_reason)[:EVENT_FAILURE_REASON_MAX_CHARS]
         match delivery:
             case EventDeliveryKind.PROACTIVE:
                 surfaced_at = recorded_at
@@ -141,7 +140,7 @@ class HandleEventHandler:
         failure: str,
         record_error: EventLedgerError | None,
     ) -> None:
-        reason = sanitize_untrusted_text(failure)[:EVENT_FAILURE_REASON_MAX_CHARS]
+        reason = sanitize_single_line(failure)[:EVENT_FAILURE_REASON_MAX_CHARS]
         lines = [
             f"[Event {event.event_id}: failed]",
             f"失敗理由: {reason}",
@@ -224,7 +223,20 @@ class HandleEventHandler:
                 )
             )
         if value.delivery is EventDeliveryKind.PROACTIVE:
-            self._notifier.notify(
-                EventNotification(event.event_id, content, failed=False)
-            )
+            try:
+                self._notifier.notify(
+                    EventNotification(event.event_id, content, failed=False)
+                )
+            except Exception as exc:
+                # The completed record is already durable; re-recording would
+                # collide with its primary key and contradict the ledger.
+                return Err(
+                    EventProcessingError(
+                        type=EventProcessingErrorType.NOTIFY_FAILED,
+                        message=str(exc),
+                        display_message=(
+                            "イベントは記録しましたが、通知に失敗しました。"
+                        ),
+                    )
+                )
         return Ok(EventCompletion(event.event_id, content))

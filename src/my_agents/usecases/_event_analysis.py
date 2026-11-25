@@ -12,7 +12,6 @@ from my_agents.contracts.events import (
 from my_agents.domain.event_context import (
     decide_event_delivery,
     sanitize_single_line,
-    sanitize_untrusted_text,
 )
 from my_agents.usecases._event_rules import EventAnalysis, EventAnalysisError
 
@@ -51,7 +50,7 @@ def _email_analysis(payload: EmailReceived) -> EventAnalysis:
     urgent = any(term in searchable for term in URGENT_EMAIL_TERMS)
     sender = sanitize_single_line(payload.sender)
     subject = sanitize_single_line(payload.subject)
-    body = sanitize_untrusted_text(payload.body)[:EMAIL_BODY_EXCERPT_CHARS]
+    body = sanitize_single_line(payload.body)[:EMAIL_BODY_EXCERPT_CHARS]
     findings = (
         f"件名（データ）: {subject}",
         f"本文（データ）: {body}",
@@ -77,7 +76,7 @@ def _email_analysis(payload: EmailReceived) -> EventAnalysis:
 def _worker_fault_analysis(
     payload: WorkerFault,
 ) -> Result[EventAnalysis, EventAnalysisError]:
-    reason = sanitize_untrusted_text(payload.reason)
+    reason = sanitize_single_line(payload.reason)
     return Err(
         EventAnalysisError(
             message=f"Injected worker failure: {reason}",

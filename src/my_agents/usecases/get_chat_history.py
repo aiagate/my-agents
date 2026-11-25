@@ -6,13 +6,14 @@ from typing import Literal, Protocol
 from flow_res import Err, Ok, Result, is_err
 
 from my_agents.contracts.events import EventDelivery, EventRecord, EventStatus
+from my_agents.contracts.messages import ChatWarning
 from my_agents.contracts.ports.chat_history import (
     ChatStorageError,
     EpisodeCloseReason,
     EpisodeRecord,
     IChatQuery,
 )
-from my_agents.contracts.ports.event_ledger import IEventLedger
+from my_agents.contracts.ports.event_ledger import EventLedgerError, IEventLedger
 
 HISTORY_EVENT_LIMIT = 100
 
@@ -76,6 +77,7 @@ class ChatHistoryDetailResponse:
     episode: EpisodeSummaryView
     turns: tuple[DialogueTurnView, ...]
     events: tuple[EventTimelineView, ...] = ()
+    warnings: tuple[ChatWarning, ...] = ()
 
 
 class GetChatHistoryUseCase(Protocol):
@@ -124,6 +126,15 @@ def _event_view(event: EventRecord) -> EventTimelineView:
     )
 
 
+def _ledger_warning(error: EventLedgerError) -> ChatWarning:
+    return ChatWarning(
+        "event_ledger_read_failed",
+        error.type.name,
+        error.message,
+        "イベント台帳を読み込めませんでした。",
+    )
+
+
 class GetChatHistoryHandler:
     def __init__(
         self, chat_query: IChatQuery, *, event_ledger: IEventLedger | None = None
@@ -165,27 +176,25 @@ class GetChatHistoryHandler:
             return Err(_storage_error(turns.error))
         if self._event_ledger is None:
             events: tuple[EventTimelineView, ...] = ()
+            warnings: tuple[ChatWarning, ...] = ()
         else:
             recent = self._event_ledger.list_recent(limit=HISTORY_EVENT_LIMIT)
             if is_err(recent):
-                return Err(
-                    GetChatHistoryError(
-                        GetChatHistoryErrorType.STORAGE_ERROR,
-                        recent.error.message,
-                        "イベント台帳を読み込めませんでした。",
+                events = ()
+                warnings = (_ledger_warning(recent.error),)
+            else:
+                warnings = ()
+                deadline = episode.closed_at
+                events = tuple(
+                    reversed(
+                        [
+                            _event_view(event)
+                            for event in recent.value
+                            if event.occurred_at >= episode.started_at
+                            and (deadline is None or event.occurred_at <= deadline)
+                        ]
                     )
                 )
-            deadline = episode.closed_at
-            events = tuple(
-                reversed(
-                    [
-                        _event_view(event)
-                        for event in recent.value
-                        if event.recorded_at >= episode.started_at
-                        and (deadline is None or event.recorded_at <= deadline)
-                    ]
-                )
-            )
         return Ok(
             ChatHistoryDetailResponse(
                 _view(episode, index),
@@ -196,5 +205,6 @@ class GetChatHistoryHandler:
                     for turn in turns.value
                 ),
                 events,
+                warnings,
             )
         )
