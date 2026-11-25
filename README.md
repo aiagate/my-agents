@@ -33,6 +33,42 @@ uv run --extra mlx my-agents
 | `RECENT_MESSAGES_LIMIT` | `20` | エージェントに渡す現在の話題の直近発言数 |
 | `EPISODE_MAX_MESSAGES` | `40` | 次の入力で話題を切り替える発言数 |
 | `EPISODE_GAP_MINUTES` | `60` | 話題を切り替えるまでの無操作時間（分） |
+| `EVENT_WEBHOOK_PORT` | 未設定（無効） | loopback のイベント Webhook 待受ポート。`0` で空きポートを自動選択 |
+| `EVENT_ANALYSIS_DELAY_MS` | `0` | イベント解析ワーカーへ意図的に入れる遅延（ミリ秒、検証用） |
+| `CHAT_BACKEND` | `openai` | `local` で外部 API を使わない決定論的チャット応答に切り替え |
+
+## イベント Webhook（MCP Events 相当・試作）
+
+`EVENT_WEBHOOK_PORT` を指定すると、`127.0.0.1` のみでイベントを受け付ける
+Webhook がチャットと同じプロセスで起動します。受理時に相関 ID を返し、解析は
+独立したバックグラウンドスレッドで行います。完了・失敗はイベント ID 付きで
+メインチャットの画面と SQLite の会話タイムラインへ合流し、後続の `/history` や
+チャット文脈から参照できます。
+
+```sh
+EVENT_WEBHOOK_PORT=8765 uv run my-agents
+curl -sS -X POST http://127.0.0.1:8765/events \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"temperature.threshold_exceeded","data":{"sensor_id":"kitchen","celsius":33.2,"threshold_celsius":30.0}}'
+# => {"event_id":"evt_...","status":"accepted"}
+```
+
+受付けるイベント名は `temperature.threshold_exceeded`、`email.received`、
+`spike.worker_failure`（失敗経路の検証用）です。スキーマ違反は 422、不正な
+JSON は 400 を返します。イベント本文は LLM へ渡す前に JSON 化・制御文字除去・
+区切り文字エスケープを行い、`UNTRUSTED_EVENT_DATA_*` で囲んだデータとして
+のみ扱います。解析ワーカー自体は LLM や Web 検索を呼ばない決定論的実装です。
+
+これは MCP Events のドラフト（`events/list` / `events/subscribe` / 署名付き
+Webhook 配信）のワイヤ互換実装ではなく、`{name, data}` の受理、`event_id` の
+即時返却、バックグラウンド実行、チャットへの合流というアプリケーション境界
+だけを揃えた「相当」実装です。
+
+E2E（実プロセス・loopback HTTP・チャット履歴・異常系）は次で再実行できます。
+
+```sh
+uv run --locked python tools/e2e_event_chat.py
+```
 
 ## Lint
 

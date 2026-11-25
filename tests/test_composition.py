@@ -37,6 +37,7 @@ from my_agents.domain.context_assembler import assemble_instructions
 from my_agents.domain.core_profile import CoreProfile
 from my_agents.infrastructure.pydantic_ai_runner import PydanticAIAgentRunner
 from my_agents.infrastructure.settings import AppSettings, SettingsError
+from my_agents.infrastructure.sqlite_chat_repository import SqliteChatRepository
 from tests.helpers import assert_err
 
 _VALID_ENV = {
@@ -745,3 +746,38 @@ def test_history_detail_without_summary_and_closed_listing(
     assert any(
         output.startswith("1.") and output.endswith("話題 (2 件)") for output in outputs
     )
+
+
+def test_build_cli_wires_local_chat_and_event_webhook(tmp_path: Path) -> None:
+    memory_dir = tmp_path / "local-memory"
+    outputs: list[str] = []
+    env = {
+        **_VALID_ENV,
+        "MEMORY_PATH": str(memory_dir),
+        "CHAT_BACKEND": "local",
+        "EVENT_WEBHOOK_PORT": "0",
+        "EVENT_ANALYSIS_DELAY_MS": "0",
+    }
+
+    result = build_cli(
+        env=env,
+        env_path=tmp_path / ".env",
+        read_input=_read_inputs(["こんにちは", "exit"]),
+        write_output=outputs.append,
+    )
+
+    assert is_ok(result)
+    result.unwrap().run()
+
+    assert outputs[0].startswith("Event webhook listening on http://127.0.0.1:")
+    assert outputs[0].endswith("/events")
+    assert outputs[1] == "会話を開始します。コマンド: /help  終了: exit / quit"
+    assert "\nAI > ローカル応答: こんにちは" in outputs
+    repository = SqliteChatRepository(memory_dir / "chats.db")
+    episode = repository.get_latest_episode().unwrap()
+    assert episode is not None
+    assert episode.title == "こんにちは"
+    assert episode.summary == "user: こんにちは\nassistant: ローカル応答: こんにちは"
+    assert episode.summarized_turn_count == 2
+    turns = repository.list_turns(episode.id).unwrap()
+    assert [turn.role for turn in turns] == ["user", "assistant"]

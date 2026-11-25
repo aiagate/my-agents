@@ -247,3 +247,79 @@ def test_chat_settings_reject_invalid_integer(name: str, value: str) -> None:
         load_app_settings(env=env),
         message_contains=f"{name} must be a positive integer.",
     )
+
+
+_BASE_EVENT_ENV = {
+    "MAGPIE_MODEL": "chat",
+    "MAGPIE_BASE_URL": "https://chat.example",
+    "MAGPIE_API_KEY": "chat-credential",
+}
+
+
+def test_event_settings_default_to_disabled_and_openai_backend() -> None:
+    settings = load_app_settings(env=_BASE_EVENT_ENV).unwrap()
+
+    assert settings.chat_backend == "openai"
+    assert settings.event_webhook_port is None
+    assert settings.event_analysis_delay_ms == 0
+
+
+def test_event_settings_accept_local_backend_and_webhook_options() -> None:
+    settings = load_app_settings(
+        env={
+            **_BASE_EVENT_ENV,
+            "CHAT_BACKEND": " local ",
+            "EVENT_WEBHOOK_PORT": "0",
+            "EVENT_ANALYSIS_DELAY_MS": "2500",
+        }
+    ).unwrap()
+
+    assert settings.chat_backend == "local"
+    assert settings.event_webhook_port == 0
+    assert settings.event_analysis_delay_ms == 2500
+
+
+def test_event_settings_whitespace_values_fall_back() -> None:
+    settings = load_app_settings(
+        env={
+            **_BASE_EVENT_ENV,
+            "CHAT_BACKEND": "   ",
+            "EVENT_WEBHOOK_PORT": "  ",
+            "EVENT_ANALYSIS_DELAY_MS": "  ",
+        }
+    ).unwrap()
+
+    assert settings.chat_backend == "openai"
+    assert settings.event_webhook_port is None
+    assert settings.event_analysis_delay_ms == 0
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("CHAT_BACKEND", "remote", "CHAT_BACKEND must be"),
+        ("EVENT_WEBHOOK_PORT", "nope", "EVENT_WEBHOOK_PORT must be"),
+        ("EVENT_WEBHOOK_PORT", "-1", "EVENT_WEBHOOK_PORT must be"),
+        ("EVENT_WEBHOOK_PORT", "65536", "EVENT_WEBHOOK_PORT must be"),
+        ("EVENT_ANALYSIS_DELAY_MS", "nope", "EVENT_ANALYSIS_DELAY_MS must be"),
+        ("EVENT_ANALYSIS_DELAY_MS", "-1", "EVENT_ANALYSIS_DELAY_MS must be"),
+    ],
+)
+def test_event_settings_reject_invalid_values(
+    name: str, value: str, message: str
+) -> None:
+    assert_err(
+        load_app_settings(env={**_BASE_EVENT_ENV, name: value}),
+        message_contains=message,
+    )
+
+
+def test_event_settings_override_keeps_valid_port_bounds() -> None:
+    low = load_app_settings(
+        env={**_BASE_EVENT_ENV, "EVENT_WEBHOOK_PORT": "65535"}
+    ).unwrap()
+    high = load_app_settings(
+        env={**_BASE_EVENT_ENV, "EVENT_WEBHOOK_PORT": "1"}
+    ).unwrap()
+
+    assert (low.event_webhook_port, high.event_webhook_port) == (65535, 1)

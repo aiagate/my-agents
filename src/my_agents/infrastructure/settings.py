@@ -2,9 +2,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from os import environ
 from pathlib import Path
+from typing import Literal
 
 from dotenv import dotenv_values
-from flow_res import Err, Ok, Result
+from flow_res import Err, Ok, Result, is_err
 
 from my_agents.contracts.secret import SecretStr
 from my_agents.domain.chat_history import (
@@ -16,6 +17,7 @@ from my_agents.domain.chat_history import (
 )
 
 _SETTING_NAMES = ("MAGPIE_MODEL", "MAGPIE_BASE_URL", "MAGPIE_API_KEY")
+type ChatBackend = Literal["openai", "local"]
 DEFAULT_MEMORY_DIR_NAME = "memory"
 DEFAULT_MLX_LORA_MODEL = "mlx-community/Qwen2.5-3B-Instruct-4bit"
 
@@ -42,6 +44,9 @@ class AppSettings:
     recent_messages_limit: int = DEFAULT_RECENT_MESSAGES_LIMIT
     episode_max_messages: int = DEFAULT_EPISODE_MAX_MESSAGES
     episode_gap_minutes: int = DEFAULT_EPISODE_GAP_MINUTES
+    chat_backend: ChatBackend = "openai"
+    event_webhook_port: int | None = None
+    event_analysis_delay_ms: int = 0
 
     @property
     def resolved_chats_db_path(self) -> Path:
@@ -93,6 +98,57 @@ def _resolve_memory_dir(source: Mapping[str, str | None]) -> Path:
     return Path(value.strip()).expanduser()
 
 
+def _resolve_chat_backend(
+    source: Mapping[str, str | None],
+) -> Result[ChatBackend, SettingsError]:
+    value = _optional_text(source, "CHAT_BACKEND")
+    if value is None:
+        return Ok("openai")
+    match value:
+        case "openai" | "local":
+            return Ok(value)
+        case _:
+            return Err(SettingsError("CHAT_BACKEND must be 'openai' or 'local'."))
+
+
+def _resolve_event_webhook_port(
+    source: Mapping[str, str | None],
+) -> Result[int | None, SettingsError]:
+    value = _optional_text(source, "EVENT_WEBHOOK_PORT")
+    if value is None:
+        return Ok(None)
+    try:
+        port = int(value)
+    except ValueError:
+        return Err(
+            SettingsError("EVENT_WEBHOOK_PORT must be an integer from 0 to 65535.")
+        )
+    if not 0 <= port <= 65535:
+        return Err(
+            SettingsError("EVENT_WEBHOOK_PORT must be an integer from 0 to 65535.")
+        )
+    return Ok(port)
+
+
+def _resolve_event_analysis_delay(
+    source: Mapping[str, str | None],
+) -> Result[int, SettingsError]:
+    value = _optional_text(source, "EVENT_ANALYSIS_DELAY_MS")
+    if value is None:
+        return Ok(0)
+    try:
+        delay = int(value)
+    except ValueError:
+        return Err(
+            SettingsError("EVENT_ANALYSIS_DELAY_MS must be a non-negative integer.")
+        )
+    if delay < 0:
+        return Err(
+            SettingsError("EVENT_ANALYSIS_DELAY_MS must be a non-negative integer.")
+        )
+    return Ok(delay)
+
+
 def load_app_settings(
     *,
     env: Mapping[str, str] | None = None,
@@ -137,6 +193,16 @@ def load_app_settings(
             if integers[name] <= 0:
                 return Err(SettingsError(f"{name} must be a positive integer."))
 
+    chat_backend = _resolve_chat_backend(source)
+    if is_err(chat_backend):
+        return Err(chat_backend.error)
+    event_webhook_port = _resolve_event_webhook_port(source)
+    if is_err(event_webhook_port):
+        return Err(event_webhook_port.error)
+    event_analysis_delay = _resolve_event_analysis_delay(source)
+    if is_err(event_analysis_delay):
+        return Err(event_analysis_delay.error)
+
     return Ok(
         AppSettings(
             model_name=collected["MAGPIE_MODEL"],
@@ -156,5 +222,8 @@ def load_app_settings(
             recent_messages_limit=integers["RECENT_MESSAGES_LIMIT"],
             episode_max_messages=integers["EPISODE_MAX_MESSAGES"],
             episode_gap_minutes=integers["EPISODE_GAP_MINUTES"],
+            chat_backend=chat_backend.value,
+            event_webhook_port=event_webhook_port.value,
+            event_analysis_delay_ms=event_analysis_delay.value,
         )
     )

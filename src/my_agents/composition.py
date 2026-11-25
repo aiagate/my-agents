@@ -6,8 +6,10 @@ from typing import assert_never
 
 from flow_res import Err, Ok, Result, is_err
 
+from my_agents.contracts.ports.agent_runner import IAgentRunner
 from my_agents.contracts.ports.association_expander import IAssociationExpander
 from my_agents.contracts.ports.episode_summarizer import IEpisodeSummarizer
+from my_agents.contracts.ports.event_webhook import IEventWebhookServer
 from my_agents.contracts.ports.logger import (
     NOOP_LOGGER,
     IAppLogger,
@@ -15,6 +17,8 @@ from my_agents.contracts.ports.logger import (
     LogLevel,
 )
 from my_agents.infrastructure.file_logger import JsonlFileLogger, resolve_log_path
+from my_agents.infrastructure.local_agent_runner import LocalAgentRunner
+from my_agents.infrastructure.local_episode_summarizer import LocalEpisodeSummarizer
 from my_agents.infrastructure.markdown_core_profile_store import (
     MarkdownCoreProfileStore,
 )
@@ -31,18 +35,28 @@ from my_agents.infrastructure.settings import (
     load_app_settings,
 )
 from my_agents.infrastructure.sqlite_chat_repository import SqliteChatRepository
+from my_agents.infrastructure.sqlite_event_chat_recorder import (
+    SqliteEventChatRecorder,
+)
 from my_agents.presentation.cli.args import (
     CliArgsError,
     CliHelp,
     CliOptions,
     parse_cli_args,
 )
+from my_agents.presentation.cli.event_notifier import CliEventNotifier
 from my_agents.presentation.cli.repl import CliRepl, write_stderr
+from my_agents.presentation.webhook.background_scheduler import (
+    BackgroundEventScheduler,
+)
+from my_agents.presentation.webhook.event_server import EventWebhookServer
+from my_agents.usecases.accept_event import AcceptEventHandler
 from my_agents.usecases.clear_chat import ClearChatHandler
 from my_agents.usecases.expand_associations import ExpandAssociationsHandler
 from my_agents.usecases.finalize_chat import FinalizeChatHandler
 from my_agents.usecases.get_chat_history import GetChatHistoryHandler
 from my_agents.usecases.get_core_profile import GetCoreProfileHandler
+from my_agents.usecases.handle_event import HandleEventHandler
 from my_agents.usecases.recall_chat import RecallChatHandler
 from my_agents.usecases.send_message import SendMessageHandler
 from my_agents.usecases.summarize_episodes import SummarizeEpisodesHandler
@@ -61,6 +75,31 @@ def _build_association_expander(
         settings.mlx_lora_adapter_path,
     )
     return ExpandAssociationsHandler(generator)
+
+
+def _build_event_webhook(
+    settings: AppSettings,
+    chat_repository: SqliteChatRepository,
+    *,
+    write_output: Callable[[str], None],
+    logger: IAppLogger,
+) -> IEventWebhookServer | None:
+    if settings.event_webhook_port is None:
+        return None
+    notifier = CliEventNotifier(write_output, logger=logger)
+    recorder = SqliteEventChatRecorder(chat_repository)
+    scheduler = BackgroundEventScheduler(
+        HandleEventHandler(recorder, notifier),
+        delay_ms=settings.event_analysis_delay_ms,
+        logger=logger,
+    )
+    accept_event = AcceptEventHandler(scheduler)
+    return EventWebhookServer(
+        accept_event,
+        scheduler,
+        port=settings.event_webhook_port,
+        logger=logger,
+    )
 
 
 def build_cli(
@@ -92,17 +131,21 @@ def build_cli(
     )
     chat_repository = SqliteChatRepository.from_settings(settings)
     chat_recall = RecallChatHandler(chat_repository)
-    summarizer = (
-        PydanticAIEpisodeSummarizer.from_settings(settings)
-        if episode_summarizer is None
-        else episode_summarizer
-    )
-    agent_runner = PydanticAIAgentRunner.from_settings(
-        settings,
-        core_profile_updater=update_core_profile,
-        association_expander=resolved_expander,
-        chat_recall=chat_recall,
-    )
+    if episode_summarizer is not None:
+        summarizer: IEpisodeSummarizer = episode_summarizer
+    elif settings.chat_backend == "local":
+        summarizer = LocalEpisodeSummarizer()
+    else:
+        summarizer = PydanticAIEpisodeSummarizer.from_settings(settings)
+    if settings.chat_backend == "local":
+        agent_runner: IAgentRunner = LocalAgentRunner()
+    else:
+        agent_runner = PydanticAIAgentRunner.from_settings(
+            settings,
+            core_profile_updater=update_core_profile,
+            association_expander=resolved_expander,
+            chat_recall=chat_recall,
+        )
     send_message = SendMessageHandler(
         agent_runner,
         get_core_profile,
@@ -132,6 +175,12 @@ def build_cli(
             write_error=write_error,
             debug=debug,
             logger=logger,
+            event_webhook=_build_event_webhook(
+                settings,
+                chat_repository,
+                write_output=write_output,
+                logger=logger,
+            ),
         )
     )
 

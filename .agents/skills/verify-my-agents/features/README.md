@@ -12,6 +12,7 @@
 | REPL コマンド | repl-commands.md | なし | `/help`、`/core`、`/history`、`/clear`、`exit` |
 | CLI フラグ | cli-flags.md | なし | --help / --debug / --log-file / exit code |
 | エラー証跡 | error-evidence.md | なし | .env なし→Error+JSONL 1 行+Debug 行+exit 1 |
+| イベント Webhook | event-webhook.md | なし（決定論的ローカル解析） | loopback 202→即時 event_id→並行チャット→完了/失敗の履歴合流→400/422 |
 
 ## 前提
 

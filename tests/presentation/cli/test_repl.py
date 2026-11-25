@@ -14,6 +14,10 @@ from my_agents.contracts.ports.core_profile_store import (
     CoreProfileStoreError,
     ICoreProfileStore,
 )
+from my_agents.contracts.ports.event_webhook import (
+    EventWebhookStartError,
+    IEventWebhookServer,
+)
 from my_agents.contracts.ports.logger import IAppLogger, LogEntry, LogLevel
 from my_agents.domain.context_assembler import assemble_instructions
 from my_agents.domain.core_profile import CoreProfile
@@ -975,3 +979,85 @@ def test_history_list_and_detail_use_display_timezone(tmp_path: Path) -> None:
     heading = "1. [11/22 22:48] local time (0 件) (進行中)"
     assert heading in outputs
     assert f"\n{heading}" in outputs
+
+
+class FakeWebhookServer(IEventWebhookServer):
+    def __init__(self, result: Result[int, EventWebhookStartError]) -> None:
+        self.result = result
+        self.starts = 0
+        self.stops = 0
+
+    def start(self) -> Result[int, EventWebhookStartError]:
+        self.starts += 1
+        return self.result
+
+    def stop(self) -> None:
+        self.stops += 1
+
+
+def test_webhook_starts_before_banner_and_stops_on_exit() -> None:
+    webhook = FakeWebhookServer(Ok(4321))
+    outputs: list[str] = []
+    errors: list[str] = []
+
+    CliRepl(
+        FakeSendMessageUseCase([]),
+        _empty_get_core_profile(),
+        read_input=_read_inputs(["exit"]),
+        write_output=outputs.append,
+        write_error=errors.append,
+        event_webhook=webhook,
+    ).run()
+
+    assert outputs == [
+        "Event webhook listening on http://127.0.0.1:4321/events",
+        _START_BANNER,
+        _END_BANNER,
+    ]
+    assert errors == []
+    assert (webhook.starts, webhook.stops) == (1, 1)
+
+
+def test_webhook_start_failure_reports_error_and_keeps_chat_running() -> None:
+    webhook = FakeWebhookServer(
+        Err(EventWebhookStartError("address in use", "起動できませんでした。"))
+    )
+    outputs: list[str] = []
+    errors: list[str] = []
+
+    CliRepl(
+        FakeSendMessageUseCase([]),
+        _empty_get_core_profile(),
+        read_input=_read_inputs(["exit"]),
+        write_output=outputs.append,
+        write_error=errors.append,
+        debug=True,
+        event_webhook=webhook,
+    ).run()
+
+    assert outputs == [_START_BANNER, _END_BANNER]
+    assert errors == [
+        "\nError: 起動できませんでした。",
+        "Debug [webhook]: address in use",
+    ]
+    assert (webhook.starts, webhook.stops) == (1, 0)
+
+
+def test_webhook_start_failure_without_debug_omits_details() -> None:
+    webhook = FakeWebhookServer(
+        Err(EventWebhookStartError("address in use", "起動できませんでした。"))
+    )
+    outputs: list[str] = []
+    errors: list[str] = []
+
+    CliRepl(
+        FakeSendMessageUseCase([]),
+        _empty_get_core_profile(),
+        read_input=_read_inputs(["exit"]),
+        write_output=outputs.append,
+        write_error=errors.append,
+        event_webhook=webhook,
+    ).run()
+
+    assert outputs == [_START_BANNER, _END_BANNER]
+    assert errors == ["\nError: 起動できませんでした。"]
