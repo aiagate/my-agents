@@ -62,7 +62,7 @@ def test_parse_mcp_servers_builds_stdio_and_http_specs(tmp_path: Path) -> None:
         ),
         McpServerSpec(
             name="remote",
-            url="https://example.test/mcp",
+            url=SecretStr("https://example.test/mcp"),
             headers=(("Authorization", SecretStr("Bearer secret")),),
         ),
     )
@@ -248,3 +248,19 @@ def test_parse_mcp_servers_reports_validation_error_kind() -> None:
     result = parse_mcp_servers("[]")
     assert isinstance(result, Err)
     assert is_ok(parse_mcp_servers(None))
+
+
+def test_mcp_url_credentials_and_query_tokens_are_redacted_from_repr() -> None:
+    raw = json.dumps(
+        {
+            "remote": {
+                "url": "https://urluser:urlpass@example.test/mcp?token=querytoken",
+            }
+        }
+    )
+    spec = parse_mcp_servers(raw).unwrap()[0]
+    rendered = repr(spec)
+    assert "urluser" not in rendered
+    assert "urlpass" not in rendered
+    assert "querytoken" not in rendered
+    assert build_toolsets((spec,))[0].id == "remote"

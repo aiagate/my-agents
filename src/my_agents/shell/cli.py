@@ -64,18 +64,22 @@ def _repl(
     engine: CharacterEngine,
     read_input: Callable[[str], str],
     write_output: Callable[[str], None],
-) -> None:
+    write_error: Callable[[str], None],
+) -> int:
     loop = asyncio.new_event_loop()
     try:
-        loop.run_until_complete(engine.start())
+        started = loop.run_until_complete(engine.start())
+        if is_err(started):
+            write_error(f"Error: {started.error.message}")
+            return 1
         write_output("my-agents local chat. exit / quit で終了します。")
         while True:
             try:
                 text = read_input("You > ")
             except EOFError:
-                return
+                return 0
             if text.strip().lower() in {"exit", "quit"}:
-                return
+                return 0
             result = loop.run_until_complete(engine.submit_message("default", text))
             if is_err(result):
                 write_output(f"Error: {result.error.message}")
@@ -143,8 +147,9 @@ def main(
             )
             serve(engine, settings.server_host, settings.server_port)
             return 0
-        _repl(engine, read_input or input, write_output)
-        logger.log(LogEntry(LogLevel.INFO, "cli_exit", "session finished"))
-        return 0
+        code = _repl(engine, read_input or input, write_output, write_error)
+        if code == 0:
+            logger.log(LogEntry(LogLevel.INFO, "cli_exit", "session finished"))
+        return code
     finally:
         logger.close()

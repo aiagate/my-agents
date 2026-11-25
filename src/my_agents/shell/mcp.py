@@ -19,7 +19,7 @@ class McpServerSpec:
     args: tuple[str, ...] = ()
     env: tuple[tuple[str, SecretStr], ...] = ()
     cwd: Path | None = None
-    url: str | None = None
+    url: SecretStr | None = None
     headers: tuple[tuple[str, SecretStr], ...] = ()
 
 
@@ -67,7 +67,9 @@ def _convert(name: str, parsed: _ServerInput) -> Result[McpServerSpec, AppError]
             )
         return Ok(
             McpServerSpec(
-                name=name, url=parsed.url, headers=tuple(parsed.headers.items())
+                name=name,
+                url=SecretStr(parsed.url),
+                headers=tuple(parsed.headers.items()),
             )
         )
     if parsed.headers:
@@ -140,7 +142,7 @@ def _toolset(
     if server.url is not None:
         return MCPToolset(
             StreamableHttpTransport(
-                server.url,
+                server.url.get_secret_value(),
                 headers={
                     name: value.get_secret_value() for name, value in server.headers
                 },

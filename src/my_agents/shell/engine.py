@@ -122,6 +122,10 @@ class CharacterEngine:
     def active_lock_count(self) -> int:
         return len(self._locks)
 
+    @property
+    def logger(self) -> IAppLogger:
+        return self._logger
+
     async def _call_store[T](
         self, operation: Callable[[], Result[T, AppError]]
     ) -> Result[T, AppError]:

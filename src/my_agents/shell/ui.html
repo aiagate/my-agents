@@ -565,6 +565,9 @@
     state.abort = new AbortController();
     state.conversationId = value;
     state.lastReply = "";
+    state.streaming = false;
+    byId("typing").classList.add("hidden");
+    byId("send-button").disabled = false;
     byId("conversation-label").textContent = value;
     byId("conversation-input").value = "";
     const select = byId("conversation-select");
@@ -588,6 +591,9 @@
     const input = byId("message-input");
     const text = input.value.trim();
     if (!text || state.streaming) return;
+    const gen = state.convGen;
+    const targetConv = state.conversationId;
+    const signal = state.abort ? state.abort.signal : undefined;
     state.streaming = true;
     input.value = "";
     byId("send-button").disabled = true;
@@ -597,22 +603,28 @@
       const payload = await fetchJson("/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation_id: state.conversationId, message: text })
+        body: JSON.stringify({ conversation_id: targetConv, message: text }),
+        signal
       });
+      if (gen !== state.convGen || targetConv !== state.conversationId) return;
       const reply = String(payload.reply || "");
       if (reply !== state.lastReply) {
         appendBubble("assistant", reply);
         state.lastReply = reply;
       }
       await refreshTimeline();
+      if (gen !== state.convGen || targetConv !== state.conversationId) return;
       await refreshInspector();
     } catch (error) {
+      if (gen !== state.convGen || targetConv !== state.conversationId) return;
       appendSystem("chat failed: " + error.message, true);
     } finally {
-      state.streaming = false;
-      byId("typing").classList.add("hidden");
-      byId("send-button").disabled = false;
-      input.focus();
+      if (gen === state.convGen && targetConv === state.conversationId) {
+        state.streaming = false;
+        byId("typing").classList.add("hidden");
+        byId("send-button").disabled = false;
+        input.focus();
+      }
     }
   };
 

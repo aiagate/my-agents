@@ -28,8 +28,57 @@ _CONTROL_ALLOWED = frozenset({"\n", "\r", "\t"})
 _SINGLE_LINE_BREAKS = ("\r", "\n", "\t", "\u2028", "\u2029")
 _MARKER = "UNTRUSTED_EVENT"
 _ROLE_SPOOF = re.compile(
-    r"(\*{0,2}\b(?:system|assistant|user|developer|tool)\b)\s*[:\uff1a\ufe13]\s*\*{0,2}",
+    r"(\*{0,2}\b(?:system|assistant|user|developer|tool)\b)\s*"
+    r"[:\uff1a\ufe55\ufe13]\s*\*{0,2}",
     re.IGNORECASE,
+)
+_CONFUSABLES = str.maketrans(
+    {
+        "а": "a",
+        "А": "A",
+        "е": "e",
+        "Е": "E",
+        "і": "i",
+        "І": "I",
+        "ј": "j",
+        "Ј": "J",
+        "к": "k",
+        "К": "K",
+        "м": "m",
+        "М": "M",
+        "о": "o",
+        "О": "O",
+        "р": "p",
+        "Р": "P",
+        "с": "c",
+        "С": "C",
+        "т": "t",
+        "Т": "T",
+        "у": "y",
+        "У": "Y",
+        "х": "x",
+        "Х": "X",
+        "ѕ": "s",
+        "Ѕ": "S",
+        "α": "a",
+        "Α": "A",
+        "ε": "e",
+        "Ε": "E",
+        "ι": "i",
+        "Ι": "I",
+        "κ": "k",
+        "Κ": "K",
+        "ο": "o",
+        "Ο": "O",
+        "ρ": "p",
+        "Ρ": "P",
+        "τ": "t",
+        "Τ": "T",
+        "υ": "u",
+        "Υ": "Y",
+        "χ": "x",
+        "Χ": "X",
+    }
 )
 
 
@@ -109,13 +158,26 @@ def _strip_controls(text: str) -> str:
     )
 
 
+def _defang_roles(text: str) -> str:
+    skeleton = text.translate(_CONFUSABLES)
+    parts: list[str] = []
+    cursor = 0
+    for match in _ROLE_SPOOF.finditer(skeleton):
+        parts.append(text[cursor : match.start()])
+        parts.append(f"{text[match.start(1) : match.end(1)]}_ ")
+        cursor = match.end()
+    parts.append(text[cursor:])
+    return "".join(parts)
+
+
 def _defang(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text)
     escaped = (
-        re.sub(rf"{re.escape(_MARKER)}(?!_)", f"{_MARKER}_", text)
+        re.sub(rf"{re.escape(_MARKER)}(?!_)", f"{_MARKER}_", normalized)
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")
     )
-    return _ROLE_SPOOF.sub(lambda match: f"{match.group(1)}_ ", escaped)
+    return _defang_roles(escaped)
 
 
 def sanitize_untrusted(text: str) -> str:

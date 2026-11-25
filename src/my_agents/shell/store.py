@@ -1,4 +1,5 @@
 import fcntl
+import json
 import os
 import sqlite3
 import tempfile
@@ -12,7 +13,7 @@ from uuid import uuid4
 
 from flow_res import Err, Ok, Result
 
-from my_agents.core.events import decide_merge
+from my_agents.core.events import decide_merge, sanitize_single_line
 from my_agents.core.memory import should_rollover
 from my_agents.core.types import (
     AppError,
@@ -143,11 +144,71 @@ def _unique_single_columns(connection: sqlite3.Connection, table: str) -> list[s
     return found
 
 
-def _pick(columns: set[str], *names: str, default: str = "NULL") -> str:
-    for name in names:
-        if name in columns:
-            return f'"{name}"'
-    return default
+def _row_text(row: dict[str, object], name: str, default: str = "") -> str:
+    value = row.get(name)
+    return value if isinstance(value, str) else default
+
+
+def _row_int(row: dict[str, object], name: str, default: int = 0) -> int:
+    value = row.get(name)
+    return value if isinstance(value, int) else default
+
+
+def _row_optional_text(row: dict[str, object], name: str) -> str | None:
+    value = row.get(name)
+    return value if isinstance(value, str) else None
+
+
+def _conversation_id(row: dict[str, object], columns: set[str]) -> str:
+    if "conversation_id" not in columns:
+        return "default"
+    value = row.get("conversation_id")
+    return value if isinstance(value, str) and value else "default"
+
+
+def _legacy_findings(raw: str) -> tuple[str, ...]:
+    try:
+        decoded = json.loads(raw)
+    except ValueError:
+        return ()
+    return tuple(str(item) for item in decoded) if isinstance(decoded, list) else ()
+
+
+def _legacy_brief(
+    row: dict[str, object], event_id: str, name: str, key: str
+) -> str | None:
+    summary = _row_text(row, "summary")
+    findings = _row_text(row, "findings_json")
+    action = _row_text(row, "recommended_action")
+    if not summary and not findings and not action:
+        return None
+    headline = sanitize_single_line(summary)[:160] or name or event_id
+    facts = tuple(sanitize_single_line(item) for item in _legacy_findings(findings))[
+        :5
+    ] or (headline,)
+    brief = EventBrief.model_validate(
+        {
+            "headline": headline,
+            "facts": facts,
+            "impact": sanitize_single_line(action)[:240],
+            "suggested_angle": "",
+            "urgency": 0,
+            "relevance": 0,
+            "confidence": 0.0,
+            "requires_user_action": bool(action),
+            "sensitive": False,
+            "dedupe_key": sanitize_single_line(key)[:120] or event_id,
+        }
+    )
+    return brief.model_dump_json()
+
+
+def _require_supported_version(connection: sqlite3.Connection) -> None:
+    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    if version > CURRENT_SCHEMA_VERSION:
+        raise ValueError(
+            f"Database schema version {version} is newer than {CURRENT_SCHEMA_VERSION}."
+        )
 
 
 def _needs_migration(connection: sqlite3.Connection) -> bool:
@@ -157,7 +218,13 @@ def _needs_migration(connection: sqlite3.Connection) -> bool:
             "SELECT name FROM sqlite_master WHERE type = 'table'"
         ).fetchall()
     }
-    for table in ("episodes", "dialogue_turns", "events", "memory_candidates"):
+    for table in (
+        "episodes",
+        "dialogue_turns",
+        "events",
+        "memory_candidates",
+        "conversation_state",
+    ):
         if table not in tables:
             continue
         columns = _table_columns(connection, table)
@@ -190,12 +257,7 @@ class Store:
             try:
                 connection.row_factory = sqlite3.Row
                 connection.execute("PRAGMA busy_timeout = 5000")
-                version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-                if version > CURRENT_SCHEMA_VERSION:
-                    return _storage(
-                        f"Database schema version {version} is newer than "
-                        f"{CURRENT_SCHEMA_VERSION}."
-                    )
+                _require_supported_version(connection)
                 if _needs_migration(connection):
                     self._migrate(connection)
                 connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
@@ -217,100 +279,135 @@ class Store:
                 ).fetchall()
             }
             present = [table for table in _LEGACY_TABLES if table in tables]
+            columns = {table: _table_columns(connection, table) for table in present}
+            legacy = {
+                table: [
+                    dict(row) for row in connection.execute(f'SELECT * FROM "{table}"')
+                ]
+                for table in present
+            }
             for table in present:
-                connection.execute(f'ALTER TABLE "{table}" RENAME TO "{table}__legacy"')
+                for index in connection.execute(
+                    f'PRAGMA index_list("{table}")'
+                ).fetchall():
+                    name = str(index[1])
+                    if name.startswith("sqlite_autoindex"):
+                        continue
+                    connection.execute(f'DROP INDEX IF EXISTS "{name}"')
+                connection.execute(f'DROP TABLE "{table}"')
             for statement in _SCHEMA.split(";"):
                 if statement.strip():
                     connection.execute(statement)
             now = _stamp(datetime.now(UTC))
-            now_literal = f"'{now}'"
-            connection.execute(
-                "INSERT OR IGNORE INTO conversations (conversation_id, created_at) "
-                "VALUES ('default', ?)",
-                (now,),
-            )
-            if "conversation_state" in present:
-                columns = _table_columns(connection, "conversation_state__legacy")
+            conversation_ids = {"default"} | {
+                _conversation_id(row, columns[table])
+                for table in present
+                for row in legacy[table]
+            }
+            for conversation_id in sorted(conversation_ids):
                 connection.execute(
-                    "INSERT INTO conversation_state "
+                    "INSERT OR IGNORE INTO conversations "
+                    "(conversation_id, created_at) VALUES (?, ?)",
+                    (conversation_id, now),
+                )
+            for row in legacy.get("conversation_state", []):
+                connection.execute(
+                    "INSERT OR REPLACE INTO conversation_state "
                     "(conversation_id, epoch, last_user_activity_at, "
                     "last_proactive_at, proactive_count_today, proactive_day) "
-                    f"SELECT 'default', {_pick(columns, 'epoch', default='0')}, "
-                    f"{_pick(columns, 'last_user_activity_at')}, "
-                    f"{_pick(columns, 'last_proactive_at')}, "
-                    f"{_pick(columns, 'proactive_count_today', default='0')}, "
-                    f"{_pick(columns, 'proactive_day', default="''")} "
-                    "FROM conversation_state__legacy LIMIT 1"
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        _conversation_id(row, columns["conversation_state"]),
+                        _row_int(row, "epoch"),
+                        _row_optional_text(row, "last_user_activity_at"),
+                        _row_optional_text(row, "last_proactive_at"),
+                        _row_int(row, "proactive_count_today"),
+                        _row_text(row, "proactive_day"),
+                    ),
                 )
-            if "episodes" in present:
-                columns = _table_columns(connection, "episodes__legacy")
+            for row in legacy.get("episodes", []):
                 connection.execute(
-                    "INSERT INTO episodes (episode_id, conversation_id, "
-                    "title, overview, summary, started_at, updated_at, turn_count, "
-                    "summarized_turn_count, closed_at) "
-                    f"SELECT {_pick(columns, 'episode_id', 'id')}, 'default', "
-                    f"{_pick(columns, 'title', default="''")}, "
-                    f"{_pick(columns, 'overview', default="''")}, "
-                    f"{_pick(columns, 'summary', default="''")}, "
-                    f"{_pick(columns, 'started_at', default=now_literal)}, "
-                    f"{_pick(columns, 'updated_at', default=now_literal)}, "
-                    f"{_pick(columns, 'turn_count', default='0')}, "
-                    f"{_pick(columns, 'summarized_turn_count', default='0')}, "
-                    f"{_pick(columns, 'closed_at')} FROM episodes__legacy"
+                    "INSERT INTO episodes (episode_id, conversation_id, title, "
+                    "overview, summary, started_at, updated_at, turn_count, "
+                    "summarized_turn_count, closed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        _row_text(row, "episode_id", _row_text(row, "id")),
+                        _conversation_id(row, columns["episodes"]),
+                        _row_text(row, "title"),
+                        _row_text(row, "overview"),
+                        _row_text(row, "summary"),
+                        _row_text(row, "started_at", now),
+                        _row_text(row, "updated_at", now),
+                        _row_int(row, "turn_count"),
+                        _row_int(row, "summarized_turn_count"),
+                        _row_optional_text(row, "closed_at"),
+                    ),
                 )
-            if "dialogue_turns" in present:
-                columns = _table_columns(connection, "dialogue_turns__legacy")
+            for row in legacy.get("dialogue_turns", []):
                 connection.execute(
-                    "INSERT INTO dialogue_turns (episode_id, "
-                    "conversation_id, seq, turn_index, role, origin, content, "
-                    "source_event_id, created_at) "
-                    f"SELECT {_pick(columns, 'episode_id', default="''")}, 'default', "
-                    f"{_pick(columns, 'seq', 'turn_index', 'rowid', default='0')}, "
-                    f"{_pick(columns, 'turn_index', 'seq', default='0')}, "
-                    f"{_pick(columns, 'role', default="'assistant'")}, "
-                    f"{_pick(columns, 'origin', default="'reply'")}, "
-                    f"{_pick(columns, 'content', default="''")}, "
-                    f"{_pick(columns, 'source_event_id')}, "
-                    f"{_pick(columns, 'created_at', default=now_literal)} "
-                    "FROM dialogue_turns__legacy"
+                    "INSERT INTO dialogue_turns (episode_id, conversation_id, seq, "
+                    "turn_index, role, origin, content, source_event_id, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        _row_text(row, "episode_id"),
+                        _conversation_id(row, columns["dialogue_turns"]),
+                        _row_int(row, "seq", _row_int(row, "turn_index")),
+                        _row_int(row, "turn_index", _row_int(row, "seq")),
+                        _row_text(row, "role", "assistant"),
+                        _row_text(row, "origin", "reply"),
+                        _row_text(row, "content"),
+                        _row_optional_text(row, "source_event_id"),
+                        _row_text(row, "created_at", now),
+                    ),
                 )
-            if "events" in present:
-                columns = _table_columns(connection, "events__legacy")
+            for row in legacy.get("events", []):
+                event_id = _row_text(row, "event_id", _row_text(row, "id"))
+                key = _row_text(row, "idempotency_key", event_id)
+                name = _row_text(row, "name")
+                brief = row.get("brief_json")
+                if not isinstance(brief, str) or not brief:
+                    brief = _legacy_brief(row, event_id, name, key)
                 connection.execute(
                     "INSERT INTO events (event_id, conversation_id, "
                     "idempotency_key, name, source, occurred_at, received_at, "
                     "status, delivery, merge_reason, payload_json, brief_json, "
                     "failure_reason, surfaced_at, linked_turn_id) "
-                    f"SELECT {_pick(columns, 'event_id', 'id')}, 'default', "
-                    f"{_pick(columns, 'idempotency_key', default='event_id')}, "
-                    f"{_pick(columns, 'name', default="''")}, "
-                    f"{_pick(columns, 'source', default="''")}, "
-                    f"{_pick(columns, 'occurred_at', default=now_literal)}, "
-                    f"{_pick(columns, 'received_at', 'recorded_at', default=now_literal)}, "
-                    f"{_pick(columns, 'status', default="'received'")}, "
-                    f"{_pick(columns, 'delivery', default="'silent'")}, "
-                    f"{_pick(columns, 'merge_reason', default="''")}, "
-                    f"{_pick(columns, 'payload_json', default="'{}'")}, "
-                    f"{_pick(columns, 'brief_json')}, "
-                    f"{_pick(columns, 'failure_reason', default="''")}, "
-                    f"{_pick(columns, 'surfaced_at')}, "
-                    f"{_pick(columns, 'linked_turn_id')} FROM events__legacy"
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        event_id,
+                        _conversation_id(row, columns["events"]),
+                        key,
+                        name,
+                        _row_text(row, "source"),
+                        _row_text(row, "occurred_at", now),
+                        _row_text(
+                            row, "received_at", _row_text(row, "recorded_at", now)
+                        ),
+                        _row_text(row, "status", "received"),
+                        _row_text(row, "delivery", "silent"),
+                        _row_text(row, "merge_reason"),
+                        _row_text(row, "payload_json", "{}"),
+                        brief,
+                        _row_text(row, "failure_reason"),
+                        _row_optional_text(row, "surfaced_at"),
+                        _row_optional_text(row, "linked_turn_id"),
+                    ),
                 )
-            if "memory_candidates" in present:
-                columns = _table_columns(connection, "memory_candidates__legacy")
+            for row in legacy.get("memory_candidates", []):
                 connection.execute(
                     "INSERT INTO memory_candidates (candidate_id, "
                     "conversation_id, block, content, reason, status, created_at) "
-                    f"SELECT {_pick(columns, 'candidate_id', 'id')}, 'default', "
-                    f"{_pick(columns, 'block', default="'user'")}, "
-                    f"{_pick(columns, 'content', default="''")}, "
-                    f"{_pick(columns, 'reason', default="''")}, "
-                    f"{_pick(columns, 'status', default="'pending'")}, "
-                    f"{_pick(columns, 'created_at', default=now_literal)} "
-                    "FROM memory_candidates__legacy"
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        _row_text(row, "candidate_id", _row_text(row, "id")),
+                        _conversation_id(row, columns["memory_candidates"]),
+                        _row_text(row, "block", "user"),
+                        _row_optional_text(row, "content"),
+                        _row_text(row, "reason"),
+                        _row_text(row, "status", "pending"),
+                        _row_text(row, "created_at", now),
+                    ),
                 )
-            for table in present:
-                connection.execute(f'DROP TABLE IF EXISTS "{table}__legacy"')
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
             connection.commit()
@@ -331,6 +428,7 @@ class Store:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
+            _require_supported_version(connection)
             if not readonly:
                 with suppress(sqlite3.OperationalError):
                     connection.execute("PRAGMA journal_mode = WAL")
@@ -1063,7 +1161,11 @@ class Store:
         self._memory.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self._memory.with_name(f"{self._memory.name}.lock")
         handle = os.open(lock_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
-        fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        except BaseException:
+            os.close(handle)
+            raise
         return _FileLock(handle)
 
     def _read_memory_unlocked(self) -> Result[MemoryBlocks, AppError]:
@@ -1105,8 +1207,10 @@ class _FileLock:
 
     def __exit__(self, *args: object) -> None:
         del args
-        fcntl.flock(self._handle, fcntl.LOCK_UN)
-        os.close(self._handle)
+        try:
+            fcntl.flock(self._handle, fcntl.LOCK_UN)
+        finally:
+            os.close(self._handle)
 
 
 def _parse_memory(text: str) -> MemoryBlocks:

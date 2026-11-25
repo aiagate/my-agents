@@ -2,10 +2,14 @@ import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Self
 from unittest.mock import patch
 
 import pytest
 from flow_res import Err, Ok
+from pydantic_ai.messages import ModelResponse, TextPart
+from pydantic_ai.models.function import FunctionModel
+from pydantic_ai.toolsets import AbstractToolset
 from starlette.types import Message, Scope
 
 from my_agents.core.types import (
@@ -16,7 +20,7 @@ from my_agents.core.types import (
 )
 from my_agents.shell.engine import CharacterEngine
 from my_agents.shell.llm import Llm
-from my_agents.shell.logger import NOOP_LOGGER
+from my_agents.shell.logger import NOOP_LOGGER, IAppLogger, LogEntry
 from my_agents.shell.server import MAX_BODY_BYTES, create_app, serve
 from my_agents.shell.settings import load_settings
 from my_agents.shell.store import Store
@@ -477,3 +481,60 @@ async def test_chunked_oversized_body_is_rejected_before_full_buffering(
     assert statuses[0] == 413
     assert calls == 2
     await engine.aclose()
+
+
+class _RecordingLogger:
+    def __init__(self) -> None:
+        self.entries: list[LogEntry] = []
+
+    def log(self, entry: LogEntry, /) -> None:
+        self.entries.append(entry)
+
+    def close(self) -> None:
+        return None
+
+
+class _FailingToolset(AbstractToolset[None]):
+    @property
+    def id(self) -> str:
+        return "failing"
+
+    async def __aenter__(self) -> Self:
+        raise RuntimeError("connect failed for secret-token")
+
+    async def __aexit__(self, *args: object) -> None:
+        del args
+
+    async def get_tools(self, ctx: object) -> dict:
+        del ctx
+        return {}
+
+    async def call_tool(self, name, tool_args, ctx, tool):
+        del name, tool_args, ctx, tool
+        raise LookupError
+
+
+@pytest.mark.anyio
+async def test_lifespan_aborts_when_llm_start_fails(tmp_path: Path) -> None:
+    settings = load_settings(
+        env={"MEMORY_PATH": str(tmp_path), "CHAT_BACKEND": "local"}
+    ).unwrap()
+    store = Store(settings.db_path, settings.core_memory_path)
+    logger: IAppLogger = _RecordingLogger()
+    llm = Llm(
+        FunctionModel(lambda _messages, _info: ModelResponse([TextPart("ok")])),
+        store=store,
+        logger=logger,
+        external_toolsets=(_FailingToolset(),),
+        redactions=("secret-token",),
+    )
+    engine = CharacterEngine(store, llm, settings, DEFAULT_PERSONA, logger)
+    app = create_app(engine)
+    with pytest.raises(RuntimeError) as failure:
+        async with app.router.lifespan_context(app):
+            pass
+    assert "MCP startup failed" in str(failure.value)
+    assert "secret-token" not in str(failure.value)
+    recorded = logger.entries
+    assert [entry.event for entry in recorded] == ["server_start_failed"]
+    assert "secret-token" not in recorded[0].message

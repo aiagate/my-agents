@@ -12,9 +12,11 @@ uv run --locked python tools/e2e_event_chat.py
 ```
 
 スクリプトは空きポートを選び、`my-agents serve` を起動して次を順に実測する。
-`web-server.md` と同じ 11 シナリオを共有する。
+`web-server.md` と同じ 14 シナリオを共有する。
 
-1. `EVENT_ANALYSIS_DELAY_MS=1500` でサーバを起動する。
+1. `EVENT_ANALYSIS_DELAY_MS=1500` と `MCP_SERVERS_JSON` でサーバを起動し、
+   `/health`、`/`（`EventSource(` / `textContent` / `line:demo` / `/context`、
+   `innerHTML` 等の不使用）、`/context` を確認する。
 2. loopback の `POST /events` に温度イベント（33.2 > 30.0）を送り、202 と
    `event_id` が遅延ワーカー完了前（250ms 未満）に返ることを確認する。
 3. ワーカー進行中に通常チャットを送り、受理時 epoch の変化で proactive が
@@ -30,43 +32,49 @@ uv run --locked python tools/e2e_event_chat.py
 7. `GET /context` の `stable_prefix_sha256` がイベント前・後・チャット後で
    不変であることを確認する。
 8. `line:demo` と `default` の履歴・イベント・記憶候補・SSE・`/reset` が
-   分離することを確認する。
+   分離することを確認する。clean turn 後の記憶候補分離も確認する。
 9. `remember` → `POST /curate` → `GET /memory` / `core.md` の永続化を確認する。
 10. 不正 JSON 400、サイズ超過 413、スキーマ違反 422 を確認する。
-11. 400 / 413 / 422 と chunked 本文の即時 413 を確認する。注入イベントの
-    sender / body / 役割偽装文字列が `dialogue_turns` に 0 件で、注入後 `/curate`
-    が L2 と `stable_prefix_sha256` を変えないことを確認する。attacker から
-    victim の検索・recall が拒否されることも確認する。
+11. 注入イベントの sender / body / 役割偽装文字列が `dialogue_turns` に 0 件で、
+    注入後 `/curate` が L2 と `stable_prefix_sha256` を変えないことを確認する。
+    attacker から victim の検索・recall が拒否されることも確認する。
 12. 別プロセスの mock OpenAI が 500 を返す構成で `event_failed` と台帳の `failed`
-    記録を確認し、プロセスが生存したままであることを確認する。旧 `d06697f` DB の
-    移行と、SIGINT 後の clean exit / MCP teardown も確認する。
-12. `MCP_SERVERS_JSON` で `tools/mcp_divergence_server.py` を接続し、
-    `連想` 発話で外部 `diverge_associations` が呼ばれ、`stable_prefix_sha256` が
-    変わらないことを確認する。
+    記録を確認し、プロセスが生存したままであることを確認する。
+13. 旧 `d06697f` DB の移行を確認する。
+14. `MCP_SERVERS_JSON` で `tools/mcp_divergence_server.py` を接続したまま
+    SIGINT を送り、MCP 子プロセス teardown と clean exit を確認する。
 
 ## 期待する証跡
 
-標準出力の先頭に次の行が出る。イベント ID・ポート・時刻は実行ごとに変わる。
+標準出力は次の順で出る。イベント ID・ポート・時刻は実行ごとに変わる。
+`scenario_8b` はシナリオ 8 の直後、`process_exit_code` と
+`mcp_children_teardown` は SIGINT 後、`scenario_11` はその後に出る。
 
 ```text
 health=ok port=... delay_ms=1500
 scenario_1=ok index_bytes=... sha=...
 scenario_3=ok ... delivery=ambient reason=epoch_conflict
+scenario_7a=ok stable_prefix_sha256=invariant
 scenario_2=ok ... accept_elapsed_ms=...
 scenario_5=ok message='...' source_event_id=evt_...
 scenario_4=ok duplicate=True ... emissions=0
-scenario_7a=ok stable_prefix_sha256=invariant
 scenario_7b=ok stable_prefix_sha256=invariant
+scenario_7=ok stable_prefix_sha256 byte-invariant across ...
 scenario_6=ok ... delivery=ambient
 scenario_8=ok line_turns=2 shared_keys_isolated=True ...
+scenario_8b=ok memory_candidates_isolated_after_clean_turn=True
 scenario_9=ok promoted=1 ...
 scenario_10=ok injection_defanged=True stable_prefix_sha256=invariant
 scenario_12=ok chunked_413=True ... cross_conversation_denied=True
 scenario_13=ok mock_model_failure=typed_failed_process_alive=True
 scenario_14=ok legacy_d06697f_migrated=True
-scenario_11=ok status_400=400 status_413=413 status_422=422 ... mcp_sha_invariant=True
 process_exit_code=...
+mcp_children_teardown=ok|skipped_no_children
+scenario_11=ok status_400=400 status_413=413 status_422=422 ... mcp_sha_invariant=True
 ```
 
-`process_exit_code` は SIGTERM を受けた環境では `-15`、graceful shutdown では
-`0` を許す。終了後に SQLite を直接検査し、`db_raw_event_content=0` を確認する。
+`process_exit_code` は SIGINT 後の graceful shutdown では `0`、SIGINT で終了した
+場合は `-2`、外部から終了させた場合は `-15` を許す。MCP 子プロセスは stdio の
+切断で終了する。`pgrep` が使えない環境では
+`mcp_children_teardown=skipped_no_children` と記録する。終了後に SQLite を直接
+検査し、`db_raw_event_content=0` を確認する。

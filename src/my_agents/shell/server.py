@@ -22,6 +22,7 @@ from my_agents.core.types import (
     TimelineItem,
 )
 from my_agents.shell.engine import CharacterEngine
+from my_agents.shell.logger import LogEntry, LogLevel
 
 MAX_BODY_BYTES = 64 * 1024
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
@@ -306,7 +307,13 @@ def create_app(engine: CharacterEngine) -> Starlette:
 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
-        await engine.start()
+        started = await engine.start()
+        if is_err(started):
+            engine.logger.log(
+                LogEntry(LogLevel.ERROR, "server_start_failed", started.error.message)
+            )
+            await engine.aclose()
+            raise RuntimeError(started.error.message)
         try:
             yield
         finally:

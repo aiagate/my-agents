@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -163,3 +164,31 @@ def test_serve_delegates_to_server(tmp_path: Path) -> None:
 def test_invalid_settings_use_default_error_writer(capsys) -> None:
     assert main([], env={"CHAT_BACKEND": "bad"}) == 1
     assert "Error:" in capsys.readouterr().err
+
+
+def test_repl_exits_one_when_llm_start_fails(tmp_path: Path) -> None:
+    errors: list[str] = []
+    outputs: list[str] = []
+    read_calls: list[str] = []
+
+    def read(prompt: str) -> str:
+        read_calls.append(prompt)
+        raise AssertionError("REPL must not prompt after a startup failure")
+
+    code = main(
+        [],
+        env={
+            **_ENV,
+            "MEMORY_PATH": str(tmp_path),
+            "MCP_SERVERS_JSON": json.dumps(
+                {"broken": {"command": str(tmp_path / "missing-mcp")}}
+            ),
+        },
+        read_input=read,
+        write_output=outputs.append,
+        write_error=errors.append,
+    )
+    assert code == 1
+    assert read_calls == []
+    assert outputs == []
+    assert any("MCP startup failed" in line for line in errors)
