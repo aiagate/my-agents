@@ -9,6 +9,8 @@ dependencies = [
     "flow-res>=0.2.0",
     "pydantic-ai-slim[openai,web,mcp]>=2.71.0",
     "python-dotenv>=1.2.4",
+    "starlette>=1.10.0",
+    "uvicorn>=0.54.0",
 ]
 
 [project.scripts]

@@ -1,7 +1,9 @@
 # 規約と強制手段
 
-制約の本体は tools/project_lint/rules/（PL001〜PL023）と pyproject.toml
-（Ruff / ty）と .githooks/ にある。この表は規約と強制手段の対応を示す
+制約の本体は tools/project_lint/rules/（PL001〜PL023、廃止番号を除く 19 ルール）と
+pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`（純粋関数・
+不変モデル・副作用ゼロ）と `shell/`（SQLite・pydantic-ai・Starlette・CLI）の 2 層で、
+依存は `shell/` → `core/` の一方向だけである。この表は規約と強制手段の対応を示す
 索引であり、強制手段の空欄を見つけるための道具である。
 
 新規 PL ルールの入場条件:
@@ -17,10 +19,10 @@
 
 | 規約 | 強制手段 |
 | --- | --- |
-| 秘密を平文 str で持ち歩かない | PL001 + contracts/secret.py（SecretStr 型） |
-| テストのエラー検証は型とメッセージを両方見る | PL002 + tests/helpers.py（assert_err） |
+| 秘密を平文 str で持ち歩かない | PL001 + core/types.py（SecretStr 再輸出） |
+| テストのエラー検証は kind とメッセージを両方見る | PL002 + tests/helpers.py（assert_err） |
 | 列挙分岐の網羅を型で強制する | PL003 + ty（assert_never） |
-| レイヤー依存は contracts→domain→usecases→infrastructure/presentation 一方向 | PL004 |
+| 依存は shell→core の一方向。core は shell と外部 I/O を import しない | PL004 |
 | ty の既定診断を有効にし、警告でも失敗させる | PL005 + pyproject（ty 設定） |
 | 説明 Docstring を書かない。仕様は型・命名・テストで表す | PL006（hint が修正行動を指示） |
 | カバレッジ 100%（分岐込み）を維持 | pyproject（fail_under=100 / branch）+ PL007 |
@@ -28,16 +30,12 @@
 | src で cast による型のすり替えをしない | PL009 |
 | テストは実挙動を検証し内部実装を写さない | PL010 |
 | dataclass は init 外フィールド・プライベートフィールドにしない | PL011 |
-| 反変位置の型引数に object を入れない | PL012 |
-| アダプタは Port の型を公開露出しない | PL013 |
 | エントリポイントと __init__ は thin に保つ | PL014 |
 | os.environ をグローバルに読み書きしない（注入で渡す） | PL015 |
-| 状態は frozen dataclass で不変表現する | PL016 |
-| レイヤー根はアダプタを再公開しない | PL017 |
+| frozen dataclass に実行時可変コレクションを置かない（Sequence/Mapping は可） | PL016 |
 | テストは他レイヤーの内部を monkeypatch しない | PL018 |
-| Result のエラー型は例外でなく TypedError | PL019 + flow-res 型 |
-| logging/print を直接使わず IAppLogger を通す | PL020 + Ruff T201 |
-| usecase の Protocol は usecase 側が所有する | PL021 |
+| Result のエラー型は例外でなく AppError（kind + message） | PL019 + flow-res 型 |
+| logging/print を直接使わず IAppLogger を通す（許可は shell/logger.py のみ） | PL020 + Ruff T201 |
 | LLM 向けツール定義に Field description を付ける | PL022 |
 | 公開 API の型注釈に非公開型を露出しない | PL023 |
 | Python 3.14+ 前提・__future__ annotations と typing.Any を使わない | pyproject（requires-python / Ruff TID251）+ ty python-version |

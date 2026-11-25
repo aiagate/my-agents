@@ -1,5 +1,7 @@
-from my_agents.composition import run_cli
+from my_agents.shell.cli import main as _main
+
+__all__ = ["main"]
 
 
 def main() -> int:
-    return run_cli()
+    return _main()

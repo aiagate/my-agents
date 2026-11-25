@@ -1,95 +1,109 @@
 # my-agents
 
-## 思考発散ツールの方針
+単一の会話を通して付き合うキャラクター AI のヘッドレスエンジン。プラットフォーム
+非依存のコア（`core/`）と、SQLite・pydantic-ai・Starlette を担当する薄いシェル
+（`shell/`）の 2 層で構成する。
 
-思考発散（連想ツリー）は本体に内蔵せず、外部 MCP ツールとして分離します。接続は `pydantic-ai` V2 の `MCPToolset` と `capabilities.MCP(include_instructions=False)` を前提とし、人格・Core Memory・過去会話の方針（L0）にはツール固有の指示を混ぜません。
+```text
+src/my_agents/
+  __init__.py        # main() だけの薄い入口
+  core/              # 純粋関数・不変モデル（I/O と外部フレームワーク禁止）
+    types.py         # AppError, persona, memory, episode, event, timeline
+    events.py        # 厳格な envelope 検証・多層プロンプト防御・合流判定
+    memory.py        # core memory 編集・候補統合・episode rollover/summary
+    context.py       # キャッシュ安定 4 層コンテキストとプロンプト生成
+  shell/             # 命令的シェル（SQLite / pydantic-ai / ASGI / CLI）
+    store.py         # 単一 SQLite（WAL + busy_timeout + BEGIN IMMEDIATE）と core.md
+    llm.py           # Agent / Toolset / FunctionModel(local) / summarizer
+    engine.py        # submit_message, ingest_event, subscribe, curate
+    server.py        # Starlette ASGI + SSE
+    cli.py           # `my-agents` と `my-agents serve`
+```
 
-## 会話履歴
+## 起動
 
-返信が返るたびに、ユーザーとアシスタントの発言を単一の SQLite タイムラインに保存します。再起動時は直近の話題を引き継ぎます。一定時間が経つか発言数の上限に達すると、新しい話題を開始します。`/history` で新しい順に話題を一覧表示し、`/history 1` などで要約と会話の全文を表示できます。`/clear` は現在の話題を終了し、過去の履歴を保存したまま新しい話題を始めます。
+```sh
+# ローカル対話（CHAT_BACKEND=local なら外部 API 不要）
+MEMORY_PATH=./memory CHAT_BACKEND=local uv run my-agents
 
-エージェントは通常、直近の発言、話題の要約、過去の話題の索引を受け取ります。関連する全文は必要に応じて `search_conversations` と `recall_conversation` で参照します。要約モデルには、要約の差分と前回の要約が送信されます。
+# ヘッドレスサーバ（既定 http://127.0.0.1:8080）
+MEMORY_PATH=./memory CHAT_BACKEND=local uv run my-agents serve
+```
 
-次の環境変数はすべて任意です。数値は正の整数を指定します。
+`CHAT_BACKEND=openai` では `MAGPIE_MODEL`, `MAGPIE_BASE_URL`, `MAGPIE_API_KEY` を
+使う。`local` は pydantic-ai の `FunctionModel` を同じ Agent パイプラインへ注入し、
+EventBrief の構造化出力・ツール呼び出し・要約までオフラインで通す。
 
-| 環境変数 | 既定値 | 用途 |
+## ヘッドレス API
+
+| Method | Path | 用途 |
 | --- | --- | --- |
-| `CHATS_DB_PATH` | `<MEMORY_PATH>/chats.db` | 会話履歴の保存先 |
-| `SUMMARY_MODEL` | `MAGPIE_MODEL` を継承 | 要約に使うモデル |
-| `SUMMARY_BASE_URL` | `MAGPIE_BASE_URL` を継承 | 要約モデルの API URL |
-| `SUMMARY_API_KEY` | `MAGPIE_API_KEY` を継承 | 要約モデルの API キー |
-| `SUMMARY_INDEX_CHAR_BUDGET` | `16000` | 過去の話題の索引に使う文字数の上限（プロンプトは別途 2400 文字で上限） |
-| `SUMMARY_EVERY_MESSAGES` | `6` | 差分要約を開始する未要約の発言数 |
-| `RECENT_MESSAGES_LIMIT` | `20` | エージェントに渡す現在の話題の直近発言数 |
-| `EPISODE_MAX_MESSAGES` | `40` | 次の入力で話題を切り替える発言数 |
-| `EPISODE_GAP_MINUTES` | `60` | 話題を切り替えるまでの無操作時間（分） |
-| `EVENT_WEBHOOK_PORT` | 未設定（無効） | loopback のイベント Webhook 待受ポート。`0` で空きポートを自動選択 |
-| `EVENT_ANALYSIS_DELAY_MS` | `0` | イベント解析ワーカーへ意図的に入れる遅延（ミリ秒、検証用） |
-| `CHAT_BACKEND` | `openai` | `local` で外部 API を使わない決定論的チャット応答に切り替え |
+| GET | `/health` | 稼働確認 |
+| GET | `/` | 最小 HTML（P3 でリッチ UI へ） |
+| POST | `/events` | 外部イベント受理。202 即時、`event_id` / `duplicate` を返す |
+| POST | `/chat` | `{conversation_id, message}` → 返信と発話ターン |
+| GET | `/stream?conversation_id=` | SSE（`turn` / `event` / `event_failed`） |
+| GET | `/timeline` | 会話ターンとイベント台帳の統合表示 |
+| GET | `/events/{event_id}` | イベント台帳の 1 件 |
+| GET | `/memory` | Core Memory ブロック |
+| POST | `/reset` | 会話のターン・イベント・候補を初期化 |
+| POST | `/curate` | sleep-time 要約と memory candidate 統合 |
 
-## イベント Webhook（MCP Events 相当・試作）
+イベントは `{name, data, source?, occurred_at?, idempotency_key?}`。`data` は
+有限 JSON のみ、32 KiB 上限、`occurred_at` は UTC オフセット必須。`idempotency_key`
+は一意で、再送は同じ `event_id` を返す。不正 JSON は 400、スキーマ違反は 422。
 
-`EVENT_WEBHOOK_PORT` を指定すると、`127.0.0.1` のみでイベントを受け付ける
-Webhook がチャットと同じプロセスで起動します。受理時に相関 ID を返し、解析は
-独立したバックグラウンドスレッドで行います。イベントは会話ターン
-（`dialogue_turns`）とは別の `events` 台帳へ構造化記録し、`episode.turn_count`
-や要約周期には触れません。
+## 会話・イベントの設計
 
-温度閾値超過・緊急語を含むメール・ワーカー失敗は `proactive` として
-`[Event <id>: completed]` / `[Event <id>: failed]` をメインチャットへ通知し、
-`surfaced_at` を記録します。閾値内の温度や通常メールは `ambient` として静かに
-台帳へ保存し、次回の通常チャットで背景文脈として合流した時点で `surfaced_at`
-を更新します。`/history <番号>` は会話ターンと区別した
-`[event:<id>] <status> (<delivery>)` 行を相関するイベント台帳記録として併記します。
+- 会話は `conversation_id` 単位で独立。`epoch` はユーザー発話で進み、能動発話の
+  コミット直前に変化していたら `ambient` へ自動降格する。
+- 蒸留（EventBrief 生成）は会話ロックを取らない。`proactive` / `ambient` /
+  `silent` は `sensitive`・静穏時間・直近のユーザー活動・cooldown・日次上限・
+  urgency/relevance/confidence から決定論的に決まる。
+- 外部イベントは命令ではなくデータ。制御文字・`<`/`>`・マーカーを無害化し、
+  リクエスト毎 nonce のフェンスで囲む。
+- コンテキストは L0 人格、L1 Core Memory、L2 日付のみの話題索引、L3 分離した
+  イベント文脈の 4 層。L0〜L2 はイベントの有無で変化せず、KV キャッシュの
+  prefix が安定する。
+- `proactive` の自然文は `evt_` / `[event:` / `UNTRUSTED` / `name=` / コードフェンス
+  / 生 JSON / 長文 / 4 行以上を拒否する。
 
-```sh
-EVENT_WEBHOOK_PORT=8765 uv run my-agents
-curl -sS -X POST http://127.0.0.1:8765/events \
-  -H 'Content-Type: application/json' \
-  -d '{"name":"temperature.threshold_exceeded","data":{"sensor_id":"kitchen","celsius":33.2,"threshold_celsius":30.0}}'
-# => {"event_id":"evt_...","status":"accepted"}
-```
+## 環境変数（主なもの）
 
-受付けるイベント名は `temperature.threshold_exceeded`、`email.received`、
-`spike.worker_failure`（失敗経路の検証用）です。スキーマ違反は 422、不正な
-JSON は 400 を返します。`payload_json` は構造化データのまま台帳へ保存し、
-コンテキスト組み立て時に `sensor_id` / `sender` / `subject` / `body` / `reason`
-を含む全フィールドの制御文字除去・改行正規化・`<`/`>` エスケープを行って
-`UNTRUSTED_EVENT_DATA_*` で囲みます。解析ワーカー自体は LLM や Web 検索を
-呼ばない決定論的実装です。プロンプトの L0〜L2（人格・Core Memory・日付のみの
-話題索引）はイベントの有無で変化しないため、KV プロンプトキャッシュの prefix が
-安定します。
+| 変数 | 既定値 | 用途 |
+| --- | --- | --- |
+| `MEMORY_PATH` | `./memory` | `core.md` と `chats.db` の置き場 |
+| `CHATS_DB_PATH` | `<MEMORY_PATH>/chats.db` | SQLite の上書き |
+| `PERSONA_PATH` | なし | 人格 JSON |
+| `CHAT_BACKEND` | `local` | `local` / `openai` |
+| `SERVER_HOST` / `SERVER_PORT` | `127.0.0.1` / `8080` | ASGI 待受 |
+| `EVENT_ANALYSIS_DELAY_MS` | `0` | 蒸留遅延（E2E 用） |
+| `PROACTIVE_COOLDOWN_MINUTES` | `180` | 連続能動発話の間隔 |
+| `PROACTIVE_DAILY_CAP` | `3` | 1 日の能動発話上限 |
+| `QUIET_HOURS_START` / `QUIET_HOURS_END` | `22` / `7` | 静穏時間（同一値で無効） |
+| `PROACTIVE_USER_ACTIVE_MINUTES` | `10` | 直近発話中は ambient へ降格 |
+| `EPISODE_MAX_TURNS` / `EPISODE_GAP_MINUTES` | `40` / `60` | 話題の切り替え |
+| `SUMMARY_EVERY_TURNS` | `6` | sleep-time 要約の間隔 |
+| `RECENT_TURNS_LIMIT` | `20` | 直近会話の保持数 |
+| `MCP_SERVERS_JSON` | なし | P3 の外部 MCP 接続設定（現状は予約） |
 
-これは MCP Events のドラフト（`events/list` / `events/subscribe` / 署名付き
-Webhook 配信）のワイヤ互換実装ではなく、`{name, data}` の受理、`event_id` の
-即時返却、バックグラウンド実行、チャットへの合流というアプリケーション境界
-だけを揃えた「相当」実装です。
-
-E2E（実プロセス・loopback HTTP・チャット履歴・異常系）は次で再実行できます。
+## 検証
 
 ```sh
-uv run --locked python tools/e2e_event_chat.py
+UV_CACHE_DIR="$PWD/.uv-cache" uv run --locked ruff check .
+UV_CACHE_DIR="$PWD/.uv-cache" uv run --locked ruff format --check .
+UV_CACHE_DIR="$PWD/.uv-cache" uv run --locked ty check
+UV_CACHE_DIR="$PWD/.uv-cache" uv run --locked python -m tools.project_lint
+UV_CACHE_DIR="$PWD/.uv-cache" uv run --locked pytest
+UV_CACHE_DIR="$PWD/.uv-cache" uv run --locked python tools/e2e_event_chat.py
 ```
 
-## Lint
+E2E は実プロセスの `my-agents serve` を起動し、HTTP+SSE・実 SQLite・冪等再送・
+蒸留中の通常チャット・ambient の後追い参照・ワーカー失敗・異常系を検証する。
 
-```sh
-uv run --locked ruff check .
-uv run --locked ruff format --check .
-uv run --locked ty check
-uv run --locked python -m tools.project_lint
-```
+## P3 への接続点
 
-自動修正できる指摘を修正するには、`uv run --locked ruff check --fix .` / `uv run --locked ruff format .` を実行してください。
-
-CI でも同じ Lint・型チェックと `uv run --locked python -m pytest` を実行します。
-Zed では `uv sync --locked` で環境を作成し、Python のツールチェーンに `.venv` を選択してください。
-プロジェクト設定で ty と Ruff が有効になります。
-
-## Git Hook
-
-コミット前に上記の Lint・型チェックを自動実行するには、初回のみ以下を実行します。
-
-```sh
-git config core.hooksPath .githooks
-```
+- `shell/llm.py` の `ChatToolbox` と `Llm.chat` に外部 `toolsets` を追加する。
+  `MCPToolset` は Agent 実行時の `toolsets=[...]` にそのまま挿せる。
+- `shell/server.py` の `index` をリッチ Web UI（LINE / Dots / Muse 風）へ置換する。
+- `tests/` と `tools/e2e_event_chat.py` に外部 FastMCP 実接続のシナリオを追加する。

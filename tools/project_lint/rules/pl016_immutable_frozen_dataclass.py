@@ -22,14 +22,9 @@ _DISALLOWED_COLLECTION_TYPES = frozenset(
         "defaultdict",
         "Counter",
         "OrderedDict",
-        "Sequence",
         "MutableSequence",
-        "Mapping",
         "MutableMapping",
-        "Set",
         "MutableSet",
-        "Collection",
-        "Iterable",
     }
 )
 

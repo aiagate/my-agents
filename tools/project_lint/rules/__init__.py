@@ -19,21 +19,12 @@ from tools.project_lint.rules.pl010_shallow_tests import check_no_shallow_tests
 from tools.project_lint.rules.pl011_private_dataclass_fields import (
     check_no_private_dataclass_init_fields,
 )
-from tools.project_lint.rules.pl012_contravariant_object import (
-    check_no_object_in_contravariant_type_args,
-)
-from tools.project_lint.rules.pl013_adapter_port_surface import (
-    check_adapter_port_surface,
-)
 from tools.project_lint.rules.pl014_thin_entrypoint import check_thin_entrypoint
 from tools.project_lint.rules.pl015_no_global_environ_mutation import (
     check_no_global_environ_mutation,
 )
 from tools.project_lint.rules.pl016_immutable_frozen_dataclass import (
     check_immutable_frozen_dataclass_fields,
-)
-from tools.project_lint.rules.pl017_layer_root_exports import (
-    check_no_adapter_reexport_at_layer_root,
 )
 from tools.project_lint.rules.pl018_cross_layer_monkeypatch import (
     check_no_cross_layer_internal_monkeypatch,
@@ -42,9 +33,6 @@ from tools.project_lint.rules.pl019_no_exception_errors import (
     check_no_exception_result_errors,
 )
 from tools.project_lint.rules.pl020_no_direct_logging import check_no_direct_logging
-from tools.project_lint.rules.pl021_usecase_protocol_ownership import (
-    check_usecase_protocol_ownership,
-)
 from tools.project_lint.rules.pl022_tool_descriptions import check_tool_descriptions
 from tools.project_lint.rules.pl023_no_private_type_in_public_api import (
     check_no_private_type_in_public_api,
@@ -76,13 +64,6 @@ _PATH_RULES: tuple[tuple[str, str, tuple[str, ...], _PathCheck], ...] = (
         _SRC,
         check_no_private_dataclass_init_fields,
     ),
-    (
-        "PL012",
-        "no_object_in_contravariant_type_args",
-        _SRC,
-        check_no_object_in_contravariant_type_args,
-    ),
-    ("PL013", "adapter_port_surface", _SRC, check_adapter_port_surface),
     ("PL014", "thin_entrypoint", _SRC, check_thin_entrypoint),
     ("PL015", "no_global_environ_mutation", _SRC, check_no_global_environ_mutation),
     (
@@ -92,12 +73,6 @@ _PATH_RULES: tuple[tuple[str, str, tuple[str, ...], _PathCheck], ...] = (
         check_immutable_frozen_dataclass_fields,
     ),
     (
-        "PL017",
-        "no_adapter_reexport_at_layer_root",
-        _SRC,
-        check_no_adapter_reexport_at_layer_root,
-    ),
-    (
         "PL018",
         "no_cross_layer_internal_monkeypatch",
         ("tests",),
@@ -105,7 +80,6 @@ _PATH_RULES: tuple[tuple[str, str, tuple[str, ...], _PathCheck], ...] = (
     ),
     ("PL019", "no_exception_result_errors", _SRC, check_no_exception_result_errors),
     ("PL020", "no_direct_logging", _SRC, check_no_direct_logging),
-    ("PL021", "usecase_protocol_ownership", _SRC, check_usecase_protocol_ownership),
     ("PL022", "tool_descriptions", _SRC, check_tool_descriptions),
     (
         "PL023",

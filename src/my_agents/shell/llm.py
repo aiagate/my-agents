@@ -1,0 +1,464 @@
+import json
+import re
+from collections.abc import Callable, Sequence
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from typing import Annotated, Literal
+from uuid import uuid4
+
+from flow_res import Err, Ok, Result
+from pydantic import BaseModel, Field, SecretStr
+from pydantic_ai import Agent, FunctionToolset, Tool, UsageLimits
+from pydantic_ai.messages import (
+    ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    TextPart,
+    ToolCallPart,
+    UserPromptPart,
+)
+from pydantic_ai.models import Model
+from pydantic_ai.models.function import AgentInfo, FunctionModel
+from pydantic_ai.models.openai import OpenAIChatModel
+from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.toolsets import AbstractToolset
+
+from my_agents.core.context import AssembledContext, build_proactive_prompt
+from my_agents.core.events import build_distill_prompt, validate_proactive_message
+from my_agents.core.memory import build_summary_prompt, edit_memory, normalize_summary
+from my_agents.core.types import (
+    AppError,
+    AppErrorKind,
+    DialogueTurn,
+    EventBrief,
+    EventEnvelope,
+    EventRecord,
+    MemoryBlock,
+    MemoryCandidate,
+)
+from my_agents.shell.logger import IAppLogger, LogEntry, LogLevel
+from my_agents.shell.settings import Settings
+from my_agents.shell.store import Store
+
+_REQUEST_LIMITS = UsageLimits(request_limit=6, tool_calls_limit=8)
+_EVENT_ID = re.compile(r"\[event:(evt_[0-9a-zA-Z_]+)\]")
+_URGENT = ("至急", "障害", "請求", "期限")
+
+
+@dataclass(frozen=True, slots=True)
+class ChatReply:
+    text: str
+    memory_updates: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class SummaryOutput:
+    title: str
+    overview: str
+    summary: str
+
+
+class _Summary(BaseModel):
+    title: str = Field(description="Short topic title")
+    overview: str = Field(description="One or two sentence overview")
+    summary: str = Field(description="Structured recall notes")
+
+
+def _last_user(messages: Sequence[ModelMessage]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, ModelRequest):
+            for part in message.parts:
+                if isinstance(part, UserPromptPart):
+                    return str(part.content)
+    return ""
+
+
+def _fenced_payload(instructions: str) -> str:
+    _, marker, rest = instructions.partition(">>\n")
+    body, _, _ = rest.partition("\n<<END_UNTRUSTED_EVENT")
+    return body if marker else "{}"
+
+
+def _event_name(instructions: str) -> str:
+    for line in instructions.splitlines():
+        if line.startswith("event_name: "):
+            return line.removeprefix("event_name: ").strip()
+    return "unknown.event"
+
+
+def _local_brief(instructions: str) -> EventBrief:
+    name = _event_name(instructions)
+    try:
+        data = json.loads(_fenced_payload(instructions))
+    except json.JSONDecodeError:
+        data = {}
+    values = data if isinstance(data, dict) else {}
+    if name == "spike.worker_failure":
+        raise RuntimeError(f"injected worker failure: {values.get('reason', '')}")
+    if name == "temperature.threshold_exceeded":
+        return EventBrief(
+            headline="室内の温度が設定値を上回っています",
+            facts=(
+                f"計測値 {values.get('celsius', 0)}°C",
+                f"閾値 {values.get('threshold_celsius', 0)}°C",
+            ),
+            impact="このままだと作業環境がつらくなるかもしれません。",
+            suggested_angle="換気や空調をやさしく気づかう",
+            urgency=8,
+            relevance=8,
+            confidence=0.92,
+            requires_user_action=True,
+            sensitive=False,
+            dedupe_key=name,
+        )
+    if name == "email.received":
+        subject = str(values.get("subject", ""))
+        return EventBrief(
+            headline=f"{values.get('sender', '差出人')} からメールが届きました",
+            facts=(f"件名: {subject}",),
+            impact="内容によっては返信や共有が必要かもしれません。",
+            suggested_angle="用件を確認して、必要なら一緒に段取りを考える",
+            urgency=7,
+            relevance=7,
+            confidence=0.8,
+            requires_user_action=any(term in subject for term in _URGENT),
+            sensitive=False,
+            dedupe_key=name,
+        )
+    return EventBrief(
+        headline="外部イベントを検知しました",
+        facts=(name,),
+        impact="必要に応じて内容を確認してください。",
+        suggested_angle="さりげなく知らせる",
+        urgency=6,
+        relevance=5,
+        confidence=0.7,
+        requires_user_action=False,
+        sensitive=False,
+        dedupe_key=name,
+    )
+
+
+def _local_summary(instructions: str) -> _Summary:
+    body = instructions.partition("new_turns:\n")[2]
+    first = body.splitlines()[0] if body.splitlines() else "会話"
+    return _Summary(
+        title=first.split(": ", 1)[-1][:40] or "会話",
+        overview="ローカルモードの決定論的要約",
+        summary=body[:2000],
+    )
+
+
+def _local_chat(instructions: str, prompt: str) -> str:
+    event_ids = _EVENT_ID.findall(instructions)
+    if "イベント" in prompt or "event" in prompt.lower():
+        if event_ids:
+            return f"参照できるイベントは {event_ids[0]} です。背景も踏まえてお話ししますね。"
+        return "ローカル応答: イベント文脈にイベントはありません。"
+    return f"ローカル応答: {prompt}"
+
+
+def _local_proactive(instructions: str) -> str:
+    headline = "少し共有したいことがあります"
+    for line in instructions.splitlines():
+        if line.startswith("headline: "):
+            headline = line.removeprefix("headline: ").strip()
+    return f"{headline}。少し気になったので共有しますね。"
+
+
+def _local_respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
+    instructions = info.instructions or ""
+    prompt = _last_user(messages)
+    source = f"{instructions}\n{prompt}"
+    if info.output_tools:
+        tool = info.output_tools[0]
+        if "headline" in tool.parameters_json_schema.get("properties", {}):
+            return ModelResponse(
+                [ToolCallPart(tool.name, _local_brief(source).model_dump())]
+            )
+        return ModelResponse(
+            [ToolCallPart(tool.name, _local_summary(source).model_dump())]
+        )
+    if "能動発話" in source:
+        return ModelResponse([TextPart(_local_proactive(source))])
+    return ModelResponse([TextPart(_local_chat(instructions, prompt))])
+
+
+def _history(turns: Sequence[DialogueTurn]) -> list[ModelMessage]:
+    return [
+        ModelRequest([UserPromptPart(turn.content)])
+        if turn.role == "user"
+        else ModelResponse([TextPart(turn.content)])
+        for turn in turns
+    ]
+
+
+def _json(value: EventRecord | dict[str, object]) -> str:
+    payload = asdict(value) if isinstance(value, EventRecord) else value
+    return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+class ChatToolbox:
+    def __init__(
+        self,
+        store: Store,
+        conversation_id: str,
+        recorded_updates: list[str],
+        now: datetime,
+    ) -> None:
+        self._store = store
+        self._conversation_id = conversation_id
+        self._recorded_updates = recorded_updates
+        self._now = now
+
+    def read_event(
+        self, event_id: Annotated[str, Field(description="Event ledger ID.")]
+    ) -> str:
+        result = self._store.get_event(event_id)
+        if isinstance(result, Err):
+            return f"Could not read the event ledger: {result.error.message}"
+        if result.value is None:
+            return f"Event not found: {event_id}"
+        return _json(result.value)
+
+    def search_conversations(
+        self,
+        query: Annotated[str, Field(description="Term to search for.")],
+        limit: Annotated[int, Field(description="Maximum episodes.")] = 10,
+    ) -> str:
+        result = self._store.search_episodes(query, limit=limit)
+        if isinstance(result, Err):
+            return f"Could not search conversations: {result.error.message}"
+        hits = [
+            {
+                "episode_id": episode.episode_id,
+                "title": episode.title,
+                "overview": episode.overview,
+            }
+            for episode in result.value
+            if query in f"{episode.title}\n{episode.overview}\n{episode.summary}"
+        ]
+        return json.dumps(hits, ensure_ascii=False)
+
+    def recall_conversation(
+        self,
+        episode_id: Annotated[str, Field(description="Episode ID.")],
+        limit: Annotated[int, Field(description="Maximum turns.")] = 40,
+    ) -> str:
+        episode = self._store.get_episode(episode_id)
+        if isinstance(episode, Err):
+            return f"Could not recall conversation: {episode.error.message}"
+        if episode.value is None:
+            return f"Conversation not found: {episode_id}"
+        turns = self._store.list_turns(episode_id, limit=limit)
+        if isinstance(turns, Err):
+            return f"Could not recall conversation: {turns.error.message}"
+        return _json(
+            {
+                "episode": episode.value.episode_id,
+                "title": episode.value.title,
+                "turns": [turn.content for turn in turns.value],
+            }
+        )
+
+    def remember(
+        self,
+        block: Annotated[MemoryBlock, Field(description="user, relationship, or arc.")],
+        content: Annotated[str, Field(description="Durable fact to remember.")],
+        reason: Annotated[str, Field(description="Short reason.")],
+    ) -> str:
+        candidate = MemoryCandidate(
+            f"mc_{uuid4().hex[:12]}",
+            self._conversation_id,
+            block,
+            content,
+            reason,
+            self._now,
+        )
+        result = self._store.save_candidate(candidate)
+        if isinstance(result, Err):
+            return f"Could not remember: {result.error.message}"
+        self._recorded_updates.append(reason)
+        return "Remembered for sleep-time curation."
+
+    def update_core_memory(
+        self,
+        action: Annotated[
+            Literal["append", "replace", "rewrite"],
+            Field(description="append, replace, or rewrite."),
+        ],
+        block: Annotated[MemoryBlock, Field(description="Memory block.")],
+        content: Annotated[str, Field(description="New memory text.")],
+        old_text: Annotated[str, Field(description="Exact replace target.")] = "",
+    ) -> str:
+        memory = self._store.read_memory()
+        if isinstance(memory, Err):
+            return f"Could not read memory: {memory.error.message}"
+        updated = edit_memory(memory.value, action, block, content, old_text)
+        if isinstance(updated, Err):
+            return f"Memory update rejected: {updated.error.message}"
+        saved = self._store.write_memory(updated.value)
+        if isinstance(saved, Err):
+            return f"Could not save memory: {saved.error.message}"
+        self._recorded_updates.append(f"{action} {block.value}")
+        return "Core memory updated."
+
+    def toolset(self) -> FunctionToolset[None]:
+        return FunctionToolset(
+            tools=[
+                Tool(
+                    self.read_event,
+                    description="Read one event ledger record by ID.",
+                    takes_ctx=False,
+                ),
+                Tool(
+                    self.search_conversations,
+                    description="Search past conversations for a term.",
+                    takes_ctx=False,
+                ),
+                Tool(
+                    self.recall_conversation,
+                    description="Recall one episode and its recent turns.",
+                    takes_ctx=False,
+                ),
+                Tool(
+                    self.remember,
+                    description="Queue a durable memory candidate.",
+                    takes_ctx=False,
+                ),
+                Tool(
+                    self.update_core_memory,
+                    description="Edit a core memory block immediately.",
+                    takes_ctx=False,
+                ),
+            ]
+        )
+
+
+class Llm:
+    def __init__(
+        self,
+        model: Model,
+        *,
+        store: Store,
+        logger: IAppLogger,
+        clock: Callable[[], datetime] | None = None,
+        external_toolsets: Sequence[AbstractToolset[None]] = (),
+    ) -> None:
+        self._store = store
+        self._external_toolsets = tuple(external_toolsets)
+        self._logger = logger
+        self._clock = clock or (lambda: datetime.now(UTC))
+        self._chat: Agent[None, str] = Agent(model)
+        self._distill: Agent[None, EventBrief] = Agent(model, output_type=EventBrief)
+        self._composer: Agent[None, str] = Agent(model)
+        self._summarizer: Agent[None, _Summary] = Agent(model, output_type=_Summary)
+
+    @classmethod
+    def from_settings(
+        cls, settings: Settings, *, store: Store, logger: IAppLogger
+    ) -> Result[Llm, AppError]:
+        if settings.chat_backend == "local":
+            return Ok(cls(FunctionModel(_local_respond), store=store, logger=logger))
+        api_key: SecretStr | None = settings.magpie_api_key
+        if api_key is None:
+            return Err(
+                AppError(
+                    AppErrorKind.VALIDATION,
+                    "MAGPIE_API_KEY is required for the openai backend.",
+                )
+            )
+        model = OpenAIChatModel(
+            settings.magpie_model,
+            provider=OpenAIProvider(
+                base_url=settings.magpie_base_url,
+                api_key=api_key.get_secret_value(),
+            ),
+        )
+        return Ok(cls(model, store=store, logger=logger))
+
+    def _log_usage(self, result: object, event: str) -> None:
+        usage = getattr(result, "usage", None)
+        cache_read = getattr(usage, "cache_read_tokens", 0) or 0
+        self._logger.log(
+            LogEntry(
+                LogLevel.INFO,
+                event,
+                "llm call completed",
+                detail=f"cache_read_tokens={cache_read}",
+            )
+        )
+
+    async def chat(
+        self,
+        conversation_id: str,
+        user_text: str,
+        history: Sequence[DialogueTurn],
+        context: AssembledContext,
+    ) -> Result[ChatReply, AppError]:
+        recorded: list[str] = []
+        toolbox = ChatToolbox(self._store, conversation_id, recorded, self._clock())
+        try:
+            result = await self._chat.run(
+                user_text,
+                message_history=_history(history),
+                instructions=context.instructions,
+                toolsets=[toolbox.toolset(), *self._external_toolsets],
+                usage_limits=_REQUEST_LIMITS,
+            )
+        except Exception as exc:
+            return Err(AppError(AppErrorKind.LLM, f"Chat failed: {exc}"))
+        self._log_usage(result, "chat_completed")
+        return Ok(ChatReply(str(result.output), tuple(recorded)))
+
+    async def distill(self, envelope: EventEnvelope) -> Result[EventBrief, AppError]:
+        try:
+            result = await self._distill.run(
+                build_distill_prompt(envelope, uuid4().hex),
+                usage_limits=_REQUEST_LIMITS,
+            )
+        except Exception as exc:
+            return Err(AppError(AppErrorKind.LLM, f"Distillation failed: {exc}"))
+        self._log_usage(result, "distill_completed")
+        return Ok(result.output)
+
+    async def compose(
+        self, brief: EventBrief, context: AssembledContext
+    ) -> Result[str, AppError]:
+        try:
+            result = await self._composer.run(
+                build_proactive_prompt(brief),
+                instructions=context.instructions,
+                usage_limits=_REQUEST_LIMITS,
+            )
+        except Exception as exc:
+            return Err(AppError(AppErrorKind.LLM, f"Composer failed: {exc}"))
+        self._log_usage(result, "compose_completed")
+        text = str(result.output).strip()
+        if not validate_proactive_message(text):
+            return Err(
+                AppError(
+                    AppErrorKind.VALIDATION,
+                    "Proactive message contained machine-readable leakage.",
+                )
+            )
+        return Ok(text)
+
+    async def summarize(
+        self, turns: Sequence[DialogueTurn], previous_summary: str
+    ) -> Result[SummaryOutput, AppError]:
+        try:
+            result = await self._summarizer.run(
+                build_summary_prompt(turns, previous_summary),
+                usage_limits=_REQUEST_LIMITS,
+            )
+        except Exception as exc:
+            return Err(AppError(AppErrorKind.LLM, f"Summarizer failed: {exc}"))
+        self._log_usage(result, "summary_completed")
+        title, overview, summary = normalize_summary(
+            result.output.title,
+            result.output.overview,
+            result.output.summary,
+            fallback_title="会話",
+        )
+        return Ok(SummaryOutput(title, overview, summary))

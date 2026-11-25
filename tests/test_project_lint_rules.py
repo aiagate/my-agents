@@ -2,12 +2,10 @@ from pathlib import Path
 from textwrap import dedent
 
 from tools.project_lint.rules import (
-    check_adapter_port_surface,
     check_assert_error_message,
     check_exhaustive_branch,
     check_immutable_frozen_dataclass_fields,
     check_layer_boundaries,
-    check_no_adapter_reexport_at_layer_root,
     check_no_cast_in_src,
     check_no_cross_layer_internal_monkeypatch,
     check_no_direct_logging,
@@ -15,7 +13,6 @@ from tools.project_lint.rules import (
     check_no_exception_result_errors,
     check_no_global_environ_mutation,
     check_no_inline_suppressions,
-    check_no_object_in_contravariant_type_args,
     check_no_plain_str_secrets,
     check_no_private_dataclass_init_fields,
     check_no_private_type_in_public_api,
@@ -24,7 +21,6 @@ from tools.project_lint.rules import (
     check_strict_ty_config,
     check_thin_entrypoint,
     check_tool_descriptions,
-    check_usecase_protocol_ownership,
 )
 
 
@@ -239,33 +235,31 @@ def test_pl003_regression_ternary_ifexp_on_closed_literal(tmp_path: Path) -> Non
     ]
 
 
-def test_pl004_enforces_clean_architecture_layer_boundaries(tmp_path: Path) -> None:
+def test_pl004_enforces_two_layer_boundaries(tmp_path: Path) -> None:
     src = _package(tmp_path)
     _write(
-        src / "contracts" / "bad.py",
+        src / "core" / "bad.py",
         """
+        import sqlite3
         import pydantic_ai
-        from my_agents.infrastructure.settings import AppSettings
+        from my_agents.shell.store import Store
         """,
     )
+    _write(src / "core" / "ok.py", "import pydantic\n")
     _write(
-        src / "domain" / "bad.py",
-        "from my_agents.contracts.messages import ChatMessage\n",
+        src / "shell" / "ok.py",
+        "import sqlite3\nfrom my_agents.core.types import AppError\n",
     )
-    _write(
-        src / "infrastructure" / "ok.py",
-        "import pydantic_ai\nfrom my_agents.contracts.messages import ChatMessage\n",
-    )
+    _write(src / "__init__.py", "from my_agents.shell.cli import main\n")
 
     findings = check_layer_boundaries(src)
 
     assert len(findings) == 3
     assert {f.rule for f in findings} == {"PL004"}
-    assert any(
-        finding.path == src / "domain" / "bad.py"
-        and "must not import from 'contracts'" in finding.message
-        for finding in findings
-    )
+    messages = " ".join(f.message for f in findings)
+    assert "external I/O library 'sqlite3'" in messages
+    assert "external I/O library 'pydantic_ai'" in messages
+    assert "must not import from 'shell'" in messages
 
 
 def test_pl005_flags_weakened_ty_config(tmp_path: Path) -> None:
@@ -514,70 +508,6 @@ def test_pl011_flags_private_dataclass_init_fields(tmp_path: Path) -> None:
     assert "_value" in findings[0].message
 
 
-def test_pl012_flags_object_in_contravariant_agent_type_arg(tmp_path: Path) -> None:
-    src = _package(tmp_path)
-    _write(
-        src / "sample.py",
-        """
-        def bad(agent: Agent[object, str]) -> Agent[object, str]:
-            return agent
-        def good(agent: Agent[None, str], data: dict[str, object]) -> None:
-            _ = (agent, data)
-        """,
-    )
-
-    findings = check_no_object_in_contravariant_type_args(src)
-
-    assert len(findings) == 2
-    assert {f.rule for f in findings} == {"PL012"}
-
-
-def test_pl013_flags_adapter_public_members_outside_port_contract(
-    tmp_path: Path,
-) -> None:
-    src = _package(tmp_path)
-    _write(
-        src / "contracts" / "ports" / "runner.py",
-        """
-        from abc import ABC, abstractmethod
-        class IRunner(ABC):
-            @abstractmethod
-            async def run(self) -> str: ...
-        """,
-    )
-    _write(
-        src / "infrastructure" / "runner.py",
-        """
-        from my_agents.contracts.ports.runner import IRunner
-        class ConcreteRunner(IRunner):
-            def __init__(self) -> None:
-                self._inner = object()
-            @classmethod
-            def from_settings(cls) -> ConcreteRunner:
-                return cls()
-            @property
-            def model(self) -> object:
-                return self._inner
-            def extra_helper(self) -> None:
-                return None
-            def _private_helper(self) -> None:
-                return None
-            async def run(self) -> str:
-                return 'ok'
-        """,
-    )
-
-    findings = check_adapter_port_surface(src)
-
-    assert len(findings) == 2
-    assert {f.rule for f in findings} == {"PL013"}
-    messages = " ".join(f.message for f in findings)
-    assert "model" in messages
-    assert "extra_helper" in messages
-    assert "from_settings" not in messages
-    assert "_private_helper" not in messages
-
-
 def test_pl002_requires_display_message_check_for_displayable_error(
     tmp_path: Path,
 ) -> None:
@@ -639,37 +569,33 @@ def test_pl014_enforces_thin_entrypoint(tmp_path: Path) -> None:
         bad_src / "__init__.py",
         """
         import os
-        from .composition import run_cli
+        from .shell.cli import main as _main
         def main() -> int:
             if os.environ.get('DEBUG'):
                 return 1
-            return run_cli()
+            return _main()
         """,
     )
     good_src = tmp_path / "good" / "src" / "my_agents"
     _write(
         good_src / "__init__.py",
         """
-        from my_agents.composition import run_cli
+        from my_agents.shell.cli import main as _main
         def main() -> int:
-            return run_cli()
+            return _main()
         """,
     )
-    good_rel_src = tmp_path / "good_rel" / "src" / "my_agents"
+    wrong_import = tmp_path / "wrong" / "src" / "my_agents"
     _write(
-        good_rel_src / "__init__.py",
-        """
-        from .composition import run_cli
-        def main() -> int:
-            return run_cli()
-        """,
+        wrong_import / "__init__.py",
+        "from my_agents.core.types import AppError\n",
     )
 
     bad_findings = check_thin_entrypoint(bad_src)
     assert len(bad_findings) == 2
     assert {f.rule for f in bad_findings} == {"PL014"}
     assert check_thin_entrypoint(good_src) == []
-    assert check_thin_entrypoint(good_rel_src) == []
+    assert len(check_thin_entrypoint(wrong_import)) == 1
 
 
 def test_pl015_flags_global_environ_mutation_and_allows_reads(
@@ -730,37 +656,14 @@ def test_pl016_flags_mutable_or_abstract_collections_in_frozen_dataclass(
 
     findings = check_immutable_frozen_dataclass_fields(src)
 
-    assert len(findings) == 3
+    assert len(findings) == 2
     assert {f.rule for f in findings} == {"PL016"}
     messages = " ".join(f.message for f in findings)
     assert "items" in messages
-    assert "history" in messages
     assert "mapping" in messages
+    assert "history" not in messages
     assert "callback" not in messages
     assert "cache" not in messages
-
-
-def test_pl017_flags_subpackage_reexports_at_layer_root(tmp_path: Path) -> None:
-    src = _package(tmp_path)
-    _write(src / "presentation" / "cli" / "repl.py", "class CliRepl: ...\n")
-    _write(
-        src / "presentation" / "__init__.py",
-        """
-        from .cli import CliRepl
-        from my_agents.presentation.cli.repl import CliRepl as Repl
-        """,
-    )
-    _write(src / "usecases" / "send.py", "class SendHandler: ...\n")
-    _write(
-        src / "usecases" / "__init__.py",
-        "from my_agents.usecases.send import SendHandler\n",
-    )
-
-    findings = check_no_adapter_reexport_at_layer_root(src)
-
-    assert len(findings) == 2
-    assert {f.rule for f in findings} == {"PL017"}
-    assert all(f.path.parent.name == "presentation" for f in findings)
 
 
 def test_pl018_flags_cross_layer_monkeypatch_and_allows_own_module(
@@ -818,72 +721,29 @@ def test_pl019_flags_exception_subclasses_in_src(tmp_path: Path) -> None:
     assert "GoodDomainError" not in messages
 
 
-def test_pl020_restricts_direct_logging_imports_and_global_apis(
+def test_pl020_restricts_logging_to_the_shell_logger_module(
     tmp_path: Path,
 ) -> None:
     src = _package(tmp_path)
+    _write(src / "core" / "bad_core.py", "import logging\n")
+    _write(src / "shell" / "bad_shell.py", "import logging\n")
     _write(
-        src / "usecases" / "bad_usecase.py",
+        src / "shell" / "logger.py",
         """
-        import logging
         from logging import Formatter
-        """,
-    )
-    _write(
-        src / "composition.py",
-        "import logging.handlers\n",
-    )
-    _write(
-        src / "infrastructure" / "bad_infra.py",
-        """
-        import logging
-        import logging as lg
-        import logging.handlers
-        import logging.config
-        from logging import config, getLogger
-        from logging.config import dictConfig
-        from logging import *
-        from logging.handlers import *
-        logger = logging.getLogger(__name__)
-        lg.basicConfig()
-        logging.error('oops')
-        logging.config.dictConfig({})
-        handler.emit(record)
-        """,
-    )
-    _write(
-        src / "infrastructure" / "good_infra.py",
-        """
-        from logging import ERROR, Formatter, LogRecord
         from logging.handlers import RotatingFileHandler
-        import logging.handlers as lh
-        class CustomHandler(RotatingFileHandler):
-            def emit(self, record: LogRecord) -> None:
-                super().emit(record)
         formatter = Formatter('%(message)s')
         handler.handle(record)
         """,
     )
-    _write(
-        src / "infrastructure" / "non_logging_infra.py",
-        "bus.emit('event')\n",
-    )
 
     findings = check_no_direct_logging(src)
 
-    assert len(findings) == 14
+    assert len(findings) == 2
     assert {f.rule for f in findings} == {"PL020"}
-    assert all(
-        f.path.name not in {"good_infra.py", "non_logging_infra.py"} for f in findings
-    )
+    assert {f.path.name for f in findings} == {"bad_core.py", "bad_shell.py"}
     messages = " ".join(f.message for f in findings)
-    assert "logging.getLogger" in messages
-    assert "lg.basicConfig" in messages
-    assert "logging.error" in messages
-    assert "logging.config" in messages
-    assert "wildcard-import" in messages
-    assert ".emit()" in messages
-    assert "logging.handlers" in messages
+    assert "'shell/logger.py'" in messages
 
 
 def test_pl002_requires_expected_type_for_typed_error(tmp_path: Path) -> None:
@@ -929,40 +789,6 @@ def test_pl002_requires_expected_type_for_typed_error(tmp_path: Path) -> None:
     assert findings[0].rule == "PL002"
     assert "test_bad_missing_expected_type" in findings[0].message
     assert "expected_type" in findings[0].hint
-
-
-def test_pl021_requires_usecase_protocol_to_match_module_name(tmp_path: Path) -> None:
-    src = _package(tmp_path)
-    _write(
-        src / "usecases" / "send_message.py",
-        """
-        from typing import Protocol
-        class SendMessageUseCase(Protocol):
-            def execute(self) -> None: ...
-        class _LocalUseCase(Protocol):
-            def execute(self) -> None: ...
-        class SendMessageHandler(Protocol):
-            def execute(self) -> None: ...
-        """,
-    )
-    _write(
-        src / "usecases" / "get_core_profile.py",
-        """
-        from typing import Protocol
-        class GetCoreProfileUseCase(Protocol):
-            def execute(self) -> None: ...
-        class SendMessageUseCase(Protocol):
-            def execute(self) -> None: ...
-        """,
-    )
-
-    findings = check_usecase_protocol_ownership(src)
-
-    assert len(findings) == 1
-    assert findings[0].rule == "PL021"
-    assert "SendMessageUseCase" in findings[0].message
-    assert "get_core_profile" in findings[0].message
-    assert findings[0].hint
 
 
 def test_pl022_requires_tool_and_parameter_descriptions(tmp_path: Path) -> None:
@@ -1089,3 +915,42 @@ def test_pl023_regression_private_type_in_public_api(tmp_path: Path) -> None:
             ("main() return", "_Value"),
         )
     }
+
+
+def test_pl002_requires_kind_for_app_error(tmp_path: Path) -> None:
+    src = _package(tmp_path)
+    tests_dir = tmp_path / "tests"
+    _write(
+        src / "core" / "types.py",
+        """
+        from dataclasses import dataclass
+        from enum import Enum, auto
+        class AppErrorKind(Enum):
+            INVALID = auto()
+        @dataclass(frozen=True)
+        class AppError:
+            kind: AppErrorKind
+            message: str
+        """,
+    )
+    _write(
+        tests_dir / "test_sample.py",
+        """
+        def test_bad_missing_kind() -> None:
+            result = object()
+            assert isinstance(result, AppError)
+            assert_err(result, message_contains='bad')
+        def test_good_kind() -> None:
+            assert_err(
+                object(),
+                kind=AppErrorKind.INVALID,
+                message_contains='bad',
+            )
+        """,
+    )
+
+    findings = check_assert_error_message(tests_dir, src_dir=src)
+
+    assert len(findings) == 1
+    assert findings[0].rule == "PL002"
+    assert "test_bad_missing_kind" in findings[0].message

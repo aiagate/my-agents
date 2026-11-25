@@ -31,9 +31,8 @@ _FORBIDDEN_GLOBAL_LOGGING_APIS = frozenset(
 )
 
 
-def _is_in_infrastructure(path: Path, src_dir: Path) -> bool:
-    rel = path.relative_to(src_dir)
-    return len(rel.parts) >= 2 and rel.parts[0] == "infrastructure"
+def _is_logger_module(path: Path, src_dir: Path) -> bool:
+    return path.relative_to(src_dir).parts == ("shell", "logger.py")
 
 
 def _is_logging_config_module(module_name: str) -> bool:
@@ -52,7 +51,7 @@ def check_no_direct_logging(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding
     findings: list[LintFinding] = []
     for path in iter_python_files(src_dir):
         tree = parse_file(path)
-        if not _is_in_infrastructure(path, src_dir):
+        if not _is_logger_module(path, src_dir):
             for node in walk(tree):
                 if not isinstance(node, Import | ImportFrom):
                     continue
@@ -65,12 +64,12 @@ def check_no_direct_logging(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding
                                 line=node.lineno,
                                 col=node.col_offset + 1,
                                 message=(
-                                    "Module outside 'infrastructure' must not import "
+                                    "Module outside 'shell/logger.py' must not import "
                                     f"'{target}' directly."
                                 ),
                                 hint=(
                                     "Inject and call 'IAppLogger' from "
-                                    "'my_agents.contracts.ports.logger' instead of "
+                                    "'my_agents.shell.logger' instead of "
                                     "importing Python's 'logging' module directly."
                                 ),
                             )
@@ -94,7 +93,7 @@ def check_no_direct_logging(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding
                                 line=node.lineno,
                                 col=node.col_offset + 1,
                                 message=(
-                                    "Infrastructure module must not import global "
+                                    "Logging module must not import global "
                                     f"logging configuration module '{alias.name}'."
                                 ),
                                 hint=(
@@ -121,7 +120,7 @@ def check_no_direct_logging(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding
                             line=node.lineno,
                             col=node.col_offset + 1,
                             message=(
-                                "Infrastructure module must not import global "
+                                "Logging module must not import global "
                                 f"logging configuration module '{node.module}'."
                             ),
                             hint=(
@@ -141,7 +140,7 @@ def check_no_direct_logging(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding
                                     line=node.lineno,
                                     col=node.col_offset + 1,
                                     message=(
-                                        "Infrastructure module must not wildcard-import "
+                                        "Logging module must not wildcard-import "
                                         f"from '{node.module}'."
                                     ),
                                     hint=(
@@ -162,7 +161,7 @@ def check_no_direct_logging(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding
                                     line=node.lineno,
                                     col=node.col_offset + 1,
                                     message=(
-                                        "Infrastructure module must not import global "
+                                        "Logging module must not import global "
                                         f"logging API 'logging.{alias.name}'."
                                     ),
                                     hint=(
@@ -191,7 +190,7 @@ def check_no_direct_logging(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding
                         line=node.lineno,
                         col=node.col_offset + 1,
                         message=(
-                            "Infrastructure module must not use global logging "
+                            "Logging module must not use global logging "
                             f"API '{node.value.id}.{node.attr}'."
                         ),
                         hint=(

@@ -43,7 +43,7 @@ def _collect_displayable_error_symbols(
                 if isinstance(stmt, AnnAssign) and isinstance(stmt.target, Name):
                     if stmt.target.id == "display_message":
                         has_display_message = True
-                    elif stmt.target.id == "type":
+                    elif stmt.target.id in {"type", "kind"}:
                         error_type_name = node_name(stmt.annotation)
                 elif isinstance(
                     stmt, FunctionDef | AsyncFunctionDef
@@ -75,7 +75,7 @@ def _collect_typed_error_symbols(
                 if isinstance(stmt, AnnAssign) and isinstance(stmt.target, Name):
                     if stmt.target.id == "message":
                         has_message = True
-                    elif stmt.target.id == "type":
+                    elif stmt.target.id in {"type", "kind"}:
                         error_type_name = node_name(stmt.annotation)
                 elif isinstance(
                     stmt, FunctionDef | AsyncFunctionDef
@@ -102,8 +102,10 @@ def _assert_checks_error_type(assert_node: Assert) -> bool:
 
 
 def _helper_has_expected_type(call: Call) -> bool:
-    expected_type = keyword_value(call, "expected_type")
-    return expected_type is not None and not constant_is(expected_type, None)
+    expected = keyword_value(call, "expected_type")
+    if expected is None:
+        expected = keyword_value(call, "kind")
+    return expected is not None and not constant_is(expected, None)
 
 
 def _test_verifies_error_message(func: FunctionDef | AsyncFunctionDef) -> bool:
@@ -196,7 +198,7 @@ def check_assert_error_message(
                         line=first.lineno,
                         col=first.col_offset + 1,
                         message=(
-                            f"Test '{node.name}' asserts '.type' without verifying "
+                            f"Test '{node.name}' asserts '.type'/'.kind' without verifying "
                             "the error message."
                         ),
                         hint=(
