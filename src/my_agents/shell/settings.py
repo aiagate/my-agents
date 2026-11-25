@@ -71,7 +71,7 @@ class Settings(BaseModel):
         Path | None, Field(alias="PERSONA_PATH"), BeforeValidator(_optional_path)
     ] = None
     mcp_servers_json: Annotated[
-        str | None,
+        SecretStr | None,
         Field(alias="MCP_SERVERS_JSON"),
         BeforeValidator(_blank_to_none),
     ] = None
@@ -122,7 +122,12 @@ class Settings(BaseModel):
 
     @property
     def mcp_servers(self) -> Result[tuple[McpServerSpec, ...], AppError]:
-        return parse_mcp_servers(self.mcp_servers_json)
+        raw = (
+            None
+            if self.mcp_servers_json is None
+            else self.mcp_servers_json.get_secret_value()
+        )
+        return parse_mcp_servers(raw)
 
 
 def load_settings(

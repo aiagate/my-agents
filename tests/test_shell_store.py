@@ -79,6 +79,7 @@ def test_reads_are_empty_before_any_database_exists(tmp_path: Path) -> None:
     assert store.get_state("c").unwrap().epoch == 0
     assert store.get_open_episode("c").unwrap() is None
     assert store.get_episode("e").unwrap() is None
+    assert store.get_episode_in("c", "e").unwrap() is None
     assert store.list_episodes("c").unwrap() == ()
     assert store.list_turns("e").unwrap() == ()
     assert store.recent_turns("c").unwrap() == ()
@@ -222,11 +223,10 @@ def test_event_insert_duplicate_update_and_surfacing(tmp_path: Path) -> None:
         EventStatus.COMPLETED,
         EventDelivery.AMBIENT,
     )
-    assert store.list_events("c", unsurfaced_only=True).unwrap() == (completed,)
+    assert store.list_events("c").unwrap() == (completed,)
     assert store.list_events("c", limit=0).unwrap() == ()
     assert store.mark_surfaced((), _NOW).unwrap() is None
     assert store.mark_surfaced(("evt_1",), _NOW).unwrap() is None
-    assert store.list_events("c", unsurfaced_only=True).unwrap() == ()
     surfaced_event = store.get_event("evt_1").unwrap()
     assert surfaced_event is not None
     assert surfaced_event.surfaced_at == _NOW
@@ -339,7 +339,7 @@ def test_corrupt_rows_are_reported_as_storage_errors(tmp_path: Path) -> None:
     )
 
 
-def test_search_episodes_spans_conversations_and_honours_limit(
+def test_search_episodes_is_scoped_to_the_calling_conversation(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -361,13 +361,15 @@ def test_search_episodes_spans_conversations_and_honours_limit(
         max_turns=10,
         gap_minutes=60,
     ).unwrap()
-    assert [episode.title for episode in store.search_episodes("topic").unwrap()] == [
-        "beta topic",
-        "alpha topic",
-    ]
-    assert store.search_episodes("topic", limit=1).unwrap()[0].title == "beta topic"
-    assert store.search_episodes("topic", limit=0).unwrap() == ()
-    assert store.search_episodes("missing").unwrap() == ()
+    assert [
+        episode.title for episode in store.search_episodes("c", "topic").unwrap()
+    ] == ["alpha topic"]
+    assert store.search_episodes("other", "topic", limit=1).unwrap()[0].title == (
+        "beta topic"
+    )
+    assert store.search_episodes("c", "topic", limit=0).unwrap() == ()
+    assert store.search_episodes("c", "missing").unwrap() == ()
+    assert store.search_episodes("missing", "topic").unwrap() == ()
 
 
 def test_idempotency_is_scoped_to_one_conversation(tmp_path: Path) -> None:

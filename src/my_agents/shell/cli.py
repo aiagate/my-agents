@@ -33,12 +33,17 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _open_logger(path: Path | None, write_error: Callable[[str], None]) -> IAppLogger:
+def _try_logger(
+    path: Path | None, write_error: Callable[[str], None], *, explicit: bool
+) -> IAppLogger | None:
     if path is None:
         return NOOP_LOGGER
     try:
         return JsonlLogger.open(path)
     except OSError as exc:
+        if explicit:
+            write_error(f"Error: cannot open log file: {exc}")
+            return None
         write_error(f"Warning: cannot open log file: {exc}")
         return NOOP_LOGGER
 
@@ -94,13 +99,35 @@ def main(
     except SystemExit as exc:
         return 0 if exc.code is None else int(exc.code)
     logger: IAppLogger = NOOP_LOGGER
+    explicit_logger = _try_logger(arguments.log_file, write_error, explicit=True)
+    if explicit_logger is None:
+        return 1
+    logger = explicit_logger
     try:
         loaded = load_settings(env=env, env_path=Path.cwd() / ".env")
         if is_err(loaded):
+            logger.log(
+                LogEntry(
+                    LogLevel.ERROR,
+                    "settings_load_failed",
+                    loaded.error.message,
+                )
+            )
             write_error(f"Error: {loaded.error.message}")
             return 1
         settings = loaded.value
-        logger = _open_logger(arguments.log_file or settings.log_file, write_error)
+        if arguments.log_file is None and settings.log_file is not None:
+            logger.close()
+            logger = (
+                _try_logger(settings.log_file, write_error, explicit=False)
+                or NOOP_LOGGER
+            )
+        if arguments.debug:
+            resolved_path = arguments.log_file or settings.log_file
+            write_error(
+                "Debug: log file = "
+                f"{resolved_path if resolved_path is not None else '<none>'}"
+            )
         persona = load_persona(settings.persona_path)
         if is_err(persona):
             write_error(f"Error: {persona.error.message}")

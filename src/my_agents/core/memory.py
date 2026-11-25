@@ -148,19 +148,6 @@ def normalize_summary(
     )
 
 
-def format_ui_time(
-    started_at: datetime, updated_at: datetime, *, tz: tzinfo | None = None
-) -> str:
-    start = started_at.astimezone(tz)
-    end = updated_at.astimezone(tz)
-    label = start.strftime("%m/%d %H:%M")
-    if start.date() != end.date():
-        return f"{label}-{end:%m/%d %H:%M}"
-    if (start.hour, start.minute) == (end.hour, end.minute):
-        return label
-    return f"{label}-{end:%H:%M}"
-
-
 def format_prompt_date(value: datetime, *, tz: tzinfo | None = None) -> str:
     return value.astimezone(tz or UTC).strftime("%Y-%m-%d")
 

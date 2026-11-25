@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 from collections.abc import Awaitable, Callable, Sequence
@@ -26,7 +27,11 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from pydantic_ai.toolsets import AbstractToolset
 
 from my_agents.core.context import AssembledContext, build_proactive_prompt
-from my_agents.core.events import build_distill_prompt, validate_proactive_message
+from my_agents.core.events import (
+    build_distill_prompt,
+    fence_untrusted,
+    validate_proactive_message,
+)
 from my_agents.core.memory import build_summary_prompt, edit_memory, normalize_summary
 from my_agents.core.types import (
     AppError,
@@ -36,7 +41,9 @@ from my_agents.core.types import (
     EventEnvelope,
     EventRecord,
     MemoryBlock,
+    MemoryBlocks,
     MemoryCandidate,
+    redact_secrets,
 )
 from my_agents.shell.logger import IAppLogger, LogEntry, LogLevel
 from my_agents.shell.mcp import build_toolsets
@@ -45,6 +52,7 @@ from my_agents.shell.store import Store
 
 _REQUEST_LIMITS = UsageLimits(request_limit=6, tool_calls_limit=8)
 _EVENT_ID = re.compile(r"\[event:(evt_[0-9a-zA-Z_]+)\]")
+_EPISODE_ID = re.compile(r"ep_[0-9a-f]+")
 _URGENT = ("至急", "障害", "請求", "期限")
 
 
@@ -90,14 +98,14 @@ def _event_name(instructions: str) -> str:
 
 
 def _local_brief(instructions: str) -> EventBrief:
-    name = _event_name(instructions)
     try:
         data = json.loads(_fenced_payload(instructions))
     except json.JSONDecodeError:
         data = {}
-    values = data if isinstance(data, dict) else {}
-    if name == "spike.worker_failure":
-        raise RuntimeError(f"injected worker failure: {values.get('reason', '')}")
+    payload = data if isinstance(data, dict) else {}
+    name = str(payload.get("kind", _event_name(instructions)))
+    raw_values = payload.get("data", {})
+    values = raw_values if isinstance(raw_values, dict) else {}
     if name == "temperature.threshold_exceeded":
         return EventBrief(
             headline="室内の温度が設定値を上回っています",
@@ -163,9 +171,12 @@ def _local_chat(instructions: str, prompt: str) -> str:
 
 def _local_proactive(instructions: str) -> str:
     headline = "少し共有したいことがあります"
-    for line in instructions.splitlines():
-        if line.startswith("headline: "):
-            headline = line.removeprefix("headline: ").strip()
+    try:
+        data = json.loads(_fenced_payload(instructions))
+    except json.JSONDecodeError:
+        data = {}
+    if isinstance(data, dict) and data.get("headline"):
+        headline = str(data["headline"])
     return f"{headline}。少し気になったので共有しますね。"
 
 
@@ -195,6 +206,27 @@ def _local_external_tool(
             return ModelResponse([TextPart(f"連想: {returned.content}")])
         if returned.tool_name == "remember":
             return ModelResponse([TextPart("覚えました。")])
+        if returned.tool_name == "search_conversations":
+            try:
+                hits = json.loads(str(returned.content))
+            except json.JSONDecodeError:
+                hits = []
+            if not isinstance(hits, list) or not hits:
+                return ModelResponse([TextPart("該当する会話は見つかりませんでした。")])
+            first = hits[0]
+            identifier = first.get("episode_id") if isinstance(first, dict) else None
+            if isinstance(identifier, str):
+                return ModelResponse(
+                    [
+                        ToolCallPart(
+                            "recall_conversation",
+                            {"episode_id": identifier, "limit": 40},
+                        )
+                    ]
+                )
+            return ModelResponse([TextPart("該当する会話は見つかりませんでした。")])
+        if returned.tool_name == "recall_conversation":
+            return ModelResponse([TextPart(f"思い出しました: {returned.content}")])
     if "diverge_associations" in names and "連想" in prompt:
         return ModelResponse(
             [
@@ -208,6 +240,26 @@ def _local_external_tool(
                 )
             ]
         )
+    if "search_conversations" in names and "検索" in prompt:
+        return ModelResponse(
+            [
+                ToolCallPart(
+                    "search_conversations",
+                    {"query": _prompt_after(prompt, "検索") or prompt, "limit": 5},
+                )
+            ]
+        )
+    if "recall_conversation" in names and "思い出" in prompt:
+        match = _EPISODE_ID.search(prompt)
+        if match is not None:
+            return ModelResponse(
+                [
+                    ToolCallPart(
+                        "recall_conversation",
+                        {"episode_id": match.group(0), "limit": 40},
+                    )
+                ]
+            )
     if "remember" in names and "覚えて" in prompt:
         return ModelResponse(
             [
@@ -268,28 +320,38 @@ class ChatToolbox:
         conversation_id: str,
         recorded_updates: list[str],
         now: datetime,
+        *,
+        allow_memory_writes: bool = True,
     ) -> None:
         self._store = store
         self._conversation_id = conversation_id
         self._recorded_updates = recorded_updates
         self._now = now
+        self._allow_memory_writes = allow_memory_writes
 
-    def read_event(
+    async def read_event(
         self, event_id: Annotated[str, Field(description="Event ledger ID.")]
     ) -> str:
-        result = self._store.get_event(event_id)
+        result = await asyncio.to_thread(
+            self._store.get_event_in, self._conversation_id, event_id
+        )
         if isinstance(result, Err):
             return f"Could not read the event ledger: {result.error.message}"
         if result.value is None:
             return f"Event not found: {event_id}"
-        return _json(result.value)
+        return fence_untrusted(_json(result.value), uuid4().hex)
 
-    def search_conversations(
+    async def search_conversations(
         self,
         query: Annotated[str, Field(description="Term to search for.")],
         limit: Annotated[int, Field(description="Maximum episodes.")] = 10,
     ) -> str:
-        result = self._store.search_episodes(query, limit=limit)
+        result = await asyncio.to_thread(
+            self._store.search_episodes,
+            self._conversation_id,
+            query,
+            limit=limit,
+        )
         if isinstance(result, Err):
             return f"Could not search conversations: {result.error.message}"
         hits = [
@@ -303,17 +365,19 @@ class ChatToolbox:
         ]
         return json.dumps(hits, ensure_ascii=False)
 
-    def recall_conversation(
+    async def recall_conversation(
         self,
         episode_id: Annotated[str, Field(description="Episode ID.")],
         limit: Annotated[int, Field(description="Maximum turns.")] = 40,
     ) -> str:
-        episode = self._store.get_episode(episode_id)
+        episode = await asyncio.to_thread(
+            self._store.get_episode_in, self._conversation_id, episode_id
+        )
         if isinstance(episode, Err):
             return f"Could not recall conversation: {episode.error.message}"
         if episode.value is None:
             return f"Conversation not found: {episode_id}"
-        turns = self._store.list_turns(episode_id, limit=limit)
+        turns = await asyncio.to_thread(self._store.list_turns, episode_id, limit=limit)
         if isinstance(turns, Err):
             return f"Could not recall conversation: {turns.error.message}"
         return _json(
@@ -324,7 +388,7 @@ class ChatToolbox:
             }
         )
 
-    def remember(
+    async def remember(
         self,
         block: Annotated[MemoryBlock, Field(description="user, relationship, or arc.")],
         content: Annotated[str, Field(description="Durable fact to remember.")],
@@ -338,13 +402,13 @@ class ChatToolbox:
             reason,
             self._now,
         )
-        result = self._store.save_candidate(candidate)
+        result = await asyncio.to_thread(self._store.save_candidate, candidate)
         if isinstance(result, Err):
             return f"Could not remember: {result.error.message}"
         self._recorded_updates.append(reason)
         return "Remembered for sleep-time curation."
 
-    def update_core_memory(
+    async def update_core_memory(
         self,
         action: Annotated[
             Literal["append", "replace", "rewrite"],
@@ -354,48 +418,56 @@ class ChatToolbox:
         content: Annotated[str, Field(description="New memory text.")],
         old_text: Annotated[str, Field(description="Exact replace target.")] = "",
     ) -> str:
-        memory = self._store.read_memory()
+        memory = await asyncio.to_thread(self._store.read_memory)
         if isinstance(memory, Err):
             return f"Could not read memory: {memory.error.message}"
-        updated = edit_memory(memory.value, action, block, content, old_text)
+
+        def edit(blocks: MemoryBlocks):
+            return edit_memory(blocks, action, block, content, old_text)
+
+        updated = edit(memory.value)
         if isinstance(updated, Err):
             return f"Memory update rejected: {updated.error.message}"
-        saved = self._store.write_memory(updated.value)
+        saved = await asyncio.to_thread(self._store.update_memory, edit)
         if isinstance(saved, Err):
             return f"Could not save memory: {saved.error.message}"
         self._recorded_updates.append(f"{action} {block.value}")
         return "Core memory updated."
 
     def toolset(self) -> FunctionToolset[None]:
-        return FunctionToolset(
-            tools=[
-                Tool(
-                    self.read_event,
-                    description="Read one event ledger record by ID.",
-                    takes_ctx=False,
-                ),
-                Tool(
-                    self.search_conversations,
-                    description="Search past conversations for a term.",
-                    takes_ctx=False,
-                ),
-                Tool(
-                    self.recall_conversation,
-                    description="Recall one episode and its recent turns.",
-                    takes_ctx=False,
-                ),
-                Tool(
-                    self.remember,
-                    description="Queue a durable memory candidate.",
-                    takes_ctx=False,
-                ),
-                Tool(
-                    self.update_core_memory,
-                    description="Edit a core memory block immediately.",
-                    takes_ctx=False,
-                ),
-            ]
-        )
+        tools = [
+            Tool(
+                self.read_event,
+                description="Read one event ledger record by ID.",
+                takes_ctx=False,
+            ),
+            Tool(
+                self.search_conversations,
+                description="Search past conversations for a term.",
+                takes_ctx=False,
+            ),
+            Tool(
+                self.recall_conversation,
+                description="Recall one episode and its recent turns.",
+                takes_ctx=False,
+            ),
+        ]
+        if self._allow_memory_writes:
+            tools.extend(
+                [
+                    Tool(
+                        self.remember,
+                        description="Queue a durable memory candidate.",
+                        takes_ctx=False,
+                    ),
+                    Tool(
+                        self.update_core_memory,
+                        description="Edit a core memory block immediately.",
+                        takes_ctx=False,
+                    ),
+                ]
+            )
+        return FunctionToolset(tools=tools)
 
 
 class Llm:
@@ -407,10 +479,12 @@ class Llm:
         logger: IAppLogger,
         clock: Callable[[], datetime] | None = None,
         external_toolsets: Sequence[AbstractToolset[None]] = (),
+        redactions: tuple[str, ...] = (),
     ) -> None:
         self._store = store
         self._external_toolsets = tuple(external_toolsets)
         self._logger = logger
+        self._redactions = redactions
         self._clock = clock or (lambda: datetime.now(UTC))
         self._stack: AsyncExitStack | None = None
         self._chat: Agent[None, str] = Agent(model)
@@ -426,6 +500,13 @@ class Llm:
         if isinstance(servers, Err):
             return servers
         toolsets = build_toolsets(servers.value)
+        redactions = tuple(
+            value.get_secret_value()
+            for spec in servers.value
+            for _name, value in (*spec.env, *spec.headers)
+        )
+        if settings.magpie_api_key is not None:
+            redactions += (settings.magpie_api_key.get_secret_value(),)
         if settings.chat_backend == "local":
             return Ok(
                 cls(
@@ -433,6 +514,7 @@ class Llm:
                     store=store,
                     logger=logger,
                     external_toolsets=toolsets,
+                    redactions=redactions,
                 )
             )
         api_key: SecretStr | None = settings.magpie_api_key
@@ -456,21 +538,31 @@ class Llm:
                 store=store,
                 logger=logger,
                 external_toolsets=toolsets,
+                redactions=redactions,
             )
         )
 
-    async def start(self) -> None:
+    def redact(self, text: str) -> str:
+        return redact_secrets(text, self._redactions)
+
+    async def start(self) -> Result[None, AppError]:
         if self._stack is not None or not self._external_toolsets:
-            return
+            return Ok(None)
         stack = AsyncExitStack()
         await stack.__aenter__()
         try:
             for toolset in self._external_toolsets:
                 await stack.enter_async_context(toolset)
-        except Exception:
+        except Exception as exc:
             await stack.aclose()
-            raise
+            return Err(
+                AppError(
+                    AppErrorKind.LLM,
+                    self.redact(f"MCP startup failed: {exc}"),
+                )
+            )
         self._stack = stack
+        return Ok(None)
 
     async def aclose(self) -> None:
         if self._stack is None:
@@ -487,7 +579,12 @@ class Llm:
         try:
             return Ok(await invoke())
         except Exception as exc:
-            return Err(AppError(AppErrorKind.LLM, f"{label} failed: {exc}"))
+            return Err(
+                AppError(
+                    AppErrorKind.LLM,
+                    self.redact(f"{label} failed: {exc}"),
+                )
+            )
 
     def _log_usage(self, result: object, event: str) -> None:
         usage = getattr(result, "usage", None)
@@ -509,22 +606,36 @@ class Llm:
         context: AssembledContext,
     ) -> Result[ChatReply, AppError]:
         recorded: list[str] = []
-        toolbox = ChatToolbox(self._store, conversation_id, recorded, self._clock())
-        async with AsyncExitStack() as stack:
-            toolsets: list[AbstractToolset[None]] = [toolbox.toolset()]
-            for toolset in self._external_toolsets:
-                if self._stack is None:
-                    await stack.enter_async_context(toolset)
-                toolsets.append(toolset)
-            result = await self._run(
-                "Chat",
-                lambda: self._chat.run(
-                    user_text,
-                    message_history=_history(history),
-                    instructions=context.instructions,
-                    toolsets=toolsets,
-                    usage_limits=_REQUEST_LIMITS,
-                ),
+        toolbox = ChatToolbox(
+            self._store,
+            conversation_id,
+            recorded,
+            self._clock(),
+            allow_memory_writes=not context.event_section,
+        )
+        try:
+            async with AsyncExitStack() as stack:
+                toolsets: list[AbstractToolset[None]] = [toolbox.toolset()]
+                for toolset in self._external_toolsets:
+                    if self._stack is None:
+                        await stack.enter_async_context(toolset)
+                    toolsets.append(toolset)
+                result = await self._run(
+                    "Chat",
+                    lambda: self._chat.run(
+                        user_text,
+                        message_history=_history(history),
+                        instructions=context.instructions,
+                        toolsets=toolsets,
+                        usage_limits=_REQUEST_LIMITS,
+                    ),
+                )
+        except Exception as exc:
+            return Err(
+                AppError(
+                    AppErrorKind.LLM,
+                    self.redact(f"Chat toolset failed: {exc}"),
+                )
             )
         if isinstance(result, Err):
             return result
@@ -550,7 +661,7 @@ class Llm:
         result = await self._run(
             "Composer",
             lambda: self._composer.run(
-                build_proactive_prompt(brief),
+                build_proactive_prompt(brief, uuid4().hex),
                 instructions=context.instructions,
                 usage_limits=_REQUEST_LIMITS,
             ),

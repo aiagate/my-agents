@@ -82,8 +82,9 @@ class FakeLlm:
         self.started = 0
         self.closed = 0
 
-    async def start(self) -> None:
+    async def start(self):
         self.started += 1
+        return Ok(None)
 
     async def aclose(self) -> None:
         self.closed += 1
@@ -478,30 +479,10 @@ async def test_process_event_error_paths(tmp_path: Path) -> None:
     assert event.delivery is EventDelivery.AMBIENT
     await engine.aclose()
 
-    engine, store = _harness(tmp_path / "current", FakeLlm())
-    real_state = store.ensure_conversation("c", _NOW).unwrap()
-    with patch.object(store, "get_state", side_effect=[Ok(real_state), Err(storage)]):
-        receipt = await engine.ingest_event("c", _raw_event(key="d"))
-        await _wait_for_status(engine, receipt.unwrap().event_id, EventStatus.FAILED)
-    await engine.aclose()
-
-    engine, store = _harness(tmp_path / "episode", FakeLlm())
-    with patch.object(store, "get_open_episode", return_value=Err(storage)):
-        receipt = await engine.ingest_event("c", _raw_event(key="e"))
-        await _wait_for_status(engine, receipt.unwrap().event_id, EventStatus.FAILED)
-    await engine.aclose()
-
-    engine, store = _harness(tmp_path / "turns", FakeLlm())
-    with patch.object(store, "record_turns", return_value=Err(storage)):
-        receipt = await engine.ingest_event("c", _raw_event(key="f"))
-        await _wait_for_status(engine, receipt.unwrap().event_id, EventStatus.FAILED)
-    await engine.aclose()
-
     engine, store = _harness(tmp_path / "update", FakeLlm())
-    with patch.object(store, "update_event", return_value=Err(storage)):
+    with patch.object(store, "commit_proactive", return_value=Err(storage)):
         receipt = await engine.ingest_event("c", _raw_event(key="g"))
-        await asyncio.sleep(0.05)
-        assert engine.get_event(receipt.unwrap().event_id).unwrap() is not None
+        await _wait_for_status(engine, receipt.unwrap().event_id, EventStatus.FAILED)
     await engine.aclose()
 
 
@@ -562,14 +543,16 @@ async def test_curate_store_error_paths(tmp_path: Path) -> None:
     storage = AppError(AppErrorKind.STORAGE, "store failed")
     engine, store = _harness(tmp_path, FakeLlm(), SUMMARY_EVERY_TURNS="1")
     await engine.submit_message("c", "hello")
-    for method in ("list_turns", "update_summary", "list_candidates", "read_memory"):
+    for method in ("list_turns", "update_summary", "list_candidates"):
         with patch.object(store, method, return_value=Err(storage)):
             result = await engine.curate_memory("c")
             assert _error(result).message == "store failed"
+    with patch.object(store, "update_memory", return_value=Err(storage)):
+        assert _error(await engine.curate_memory("c")).message == "store failed"
     store.save_candidate(
         MemoryCandidate("m1", "c", MemoryBlock.USER, "likes tea", "r", _NOW)
     ).unwrap()
-    with patch.object(store, "write_memory", return_value=Err(storage)):
+    with patch.object(store, "update_memory", return_value=Err(storage)):
         assert _error(await engine.curate_memory("c")).message == "store failed"
     with patch.object(store, "set_candidate_status", return_value=Err(storage)):
         assert _error(await engine.curate_memory("c")).message == "store failed"
@@ -618,7 +601,8 @@ async def test_context_and_memory_snapshots_report_live_counts(tmp_path: Path) -
     assert snapshot.counts.events == 0
     assert snapshot.omitted_events == 0
     assert len(snapshot.stable_prefix_sha256) == 64
-    assert "今日" in snapshot.stable_prefix
+    assert "今日" not in snapshot.stable_prefix
+    assert "今日" in snapshot.dynamic_section
     memory = engine.get_memory_snapshot("c").unwrap()
     assert memory.conversation_id == "c"
     assert memory.blocks.user == ""

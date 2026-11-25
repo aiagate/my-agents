@@ -1,11 +1,10 @@
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from my_agents.core.memory import (
     CORE_MEMORY_MAX_CHARS,
     build_summary_prompt,
     edit_memory,
     format_prompt_date,
-    format_ui_time,
     memory_char_count,
     merge_candidates,
     normalize_summary,
@@ -146,18 +145,6 @@ def test_normalize_summary_truncates_and_falls_back() -> None:
     assert overview == "a b"
     assert len(summary) == 2000
     assert normalize_summary("t", "o", "s", fallback_title="f") == ("t", "o", "s")
-
-
-def test_format_ui_time_covers_same_minute_same_day_and_cross_day() -> None:
-    assert format_ui_time(_NOW, _NOW, tz=UTC) == "11/22 12:30"
-    assert format_ui_time(_NOW, _NOW + timedelta(minutes=5), tz=UTC) == (
-        "11/22 12:30-12:35"
-    )
-    assert format_ui_time(_NOW, _NOW + timedelta(days=1), tz=UTC) == (
-        "11/22 12:30-11/23 12:30"
-    )
-    tokyo = timezone(timedelta(hours=9))
-    assert format_ui_time(_NOW, _NOW, tz=tokyo) == "11/22 21:30"
 
 
 def test_format_prompt_date_uses_date_only() -> None:

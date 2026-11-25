@@ -127,7 +127,7 @@ def test_fence_and_distill_prompt_include_nonce_and_escape_payload() -> None:
     assert fenced.startswith('<<UNTRUSTED_EVENT nonce="n">>')
     assert "payload" in fenced
     prompt = build_distill_prompt(_envelope({"celsius": 30}), "nonce-1")
-    assert "event_name: temperature.threshold_exceeded" in prompt
+    assert '"kind": "temperature.threshold_exceeded"' in prompt
     assert 'nonce="nonce-1"' in prompt
 
 

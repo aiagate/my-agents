@@ -33,11 +33,13 @@ uv run --locked python tools/e2e_event_chat.py
    分離することを確認する。
 9. `remember` → `POST /curate` → `GET /memory` / `core.md` の永続化を確認する。
 10. 不正 JSON 400、サイズ超過 413、スキーマ違反 422 を確認する。
-11. `spike.worker_failure` で `event_failed` SSE と台帳の `failed` 記録を確認し、
-    プロセスが生存したまま終了することを確認する。終了後に SQLite を直接検査し、
-    `dialogue_turns` に `[event:` / `UNTRUSTED` / 生 JSON を含む行が 0 件で、
-    `events` に `completed`（`proactive` と `ambient`）と `failed` が
-    `occurred_at` / `surfaced_at` 付きで存在することを確認する。
+11. 400 / 413 / 422 と chunked 本文の即時 413 を確認する。注入イベントの
+    sender / body / 役割偽装文字列が `dialogue_turns` に 0 件で、注入後 `/curate`
+    が L2 と `stable_prefix_sha256` を変えないことを確認する。attacker から
+    victim の検索・recall が拒否されることも確認する。
+12. 別プロセスの mock OpenAI が 500 を返す構成で `event_failed` と台帳の `failed`
+    記録を確認し、プロセスが生存したままであることを確認する。旧 `d06697f` DB の
+    移行と、SIGINT 後の clean exit / MCP teardown も確認する。
 12. `MCP_SERVERS_JSON` で `tools/mcp_divergence_server.py` を接続し、
     `連想` 発話で外部 `diverge_associations` が呼ばれ、`stable_prefix_sha256` が
     変わらないことを確認する。
@@ -59,6 +61,9 @@ scenario_6=ok ... delivery=ambient
 scenario_8=ok line_turns=2 shared_keys_isolated=True ...
 scenario_9=ok promoted=1 ...
 scenario_10=ok injection_defanged=True stable_prefix_sha256=invariant
+scenario_12=ok chunked_413=True ... cross_conversation_denied=True
+scenario_13=ok mock_model_failure=typed_failed_process_alive=True
+scenario_14=ok legacy_d06697f_migrated=True
 scenario_11=ok status_400=400 status_413=413 status_422=422 ... mcp_sha_invariant=True
 process_exit_code=...
 ```

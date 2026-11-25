@@ -1,42 +1,35 @@
 # 会話履歴
 
-`/history` で話題を新しい順に表示する。`/history <番号>` で要約と全文を読み取り専用で参照できる。終了時に未要約の発言があれば要約を作成し、間隔の上限に達する前に再起動すると同じ話題を続ける。`/clear` 後の入力は新しい話題に保存する。
+## Sub-features
+
+- `dialogue_turns` は `conversation_id` ごとに独立。episode は
+  `EPISODE_MAX_TURNS` または `EPISODE_GAP_MINUTES` で rollover する。
+- `POST /curate` は `SUMMARY_EVERY_TURNS` 以上で episode を要約し、L2 索引に
+  載せる。proactive / event-linked ターンは要約から除外する。
+- `GET /memory?conversation_id=` は Core Memory・episode 要約・候補件数を返す。
+- `GET /timeline?conversation_id=` は会話ターンとイベント台帳を統合表示する。
+- `GET /context?conversation_id=` は L0–L2 の `stable_prefix` と SHA-256、
+  L3 の日付・イベント文脈を返す。
+- REPL に `/history` / `/clear` はない。履歴操作は HTTP API と `/reset`。
 
 ## 駆動手順
 
-Doctor を通過したら、両方の駆動で同じ `run_id` と `CHATS_DB_PATH` を使う。DB は検証用ディレクトリに置く。要約設定を上書きする場合は、そのモデルでも疎通が取れる状態にする。
+`POST /chat` を同じ `conversation_id` に複数回送る。`SUMMARY_EVERY_TURNS=1` に
+すると `/curate` 1 回で要約が作れる。`GET /memory` と `GET /context` を before /
+after で比較し、`stable_prefix_sha256` が要約追加前後でどう変わるかを記録する。
 
 ```sh
-VERIFY_CHATS_DB_PATH="$PWD/artifacts/verify/$run_id/tmp/chats.db" SUMMARY_EVERY_MESSAGES=4 sh .agents/skills/verify-my-agents/helpers/drive.sh "$run_id" chat-history-first "$first_commands"
-VERIFY_CHATS_DB_PATH="$PWD/artifacts/verify/$run_id/tmp/chats.db" SUMMARY_EVERY_MESSAGES=4 sh .agents/skills/verify-my-agents/helpers/drive.sh "$run_id" chat-history-resume "$resume_commands"
+MEMORY_PATH=<tmp> CHAT_BACKEND=local SUMMARY_EVERY_TURNS=1 uv run my-agents serve
+curl -s -X POST localhost:8080/chat -d '{"conversation_id":"c","message":"青葉港の旅程"}'
+curl -s -X POST localhost:8080/curate -d '{"conversation_id":"c"}'
+curl -s 'localhost:8080/memory?conversation_id=c'
+curl -s 'localhost:8080/context?conversation_id=c'
 ```
 
-`first_commands` には次の入力を保存する。4 発言に達するため、終了前の詳細表示に要約が載る。
+## Gotchas
 
-```text
-検証用の旅程です。行き先は青葉港です。この一文を確認してください。
-出発は火曜の朝です。行き先と出発日を短く答えてください。
-/history
-/history 1
-exit
-```
-
-`resume_commands` には次の入力を保存する。同じ話題が開いている間に実行する。
-
-```text
-/history 1
-前回の旅程の行き先を教えてください。
-/clear
-次は別の話題です。室内植物について短く話してください。
-/history
-/history 2
-過去の会話を検索し、青葉港に触れた会話の詳細を取得してください。
-exit
-```
-
-## 証跡
-
-- 両方のトランスクリプトの `exit=0`、返信、`/history` 一覧と全文を記録する。初回の詳細にサマリーがあり、再起動直後に同じ会話が表示されることを確認する。
-- `/clear` の後は別の話題が `1` になり、`/history 2` に最初の旅程と再開後の発言が残ることを確認する。警告が出た場合はログとともに記録する。
-- モデルによる検索と取得のツール呼び出しは非決定的。回答だけから呼び出しを断定せず、ツール名と結果の確認には `tests/test_shell_llm.py` のスタブモデルテストを使う。
-- 証跡を保存してから、スキルの Cleanup に従って検証用ディレクトリを片付ける。
+- `/history` を打っても会話文として扱われる。存在しないコマンドを証跡にしない。
+- episode は自動で作られる。ID は `GET /memory` の `episodes[].episode_id`。
+- `stable_prefix_sha256` はイベントや日付変更では変わらないが、要約が L2 に
+  追加されたときは変わる。比較の意図を証跡に書く。
+- モデルの要約内容は非決定。SHA の不変性は「イベント・日付」の境界で確認する。

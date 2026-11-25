@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pytest
-from flow_res import Err
+from flow_res import Err, Ok
 from starlette.types import Message, Scope
 
 from my_agents.core.types import (
@@ -111,6 +111,8 @@ async def test_health_index_and_memory(tmp_path: Path) -> None:
     assert b"EventSource(" in index
     assert b"textContent" in index
     assert b"line:demo" in index
+    assert b"convGen" in index
+    assert b"AbortController" in index
     for forbidden in (
         b"innerHTML",
         b"outerHTML",
@@ -212,7 +214,6 @@ async def test_chat_timeline_reset_and_curate(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-@pytest.mark.anyio
 async def test_context_endpoint_reports_stable_prefix_and_counts(
     tmp_path: Path,
 ) -> None:
@@ -276,8 +277,9 @@ class LifecycleEngine(CharacterEngine):
         self.started = 0
         self.closed = 0
 
-    async def start(self) -> None:
+    async def start(self):
         self.started += 1
+        return Ok(None)
 
     async def aclose(self) -> None:
         self.closed += 1
@@ -343,6 +345,7 @@ async def test_stream_delivers_sse_and_cleans_up(tmp_path: Path) -> None:
             break
         await asyncio.sleep(0.01)
     assert b'"kind": "turn"' in body
+    assert b'"conversation_id": "c"' in body
     disconnect.set()
     await asyncio.wait_for(task, timeout=2)
     await engine.aclose()
@@ -425,3 +428,52 @@ def test_serve_delegates_to_uvicorn(tmp_path: Path) -> None:
     run.assert_called_once()
     assert run.call_args.kwargs["port"] == 9999
     asyncio.run(engine.aclose())
+
+
+@pytest.mark.anyio
+async def test_chunked_oversized_body_is_rejected_before_full_buffering(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    app = create_app(engine)
+    sent: list[Message] = []
+    calls = 0
+
+    async def receive() -> Message:
+        nonlocal calls
+        calls += 1
+        if calls <= 10:
+            return {
+                "type": "http.request",
+                "body": b"x" * (MAX_BODY_BYTES // 2 + 1),
+                "more_body": True,
+            }
+        return {"type": "http.disconnect"}
+
+    async def send(message: Message) -> None:
+        sent.append(message)
+
+    scope: Scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/events",
+        "raw_path": b"/events",
+        "query_string": b"",
+        "headers": [],
+        "client": ("test", 1),
+        "server": ("test", 80),
+        "root_path": "",
+    }
+    await app(scope, receive, send)
+    statuses = [
+        message["status"]
+        for message in sent
+        if message["type"] == "http.response.start"
+        and isinstance(message["status"], int)
+    ]
+    assert statuses[0] == 413
+    assert calls == 2
+    await engine.aclose()

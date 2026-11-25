@@ -26,7 +26,6 @@ from my_agents.core.types import (
     EventRecord,
     EventStatus,
     MemoryBlock,
-    MemoryBlocks,
     MemoryStatus,
     TurnOrigin,
 )
@@ -110,12 +109,20 @@ async def test_distill_handles_temperature_email_and_generic_events(
 
 
 @pytest.mark.anyio
-async def test_distill_reports_worker_failure(tmp_path: Path) -> None:
-    llm = _llm(_paths(tmp_path), tmp_path)
+async def test_distill_wraps_a_failing_model(tmp_path: Path) -> None:
+    def broken(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        raise RuntimeError("worker exploded")
+
+    llm = Llm(
+        FunctionModel(broken),
+        store=_paths(tmp_path),
+        logger=NOOP_LOGGER,
+        redactions=("secret-token",),
+    )
     error = assert_err(
-        await llm.distill(_envelope("spike.worker_failure", {"reason": "boom"})),
+        await llm.distill(_envelope("other.event", {"reason": "boom"})),
         kind=AppErrorKind.LLM,
-        message_contains="injected worker failure",
+        message_contains="worker exploded",
     )
     assert error.kind is AppErrorKind.LLM
 
@@ -218,7 +225,8 @@ def _toolbox(store: Store) -> ChatToolbox:
     return ChatToolbox(store, "c", [], _NOW)
 
 
-def test_toolbox_reads_events_and_recalls_conversations(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_toolbox_reads_events_and_recalls_conversations(tmp_path: Path) -> None:
     store = _paths(tmp_path)
     episode, _ = store.record_turns(
         "c",
@@ -252,55 +260,62 @@ def test_toolbox_reads_events_and_recalls_conversations(tmp_path: Path) -> None:
         )
     ).unwrap()
     toolbox = _toolbox(store)
-    assert "evt_1" in toolbox.read_event("evt_1")
-    assert "not found" in toolbox.read_event("missing")
-    assert "topic" in toolbox.search_conversations("topic")
-    assert toolbox.search_conversations("nope") == "[]"
-    assert "hello" in toolbox.recall_conversation(episode.episode_id)
-    assert "not found" in toolbox.recall_conversation("missing")
+    assert "evt_1" in await toolbox.read_event("evt_1")
+    assert "not found" in await toolbox.read_event("missing")
+    assert "topic" in await toolbox.search_conversations("topic")
+    assert await toolbox.search_conversations("nope") == "[]"
+    assert "hello" in await toolbox.recall_conversation(episode.episode_id)
+    assert "not found" in await toolbox.recall_conversation("missing")
     assert len(toolbox.toolset().tools) == 5
 
 
-def test_toolbox_remember_and_update_memory(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_toolbox_remember_and_update_memory(tmp_path: Path) -> None:
     store = _paths(tmp_path)
     toolbox = _toolbox(store)
-    assert "Remembered" in toolbox.remember(MemoryBlock.USER, "likes tea", "reason")
+    assert "Remembered" in await toolbox.remember(
+        MemoryBlock.USER, "likes tea", "reason"
+    )
     assert store.list_candidates("c", MemoryStatus.PENDING).unwrap()[0].content == (
         "likes tea"
     )
-    assert "updated" in toolbox.update_core_memory("append", MemoryBlock.USER, "hello")
+    assert "updated" in await toolbox.update_core_memory(
+        "append", MemoryBlock.USER, "hello"
+    )
     assert store.read_memory().unwrap().user == "hello"
-    assert "rejected" in toolbox.update_core_memory(
+    assert "rejected" in await toolbox.update_core_memory(
         "replace", MemoryBlock.USER, "x", "missing"
     )
 
 
-def test_toolbox_reports_backing_store_errors(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_toolbox_reports_backing_store_errors(tmp_path: Path) -> None:
     broken_path = tmp_path / "broken.db"
     broken_path.write_text("not a database", encoding="utf-8")
     broken = ChatToolbox(Store(broken_path, tmp_path / "core.md"), "c", [], _NOW)
-    assert "Could not read" in broken.read_event("evt")
-    assert "Could not search" in broken.search_conversations("q")
-    assert "Could not recall" in broken.recall_conversation("e")
-    assert "Could not remember" in broken.remember(MemoryBlock.USER, "x", "r")
+    assert "Could not read" in await broken.read_event("evt")
+    assert "Could not search" in await broken.search_conversations("q")
+    assert "Could not recall" in await broken.recall_conversation("e")
+    assert "Could not remember" in await broken.remember(MemoryBlock.USER, "x", "r")
     memory_dir = tmp_path / "memory-dir"
     memory_dir.mkdir()
     read_error = ChatToolbox(Store(tmp_path / "other.db", memory_dir), "c", [], _NOW)
-    assert "Could not read memory" in read_error.update_core_memory(
+    assert "Could not read memory" in await read_error.update_core_memory(
         "append", MemoryBlock.USER, "x"
     )
 
 
 class _WriteFailingStore(Store):
-    def write_memory(self, blocks: MemoryBlocks) -> Result[None, AppError]:
-        del blocks
+    def update_memory(self, transform) -> Result[None, AppError]:
+        del transform
         return Err(AppError(AppErrorKind.STORAGE, "write failed"))
 
 
-def test_toolbox_reports_memory_write_failure(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_toolbox_reports_memory_write_failure(tmp_path: Path) -> None:
     store = _WriteFailingStore(tmp_path / "a.db", tmp_path / "core.md")
     toolbox = ChatToolbox(store, "c", [], _NOW)
-    assert "Could not save memory" in toolbox.update_core_memory(
+    assert "Could not save memory" in await toolbox.update_core_memory(
         "append", MemoryBlock.USER, "x"
     )
 
@@ -315,7 +330,8 @@ def test_local_helpers_cover_empty_and_malformed_inputs() -> None:
     assert brief.dedupe_key == "other.event"
 
 
-def test_recall_reports_turn_read_failure(tmp_path: Path) -> None:
+@pytest.mark.anyio
+async def test_recall_reports_turn_read_failure(tmp_path: Path) -> None:
     store = _paths(tmp_path)
     episode, _ = store.record_turns(
         "c",
@@ -331,7 +347,7 @@ def test_recall_reports_turn_read_failure(tmp_path: Path) -> None:
         "list_turns",
         return_value=Err(AppError(AppErrorKind.STORAGE, "no turns")),
     ):
-        assert "Could not recall" in _toolbox(store).recall_conversation(
+        assert "Could not recall" in await _toolbox(store).recall_conversation(
             episode.episode_id
         )
 
@@ -400,3 +416,55 @@ def test_local_external_tool_routing_and_tool_returns() -> None:
         _last_user([ModelRequest([ToolReturnPart("x", "y"), UserPromptPart("u")])])
         == "u"
     )
+
+
+def test_local_search_and_recall_routing() -> None:
+    search = _local_external_tool("検索: 海", {"search_conversations"}, None)
+    assert isinstance(search, ModelResponse)
+    search_part = search.parts[0]
+    assert isinstance(search_part, ToolCallPart)
+    assert search_part.args == {"query": "海", "limit": 5}
+    assert _local_external_tool("検索", {"search_conversations"}, None) is not None
+    empty = _local_external_tool(
+        "", {"search_conversations"}, ToolReturnPart("search_conversations", "[]")
+    )
+    assert isinstance(empty, ModelResponse)
+    empty_part = empty.parts[0]
+    assert isinstance(empty_part, TextPart)
+    assert "見つかりません" in empty_part.content
+    malformed = _local_external_tool(
+        "", {"search_conversations"}, ToolReturnPart("search_conversations", "{")
+    )
+    assert isinstance(malformed, ModelResponse)
+    hit = _local_external_tool(
+        "",
+        {"search_conversations"},
+        ToolReturnPart("search_conversations", '[{"episode_id": "ep_abc"}]'),
+    )
+    assert isinstance(hit, ModelResponse)
+    hit_part = hit.parts[0]
+    assert isinstance(hit_part, ToolCallPart)
+    assert hit_part.args == {"episode_id": "ep_abc", "limit": 40}
+    lacking = _local_external_tool(
+        "",
+        {"search_conversations"},
+        ToolReturnPart("search_conversations", '[{"title": "x"}]'),
+    )
+    assert isinstance(lacking, ModelResponse)
+    lacking_part = lacking.parts[0]
+    assert isinstance(lacking_part, TextPart)
+    recall = _local_external_tool("思い出して ep_abc", {"recall_conversation"}, None)
+    assert isinstance(recall, ModelResponse)
+    recall_part = recall.parts[0]
+    assert isinstance(recall_part, ToolCallPart)
+    assert recall_part.args == {"episode_id": "ep_abc", "limit": 40}
+    assert _local_external_tool("思い出して", {"recall_conversation"}, None) is None
+    remembered = _local_external_tool(
+        "",
+        {"recall_conversation"},
+        ToolReturnPart("recall_conversation", "hello"),
+    )
+    assert isinstance(remembered, ModelResponse)
+    remembered_part = remembered.parts[0]
+    assert isinstance(remembered_part, TextPart)
+    assert "思い出しました" in remembered_part.content

@@ -1,32 +1,33 @@
-# Core Memory 自発更新
+# Core Memory 更新
 
 ## Sub-features
 
-- 「〜を覚えて」のような依頼で、エージェントが `update_core_memory` ツールを
-  自発的に呼び出す（append / replace / rewrite）。
-- 更新が完了すると応答に `[Core Memory updated: <理由>]` が付く。
-- `/core` コマンドで Core Memory を表示できる（`Core Memory: <場所>`、
-  `使用量: <n> / <上限>`、本文）。
-- 更新内容が `core.md` に反映される（4096 char 上限）。
+- 「覚えて: …」で local バックエンドは `remember` ツールを呼び、MemoryCandidate
+  を PENDING で保存する。応答は `覚えました。`。
+- Core Memory への反映は `POST /curate` の sleep-time curation。候補が重複・
+  上限超過でなければ `core.md` に `- <内容>` として追記される。
+- イベント文脈を含む会話では `remember` / `update_core_memory` を公開しない。
+- Core Memory は会話をまたいで共有する（`core.md`、4096 文字上限）。
 
 ## How to get to it (user POV)
 
-起動後「覚えておいて: …」と依頼する。応答に更新通知が出る。`/core` を打つと
-記憶が表示される。
+イベントのない会話で「覚えて: 私は緑茶が好き」と送り、`POST /curate` を呼ぶ。
+`GET /memory` の `user` と `core.md` に内容が現れる。
 
 ## Driving it with drive.sh
 
-    /core
-    覚えておいて: 検証ランでは MEMORY_PATH を必ず tmp に向ける。
-    /core
+    CHAT_BACKEND=local で起動
+    覚えて: 検証ランでは MEMORY_PATH を必ず tmp に向ける。
     exit
 
-最初の `/core` が before、2 番目が after。drive.sh が最終 core.md を
-`<name>-core.md` として保存する。before/after の差分を Evidence として残す。
+その後 `POST /curate` と `GET /memory?conversation_id=<id>` を実行し、drive.sh が
+保存した `<name>-core.md` と差分を証跡にする。
 
 ## Gotchas
 
-- ツール呼び出しはモデルの自発判定。呼ばれなかったら 1 回だけ再試行し、
-  それでも未発火なら証跡に記録して報告する（map で隠さない）。
+- REPL に `/core` はない。確認は `GET /memory` または `core.md` で行う。
+- `remember` は候補を作るだけで、即時に `core.md` を書き換えない。
+- local の「覚えて」は決定的に `remember` を呼ぶ。イベント文脈があると
+  ツール自体が無いため呼ばれない。
 - `MEMORY_PATH` を指定しないと `./memory/core.md`（gitignore 済み）を書く。
-  drive.sh は常に tmp 側を向けるため、レシピ側で指定は不要。
+  drive.sh は常に tmp 側を向ける。

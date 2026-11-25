@@ -72,7 +72,7 @@ def test_log_file_is_written(tmp_path: Path) -> None:
     assert "cli_exit" in log.read_text(encoding="utf-8")
 
 
-def test_unwritable_log_file_warns_and_continues(tmp_path: Path) -> None:
+def test_unwritable_explicit_log_file_exits_one(tmp_path: Path) -> None:
     errors: list[str] = []
     code = main(
         ["--log-file", str(tmp_path)],
@@ -81,8 +81,34 @@ def test_unwritable_log_file_warns_and_continues(tmp_path: Path) -> None:
         write_output=lambda _line: None,
         write_error=errors.append,
     )
+    assert code == 1
+    assert any("Error: cannot open log file" in line for line in errors)
+
+
+def test_unwritable_env_log_file_warns_and_continues(tmp_path: Path) -> None:
+    errors: list[str] = []
+    code = main(
+        [],
+        env={**_ENV, "MEMORY_PATH": str(tmp_path), "LOG_FILE": str(tmp_path)},
+        read_input=_inputs(["exit"]),
+        write_output=lambda _line: None,
+        write_error=errors.append,
+    )
     assert code == 0
-    assert any("cannot open log file" in line for line in errors)
+    assert any("Warning: cannot open log file" in line for line in errors)
+
+
+def test_debug_prints_the_resolved_log_path(tmp_path: Path) -> None:
+    errors: list[str] = []
+    code = main(
+        ["--debug", "--log-file", str(tmp_path / "agent.jsonl")],
+        env={**_ENV, "MEMORY_PATH": str(tmp_path)},
+        read_input=_inputs(["exit"]),
+        write_output=lambda _line: None,
+        write_error=errors.append,
+    )
+    assert code == 0
+    assert any(line.startswith("Debug: log file = ") for line in errors)
 
 
 def test_persona_error_returns_one(tmp_path: Path) -> None:

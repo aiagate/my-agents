@@ -26,10 +26,10 @@ my-agents CLI / headless server の実機検証スキル。単体・配線テス
 Drive の前に全項目を確認する。1 つでも崩れたら Drive に入らない:
 
 1. `uv run my-agents --help` が exit 0 で usage を返す。
-2. リポジトリルートに `.env` がある（中身は読まない）。
+2. 設定が読める（`.env` は任意。不正値がない）。
 3. `--log-file <tmp>` 付きで起動すると空ファイル（0600）が作られる。
 4. `uv run --locked python tools/e2e_event_chat.py` が exit 0 で
-   `scenario_1`〜`scenario_11` と `process_exit_code` を出力する。
+   `scenario_1`〜`scenario_14` と `process_exit_code` を出力する。
 
 ## Drive
 
@@ -48,8 +48,8 @@ tools/e2e_event_chat.py で駆動し、トランスクリプトを Evidence に�
   `counts` を返し、イベント前・後・チャット後で SHA が変わらない。
 - `MCP_SERVERS_JSON` で `tools/mcp_divergence_server.py` を接続したとき、
   外部ツール呼び出し後も SHA が変わらない。
-- 400 / 413 / 422、`spike.worker_failure` の `event_failed`、SSE の
-  `source_event_id` を確認する。
+- 400 / 413 / 422、chunked 本文の 413、mock OpenAI 失敗による `event_failed`、
+  SSE の `source_event_id`、SIGINT 後の clean exit を確認する。
 
 網羅は `tools/e2e_event_chat.py` に任せ、手動では `curl` で 1 往復ずつ
 証跡を残す。MCP は README の `MCP_SERVERS_JSON` 例を使う。

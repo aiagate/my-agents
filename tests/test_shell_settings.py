@@ -46,7 +46,7 @@ def test_load_settings_parses_aliases_and_optional_paths(tmp_path: Path) -> None
     assert settings.magpie_api_key == SecretStr("secret")
     assert settings.chats_db_path == tmp_path / "custom.db"
     assert settings.persona_path == tmp_path / "persona.json"
-    assert settings.mcp_servers_json == '{"mcp": true}'
+    assert settings.mcp_servers_json == SecretStr('{"mcp": true}')
     assert (settings.server_host, settings.server_port) == ("0.0.0.0", 9000)
     assert settings.event_analysis_delay_ms == 1500
     assert settings.proactive_policy.user_active_minutes == 0

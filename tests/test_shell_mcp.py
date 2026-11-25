@@ -5,6 +5,7 @@ from typing import Self
 
 import pytest
 from flow_res import Err, is_ok
+from pydantic import SecretStr
 from pydantic_ai.messages import ModelResponse, TextPart
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.toolsets import AbstractToolset
@@ -44,7 +45,10 @@ def test_parse_mcp_servers_builds_stdio_and_http_specs(tmp_path: Path) -> None:
                 "env": {"MCP_TEST": "1"},
                 "cwd": str(_REPO),
             },
-            "remote": {"url": "https://example.test/mcp"},
+            "remote": {
+                "url": "https://example.test/mcp",
+                "headers": {"Authorization": "Bearer secret"},
+            },
         }
     )
     specs = parse_mcp_servers(raw).unwrap()
@@ -53,11 +57,16 @@ def test_parse_mcp_servers_builds_stdio_and_http_specs(tmp_path: Path) -> None:
             name="local",
             command=sys.executable,
             args=(str(_SERVER),),
-            env=(("MCP_TEST", "1"),),
+            env=(("MCP_TEST", SecretStr("1")),),
             cwd=_REPO,
         ),
-        McpServerSpec(name="remote", url="https://example.test/mcp"),
+        McpServerSpec(
+            name="remote",
+            url="https://example.test/mcp",
+            headers=(("Authorization", SecretStr("Bearer secret")),),
+        ),
     )
+    assert "Bearer secret" not in repr(specs[1])
     toolsets = build_toolsets(specs)
     assert [toolset.id for toolset in toolsets] == ["local", "remote"]
     assert all(toolset.include_instructions is False for toolset in toolsets)
@@ -76,6 +85,10 @@ def test_parse_mcp_servers_builds_stdio_and_http_specs(tmp_path: Path) -> None:
         (json.dumps({"x": {"command": 1}}), "field 'command'"),
         (json.dumps({"x": {}}), "requires 'command' or 'url'"),
         (json.dumps({"x": {"url": "ftp://example.test"}}), "http:// or https://"),
+        (
+            json.dumps({"x": {"command": "python", "headers": {"A": "b"}}}),
+            "headers require 'url'",
+        ),
         (
             json.dumps({"x": {"url": "https://example.test", "command": "python"}}),
             "either 'url' or 'command'",
@@ -97,7 +110,7 @@ class _FailingToolset(AbstractToolset[None]):
         return "failing"
 
     async def __aenter__(self) -> Self:
-        raise RuntimeError("cannot connect")
+        raise RuntimeError("cannot connect with secret-key")
 
     async def __aexit__(self, *args: object) -> None:
         del args
@@ -160,10 +173,21 @@ async def test_toolset_lifecycle_is_idempotent() -> None:
 
 
 @pytest.mark.anyio
-async def test_toolset_start_failure_closes_the_stack() -> None:
-    llm = _llm((_FailingToolset(),))
-    with pytest.raises(RuntimeError, match="cannot connect"):
-        await llm.start()
+async def test_toolset_start_failure_returns_typed_error() -> None:
+    llm = Llm(
+        FunctionModel(lambda _messages, _info: ModelResponse([TextPart("ok")])),
+        store=Store(Path("/tmp/unused.db"), Path("/tmp/unused.md")),
+        logger=NOOP_LOGGER,
+        external_toolsets=(_FailingToolset(),),
+        redactions=("secret-key",),
+    )
+    error = assert_err(
+        await llm.start(),
+        kind=AppErrorKind.LLM,
+        message_contains="cannot connect",
+    )
+    assert error.kind is AppErrorKind.LLM
+    assert "secret-key" not in error.message
     await llm.aclose()
 
 

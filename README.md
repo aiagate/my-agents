@@ -8,11 +8,12 @@
 ```text
 src/my_agents/
   __init__.py        # main() だけの薄い入口
-  core/              # 純粋関数・不変モデル（I/O と外部フレームワーク禁止）
+  core/              # 純粋関数・不変モデル（shell/ 依存なし・外部 I/O 禁止）
     types.py         # AppError, persona, memory, episode, event, timeline, snapshot
     events.py        # 厳格な envelope 検証・多層プロンプト防御・合流判定
     memory.py        # core memory 編集・候補統合・episode rollover/summary
     context.py       # キャッシュ安定 4 層コンテキストと SHA-256
+                       # （Pydantic と flow-res は型・Result のため使用する）
   shell/             # 命令的シェル（SQLite / pydantic-ai / ASGI / CLI）
     store.py         # 単一 SQLite（WAL + busy_timeout + BEGIN IMMEDIATE）と core.md
     mcp.py           # MCP_SERVERS_JSON の検証と MCPToolset 構築
@@ -97,17 +98,24 @@ EventBrief の構造化出力・ツール呼び出し・要約・外部 MCP ツ�
   `System:` などの役割偽装を無害化し、リクエスト毎 nonce のフェンスで囲む。
   イベント由来の brief を L3 へ描画するときも同じ無害化を通す。
 - コンテキストは L0 人格、L1 Core Memory、L2 curate 済み要約だけの日付索引、
-  L3 分離したイベント文脈の 4 層。未要約の会話進行では L0〜L2 は変化せず、
-  KV キャッシュの prefix が安定する。`GET /context` の
-  `stable_prefix_sha256` で byte 不変を検査できる。
+  L3 分離したイベント文脈と当日日付の 4 層。当日日付は L3 に置くため、
+  未要約の会話進行や UTC 日付変更では L0〜L2 が変化せず、KV キャッシュの prefix が
+  安定する。`GET /context` の `stable_prefix_sha256` で byte 不変を検査できる。
+- イベント文脈を含むターンでは `remember` / `update_core_memory` を公開しない。
+  proactive ターンは L2 要約から除外し、要約も無害化してから保存する。
 - `proactive` の自然文は `evt_` / `[event:` / `UNTRUSTED` / `name=` / コードフェンス
   / 生 JSON / 長文 / 4 行以上を拒否する。
 
 ## 外部 MCP
 
 `MCP_SERVERS_JSON` にサーバ定義を JSON で渡す。stdio は `command` / `args` /
-`env` / `cwd`、HTTP は `url`。`include_instructions=False` で接続するため、
-外部サーバの instructions が L0〜L2 の system prefix を書き換えることはない。
+`env` / `cwd`、HTTP は `url` / `headers`。`env` と `headers` の値は `SecretStr`
+として保持し、`repr()` やエラー本文には出さない。stdio 子プロセスへ継承するのは
+`PATH` / `HOME` / `USER` / `LANG` / `LC_ALL` / `LC_CTYPE` / `TERM` / `TMPDIR` /
+`VIRTUAL_ENV` / `UV_CACHE_DIR` の許可リストだけで、明示設定した値は subprocess
+境界でのみ展開する。`MAGPIE_API_KEY` などのプロセス秘密は継承しない。
+`include_instructions=False` で接続するため、外部サーバの instructions が L0〜L2 の
+system prefix を書き換えることはない。
 接続は `CharacterEngine.start()`（Starlette lifespan / CLI REPL）で開き、
 `aclose()` で閉じる。lifespan を通らない単発実行では `Llm.chat` が
 `AsyncExitStack` で都度開閉する。
@@ -188,5 +196,11 @@ E2E は実プロセスの `my-agents serve` を起動し、実 FastMCP
 8. `line:demo` と `default` の履歴・イベント・記憶候補・SSE・reset 分離
 9. `remember` → `/curate` → `/memory` / `core.md` の永続化
 10. 境界偽装・bidi・制御文字・役割偽装を含むイベントの無害化
-11. 400 / 413 / 422、`spike.worker_failure`、生イベント文字列 0 件、
+11. 400 / 413 / 422、chunked 本文の即時 413、生イベント文字列 0 件、
     実 MCP ツール呼び出し後の SHA 不変
+12. 注入イベント後の `/curate` が L2 と SHA を汚さないこと、
+    attacker から victim の検索・recall が拒否されること
+13. ローカル mock OpenAI への 500 応答で worker failure が `failed` として
+    記録され、プロセスが生存すること
+14. 旧 `d06697f` SQLite の in-place 移行と SIGINT による graceful shutdown
+    （MCP 子プロセスの teardown を含む）

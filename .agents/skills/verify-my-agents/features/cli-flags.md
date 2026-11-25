@@ -3,7 +3,8 @@
 ## Sub-features
 
 - `--help`: usage を stdout に出して exit 0（REPL に入らない、`.env` 不要）。
-- `--debug`: 解決済みログパスがあれば stderr に `Debug: log file = <path>`。
+- `--debug`: 解決済みログパスを stderr に `Debug: log file = <path>`。
+  解決できない場合は `Debug: log file = <none>`。
 - `--log-file <path>`: 空ファイル（0600）を作る。エラー時のみ JSONL 追記。
 - 不正フラグ: エラーを stderr に出して exit 2。
 
@@ -30,5 +31,5 @@ drive.sh の対象外（REPL 入力を使わない）。手動で実行して Ev
 - `--log-file` に書けないパスを渡すと `Error:` で exit 1。環境変数 `LOG_FILE`
   経由の解決では失敗しても `Warning:` のみで続行する（既定の状態ディレクトリ
   に空ファイルを作る）。
-- `--debug` 単独でも既定ログパスに `Debug:` 行が出る。検証では `--log-file`
-  と併用して tmp に向ける。
+- `--debug` 単独でも `Debug:` 行が出る。検証では `--log-file` と併用して
+  tmp に向ける。

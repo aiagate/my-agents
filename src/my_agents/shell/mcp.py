@@ -1,12 +1,12 @@
 import json
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from os import environ
 from pathlib import Path
 
 from fastmcp.client.transports import StdioTransport, StreamableHttpTransport
 from flow_res import Err, Ok, Result
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, ValidationError
 from pydantic_ai.mcp import MCPToolset
 
 from my_agents.core.types import AppError, AppErrorKind
@@ -17,9 +17,10 @@ class McpServerSpec:
     name: str
     command: str = ""
     args: tuple[str, ...] = ()
-    env: tuple[tuple[str, str], ...] = ()
+    env: tuple[tuple[str, SecretStr], ...] = ()
     cwd: Path | None = None
     url: str | None = None
+    headers: tuple[tuple[str, SecretStr], ...] = ()
 
 
 class _ServerInput(BaseModel):
@@ -31,9 +32,10 @@ class _ServerInput(BaseModel):
 
     command: str | None = None
     args: tuple[str, ...] = ()
-    env: dict[str, str] = Field(default_factory=dict)
+    env: dict[str, SecretStr] = Field(default_factory=dict)
     cwd: str | None = None
     url: str | None = None
+    headers: dict[str, SecretStr] = Field(default_factory=dict)
 
 
 def _invalid(message: str) -> AppError:
@@ -63,7 +65,13 @@ def _convert(name: str, parsed: _ServerInput) -> Result[McpServerSpec, AppError]
                     f"MCP server '{name}' url must start with http:// or https://."
                 )
             )
-        return Ok(McpServerSpec(name=name, url=parsed.url))
+        return Ok(
+            McpServerSpec(
+                name=name, url=parsed.url, headers=tuple(parsed.headers.items())
+            )
+        )
+    if parsed.headers:
+        return Err(_invalid(f"MCP server '{name}' headers require 'url'."))
     if not parsed.command:
         return Err(_invalid(f"MCP server '{name}' requires 'command' or 'url'."))
     return Ok(
@@ -103,16 +111,40 @@ def parse_mcp_servers(raw: str | None) -> Result[tuple[McpServerSpec, ...], AppE
     return Ok(tuple(servers))
 
 
-def _environment(server: McpServerSpec) -> dict[str, str] | None:
-    if not server.env:
-        return None
-    return {**environ, **dict(server.env)}
+SAFE_ENV_KEYS = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TMPDIR",
+    "VIRTUAL_ENV",
+    "UV_CACHE_DIR",
+)
 
 
-def _toolset(server: McpServerSpec) -> MCPToolset[None]:
+def _environment(
+    server: McpServerSpec, base: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    source = environ if base is None else base
+    inherited = {key: source[key] for key in SAFE_ENV_KEYS if key in source}
+    inherited.update({name: value.get_secret_value() for name, value in server.env})
+    return inherited
+
+
+def _toolset(
+    server: McpServerSpec, base: Mapping[str, str] | None = None
+) -> MCPToolset[None]:
     if server.url is not None:
         return MCPToolset(
-            StreamableHttpTransport(server.url),
+            StreamableHttpTransport(
+                server.url,
+                headers={
+                    name: value.get_secret_value() for name, value in server.headers
+                },
+            ),
             id=server.name,
             include_instructions=False,
         )
@@ -120,7 +152,7 @@ def _toolset(server: McpServerSpec) -> MCPToolset[None]:
         StdioTransport(
             server.command,
             list(server.args),
-            env=_environment(server),
+            env=_environment(server, base),
             cwd=None if server.cwd is None else str(server.cwd),
         ),
         id=server.name,
@@ -130,5 +162,7 @@ def _toolset(server: McpServerSpec) -> MCPToolset[None]:
 
 def build_toolsets(
     servers: Sequence[McpServerSpec],
+    *,
+    base_env: Mapping[str, str] | None = None,
 ) -> tuple[MCPToolset[None], ...]:
-    return tuple(_toolset(server) for server in servers)
+    return tuple(_toolset(server, base_env) for server in servers)

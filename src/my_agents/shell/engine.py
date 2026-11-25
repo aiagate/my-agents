@@ -1,6 +1,7 @@
 import asyncio
 import json
 from collections.abc import AsyncGenerator, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol, assert_never
@@ -16,6 +17,7 @@ from my_agents.core.context import (
 from my_agents.core.events import (
     decide_merge,
     sanitize_single_line,
+    sanitize_untrusted,
     validate_envelope,
     validate_proactive_message,
 )
@@ -48,7 +50,7 @@ from my_agents.shell.store import Store, TurnEntry
 
 
 class EngineLlm(Protocol):
-    async def start(self) -> None: ...
+    async def start(self) -> Result[None, AppError]: ...
 
     async def aclose(self) -> None: ...
 
@@ -98,21 +100,44 @@ class CharacterEngine:
         self._logger = logger
         self._clock = clock or (lambda: datetime.now(UTC))
         self._locks: dict[str, asyncio.Lock] = {}
+        self._lock_users: dict[str, int] = {}
         self._subscribers: dict[str, set[asyncio.Queue[TimelineItem]]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
 
-    def _lock(self, conversation_id: str) -> asyncio.Lock:
-        return self._locks.setdefault(conversation_id, asyncio.Lock())
+    @asynccontextmanager
+    async def _locked(self, conversation_id: str) -> AsyncGenerator[None]:
+        lock = self._locks.setdefault(conversation_id, asyncio.Lock())
+        self._lock_users[conversation_id] = self._lock_users.get(conversation_id, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            remaining = self._lock_users.get(conversation_id, 1) - 1
+            if remaining <= 0:
+                self._locks.pop(conversation_id, None)
+                self._lock_users.pop(conversation_id, None)
+            else:
+                self._lock_users[conversation_id] = remaining
 
-    async def start(self) -> None:
-        await self._llm.start()
+    def active_lock_count(self) -> int:
+        return len(self._locks)
+
+    async def _call_store[T](
+        self, operation: Callable[[], Result[T, AppError]]
+    ) -> Result[T, AppError]:
+        return await asyncio.to_thread(operation)
+
+    async def start(self) -> Result[None, AppError]:
+        return await self._llm.start()
 
     def _publish(self, item: TimelineItem) -> None:
         for queue in self._subscribers.get(item.conversation_id, set()):
+            if queue.full():
+                queue.get_nowait()
             queue.put_nowait(item)
 
     async def subscribe(self, conversation_id: str) -> AsyncGenerator[TimelineItem]:
-        queue: asyncio.Queue[TimelineItem] = asyncio.Queue()
+        queue: asyncio.Queue[TimelineItem] = asyncio.Queue(maxsize=64)
         self._subscribers.setdefault(conversation_id, set()).add(queue)
         try:
             while True:
@@ -127,13 +152,17 @@ class CharacterEngine:
     async def _context(
         self, conversation_id: str, now: datetime
     ) -> Result[AssembledContext, AppError]:
-        memory = self._store.read_memory()
+        memory = await self._call_store(self._store.read_memory)
         if is_err(memory):
             return memory
-        episodes = self._store.list_episodes(conversation_id, limit=20)
+        episodes = await self._call_store(
+            lambda: self._store.list_episodes(conversation_id, limit=20)
+        )
         if is_err(episodes):
             return episodes
-        events = self._store.list_events(conversation_id, limit=10)
+        events = await self._call_store(
+            lambda: self._store.list_events(conversation_id, limit=10)
+        )
         if is_err(events):
             return events
         return Ok(
@@ -152,19 +181,25 @@ class CharacterEngine:
         normalized = text.strip()
         if not normalized:
             return Err(AppError(AppErrorKind.VALIDATION, "Message must not be empty."))
-        async with self._lock(conversation_id):
+        async with self._locked(conversation_id):
             now = self._clock()
             for step in (
-                self._store.ensure_conversation(conversation_id, now),
-                self._store.bump_epoch(conversation_id, now),
+                await self._call_store(
+                    lambda: self._store.ensure_conversation(conversation_id, now)
+                ),
+                await self._call_store(
+                    lambda: self._store.bump_epoch(conversation_id, now)
+                ),
             ):
                 if is_err(step):
                     return step
             context = await self._context(conversation_id, now)
             if is_err(context):
                 return context
-            history = self._store.recent_turns(
-                conversation_id, limit=self._settings.recent_turns_limit
+            history = await self._call_store(
+                lambda: self._store.recent_turns(
+                    conversation_id, limit=self._settings.recent_turns_limit
+                )
             )
             if is_err(history):
                 return history
@@ -173,26 +208,34 @@ class CharacterEngine:
             )
             if is_err(reply):
                 return reply
-            open_episode = self._store.get_open_episode(conversation_id)
+            open_episode = await self._call_store(
+                lambda: self._store.get_open_episode(conversation_id)
+            )
             if is_err(open_episode):
                 return open_episode
             entries: tuple[TurnEntry, ...] = (
                 ("user", TurnOrigin.USER, normalized, None),
                 ("assistant", TurnOrigin.REPLY, reply.value.text, None),
             )
-            saved = self._store.record_turns(
-                conversation_id,
-                None if open_episode.value is None else open_episode.value.episode_id,
-                entries,
-                now=now,
-                title=normalized[:40],
-                max_turns=self._settings.episode_max_turns,
-                gap_minutes=self._settings.episode_gap_minutes,
+            saved = await self._call_store(
+                lambda: self._store.record_turns(
+                    conversation_id,
+                    None
+                    if open_episode.value is None
+                    else open_episode.value.episode_id,
+                    entries,
+                    now=now,
+                    title=normalized[:40],
+                    max_turns=self._settings.episode_max_turns,
+                    gap_minutes=self._settings.episode_gap_minutes,
+                )
             )
             if is_err(saved):
                 return saved
             _, turns = saved.value
-            events = self._store.list_events(conversation_id, limit=20)
+            events = await self._call_store(
+                lambda: self._store.list_events(conversation_id, limit=20)
+            )
             if is_err(events):
                 return events
             surfaced = tuple(
@@ -200,7 +243,9 @@ class CharacterEngine:
                 for event in events.value
                 if event.delivery is EventDelivery.AMBIENT and event.surfaced_at is None
             )
-            if surfaced and is_err(self._store.mark_surfaced(surfaced, now)):
+            if surfaced and is_err(
+                await self._call_store(lambda: self._store.mark_surfaced(surfaced, now))
+            ):
                 return Err(
                     AppError(AppErrorKind.STORAGE, "Could not mark ambient events.")
                 )
@@ -236,26 +281,30 @@ class CharacterEngine:
         if is_err(validated):
             return validated
         envelope = validated.value
-        ensured = self._store.ensure_conversation(conversation_id, now)
+        ensured = await self._call_store(
+            lambda: self._store.ensure_conversation(conversation_id, now)
+        )
         if is_err(ensured):
             return ensured
-        inserted = self._store.insert_event(
-            EventRecord(
-                envelope.event_id,
-                conversation_id,
-                envelope.idempotency_key,
-                envelope.name,
-                envelope.source,
-                envelope.occurred_at,
-                now,
-                EventStatus.RECEIVED,
-                EventDelivery.SILENT,
-                "",
-                json.dumps(envelope.data, ensure_ascii=False, sort_keys=True),
-                None,
-                "",
-                None,
-                None,
+        inserted = await self._call_store(
+            lambda: self._store.insert_event(
+                EventRecord(
+                    envelope.event_id,
+                    conversation_id,
+                    envelope.idempotency_key,
+                    envelope.name,
+                    envelope.source,
+                    envelope.occurred_at,
+                    now,
+                    EventStatus.RECEIVED,
+                    EventDelivery.SILENT,
+                    "",
+                    json.dumps(envelope.data, ensure_ascii=False, sort_keys=True),
+                    None,
+                    "",
+                    None,
+                    None,
+                )
             )
         )
         if is_err(inserted):
@@ -278,96 +327,74 @@ class CharacterEngine:
                 await asyncio.sleep(delay)
             brief = await self._llm.distill(envelope)
             if is_err(brief):
-                self._fail(envelope, brief.error.message)
+                await self._fail(envelope, brief.error.message)
                 return
             now = self._clock()
-            state = self._store.get_state(envelope.conversation_id)
+            state = await self._call_store(
+                lambda: self._store.get_state(envelope.conversation_id)
+            )
             if is_err(state):
-                self._fail(envelope, state.error.message)
+                await self._fail(envelope, state.error.message)
                 return
             decision = decide_merge(
                 brief.value, state.value, now, self._settings.proactive_policy
             )
             if decision.delivery is not EventDelivery.PROACTIVE:
-                self._quiet(envelope, brief.value, decision.delivery, decision.reason)
+                await self._quiet(
+                    envelope, brief.value, decision.delivery, decision.reason
+                )
                 return
             context = await self._context(envelope.conversation_id, now)
             if is_err(context):
-                self._fail(envelope, context.error.message)
+                await self._fail(envelope, context.error.message)
                 return
             composed = await self._llm.compose(brief.value, context.value)
-            if is_err(composed) or not validate_proactive_message(
-                "" if is_err(composed) else composed.value
-            ):
-                self._quiet(
+            if is_err(composed):
+                await self._quiet(
                     envelope, brief.value, EventDelivery.AMBIENT, "invalid_proactive"
                 )
                 return
-            async with self._lock(envelope.conversation_id):
-                current = self._store.get_state(envelope.conversation_id)
-                if is_err(current):
-                    self._fail(envelope, current.error.message)
-                    return
-                if current.value.epoch != received_epoch:
-                    self._quiet(
-                        envelope, brief.value, EventDelivery.AMBIENT, "epoch_conflict"
-                    )
-                    return
-                episode = self._store.get_open_episode(envelope.conversation_id)
-                if is_err(episode):
-                    self._fail(envelope, episode.error.message)
-                    return
-                entries: tuple[TurnEntry, ...] = (
-                    (
-                        "assistant",
-                        TurnOrigin.PROACTIVE,
-                        composed.value,
-                        envelope.event_id,
-                    ),
+            text = sanitize_untrusted(composed.value)
+            if not validate_proactive_message(text):
+                await self._quiet(
+                    envelope, brief.value, EventDelivery.AMBIENT, "invalid_proactive"
                 )
-                saved = self._store.record_turns(
-                    envelope.conversation_id,
-                    None if episode.value is None else episode.value.episode_id,
-                    entries,
-                    now=now,
-                    title=brief.value.headline[:40],
-                    max_turns=self._settings.episode_max_turns,
-                    gap_minutes=self._settings.episode_gap_minutes,
-                )
-                if is_err(saved):
-                    self._fail(envelope, saved.error.message)
-                    return
-                turn_episode, turns = saved.value
-                updated = self._store.update_event(
-                    envelope.event_id,
-                    status=EventStatus.COMPLETED,
-                    delivery=EventDelivery.PROACTIVE,
-                    merge_reason=decision.reason,
-                    brief=brief.value,
-                    failure_reason="",
-                    surfaced_at=now,
-                    linked_turn_id=f"{turn_episode.episode_id}:{turns[-1].turn_index}",
-                )
-                if is_err(updated):
-                    self._fail(envelope, updated.error.message)
-                    return
-                self._store.record_proactive(envelope.conversation_id, now)
-                self._publish(
-                    TimelineItem(
-                        TimelineKind.TURN,
+                return
+            async with self._locked(envelope.conversation_id):
+                committed = await self._call_store(
+                    lambda: self._store.commit_proactive(
                         envelope.conversation_id,
-                        composed.value,
-                        now,
                         envelope.event_id,
-                        envelope.event_id,
-                        TurnOrigin.PROACTIVE,
-                        DeliveryMode.PUSH,
+                        brief.value,
+                        received_epoch=received_epoch,
+                        text=text,
+                        now=now,
+                        policy=self._settings.proactive_policy,
+                        title=sanitize_single_line(brief.value.headline)[:40],
+                        max_turns=self._settings.episode_max_turns,
+                        gap_minutes=self._settings.episode_gap_minutes,
                     )
                 )
+                if is_err(committed):
+                    await self._fail(envelope, committed.error.message)
+                    return
+                if committed.value.delivery is EventDelivery.PROACTIVE:
+                    self._publish(
+                        TimelineItem(
+                            TimelineKind.TURN,
+                            envelope.conversation_id,
+                            text,
+                            now,
+                            envelope.event_id,
+                            envelope.event_id,
+                            TurnOrigin.PROACTIVE,
+                            DeliveryMode.PUSH,
+                        )
+                    )
         except Exception as exc:
-            self._fail(envelope, f"{type(exc).__name__}: {exc}")
+            await self._fail(envelope, f"{type(exc).__name__}: {exc}")
 
-    def _quiet(
+    async def _quiet(
         self,
         envelope: EventEnvelope,
         brief: EventBrief,
@@ -381,29 +408,36 @@ class CharacterEngine:
                 status = EventStatus.COMPLETED
             case _:
                 assert_never(delivery)
-        self._store.update_event(
-            envelope.event_id,
-            status=status,
-            delivery=delivery,
-            merge_reason=reason,
-            brief=brief,
-            failure_reason="",
-            surfaced_at=None,
-            linked_turn_id=None,
+        updated = await self._call_store(
+            lambda: self._store.update_event(
+                envelope.event_id,
+                status=status,
+                delivery=delivery,
+                merge_reason=reason,
+                brief=brief,
+                failure_reason="",
+                surfaced_at=None,
+                linked_turn_id=None,
+            )
         )
+        if is_err(updated):
+            await self._fail(envelope, updated.error.message)
 
-    def _fail(self, envelope: EventEnvelope, reason: str) -> None:
+    async def _fail(self, envelope: EventEnvelope, reason: str) -> None:
         message = sanitize_single_line(reason)[:500]
-        self._store.update_event(
-            envelope.event_id,
-            status=EventStatus.FAILED,
-            delivery=EventDelivery.PROACTIVE,
-            merge_reason="worker_failed",
-            brief=None,
-            failure_reason=message,
-            surfaced_at=None,
-            linked_turn_id=None,
+        failed = await self._call_store(
+            lambda: self._store.update_event(
+                envelope.event_id,
+                status=EventStatus.FAILED,
+                delivery=EventDelivery.PROACTIVE,
+                merge_reason="worker_failed",
+                brief=None,
+                failure_reason=message,
+                surfaced_at=None,
+                linked_turn_id=None,
+            )
         )
+        del failed
         self._logger.log(
             LogEntry(LogLevel.ERROR, "event_worker_failed", message, "EVENT_FAILED")
         )
@@ -471,16 +505,16 @@ class CharacterEngine:
     async def context_snapshot(
         self, conversation_id: str
     ) -> Result[ContextSnapshot, AppError]:
-        state = self._store.get_state(conversation_id)
+        state = await self._call_store(lambda: self._store.get_state(conversation_id))
         if is_err(state):
             return state
         assembled = await self._context(conversation_id, self._clock())
         if is_err(assembled):
             return assembled
-        counts = self._store.counts(conversation_id)
+        counts = await self._call_store(lambda: self._store.counts(conversation_id))
         if is_err(counts):
             return counts
-        memory = self._store.read_memory()
+        memory = await self._call_store(self._store.read_memory)
         if is_err(memory):
             return memory
         context = assembled.value
@@ -499,6 +533,7 @@ class CharacterEngine:
                     + len(memory.value.relationship)
                     + len(memory.value.arc)
                 ),
+                dynamic_section=context.dynamic_section,
             )
         )
 
@@ -508,9 +543,11 @@ class CharacterEngine:
     async def curate_memory(
         self, conversation_id: str
     ) -> Result[CurateOutcome, AppError]:
-        async with self._lock(conversation_id):
+        async with self._locked(conversation_id):
             summarized = 0
-            episodes = self._store.list_episodes(conversation_id, limit=1)
+            episodes = await self._call_store(
+                lambda: self._store.list_episodes(conversation_id, limit=1)
+            )
             if is_err(episodes):
                 return episodes
             if episodes.value and should_summarize(
@@ -519,41 +556,69 @@ class CharacterEngine:
                 self._settings.summary_every_turns,
             ):
                 episode = episodes.value[0]
-                turns = self._store.list_turns(episode.episode_id, limit=200)
+                turns = await self._call_store(
+                    lambda: self._store.list_turns(episode.episode_id, limit=200)
+                )
                 if is_err(turns):
                     return turns
-                summary = await self._llm.summarize(turns.value, episode.summary)
-                if is_err(summary):
-                    return summary
-                saved = self._store.update_summary(
-                    episode.episode_id,
-                    title=summary.value.title,
-                    overview=summary.value.overview,
-                    summary=summary.value.summary,
-                    summarized_turn_count=episode.turn_count,
+                safe_turns = tuple(
+                    turn
+                    for turn in turns.value
+                    if turn.origin is not TurnOrigin.PROACTIVE
+                    and turn.source_event_id is None
                 )
-                if is_err(saved):
-                    return saved
-                summarized = 1
-            pending = self._store.list_candidates(conversation_id, MemoryStatus.PENDING)
+                if safe_turns:
+                    summary = await self._llm.summarize(safe_turns, episode.summary)
+                    if is_err(summary):
+                        return summary
+                    saved = await self._call_store(
+                        lambda: self._store.update_summary(
+                            episode.episode_id,
+                            title=sanitize_single_line(summary.value.title),
+                            overview=sanitize_single_line(summary.value.overview),
+                            summary=sanitize_untrusted(summary.value.summary),
+                            summarized_turn_count=episode.turn_count,
+                        )
+                    )
+                    if is_err(saved):
+                        return saved
+                    summarized = 1
+            pending = await self._call_store(
+                lambda: self._store.list_candidates(
+                    conversation_id, MemoryStatus.PENDING
+                )
+            )
             if is_err(pending):
                 return pending
-            memory = self._store.read_memory()
-            if is_err(memory):
-                return memory
-            merged, promoted, rejected = merge_candidates(memory.value, pending.value)
+            promoted: list[str] = []
+            rejected: list[str] = []
+
+            def merge(
+                memory: MemoryBlocks,
+            ) -> Result[MemoryBlocks, AppError]:
+                merged, promoted_ids, rejected_ids = merge_candidates(
+                    memory, pending.value
+                )
+                promoted.extend(promoted_ids)
+                rejected.extend(rejected_ids)
+                return Ok(merged)
+
+            written = await self._call_store(lambda: self._store.update_memory(merge))
+            if is_err(written):
+                return written
             if promoted:
-                written = self._store.write_memory(merged)
-                if is_err(written):
-                    return written
-                marked = self._store.set_candidate_status(
-                    promoted, MemoryStatus.PROMOTED
+                marked = await self._call_store(
+                    lambda: self._store.set_candidate_status(
+                        promoted, MemoryStatus.PROMOTED
+                    )
                 )
                 if is_err(marked):
                     return marked
             if rejected:
-                marked = self._store.set_candidate_status(
-                    rejected, MemoryStatus.REJECTED
+                marked = await self._call_store(
+                    lambda: self._store.set_candidate_status(
+                        rejected, MemoryStatus.REJECTED
+                    )
                 )
                 if is_err(marked):
                     return marked
@@ -576,6 +641,7 @@ class CharacterEngine:
         self._tasks.clear()
         self._subscribers.clear()
         self._locks.clear()
+        self._lock_users.clear()
         await self._llm.aclose()
 
 

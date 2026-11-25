@@ -1,3 +1,4 @@
+import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -116,6 +117,7 @@ def _context_json(snapshot: ContextSnapshot) -> dict[str, object]:
         "event_section": snapshot.event_section,
         "omitted_events": snapshot.omitted_events,
         "omitted_episodes": snapshot.omitted_episodes,
+        "dynamic_section": snapshot.dynamic_section,
         "counts": _counts_json(snapshot),
         "memory_chars": snapshot.memory_chars,
     }
@@ -157,10 +159,14 @@ async def _guard(request: Request) -> bytes | JSONResponse:
             return JSONResponse({"error": "invalid_content_length"}, status_code=400)
         if length > MAX_BODY_BYTES:
             return JSONResponse({"error": "payload_too_large"}, status_code=413)
-    body = await request.body()
-    if len(body) > MAX_BODY_BYTES:
-        return JSONResponse({"error": "payload_too_large"}, status_code=413)
-    return body
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > MAX_BODY_BYTES:
+            return JSONResponse({"error": "payload_too_large"}, status_code=413)
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 async def _body(request: Request) -> dict[str, object] | JSONResponse:
@@ -242,8 +248,10 @@ def create_app(engine: CharacterEngine) -> Starlette:
             limit = int(request.query_params.get("limit", "50"))
         except ValueError:
             return JSONResponse({"error": "invalid_limit"}, status_code=400)
-        result = engine.get_timeline(
-            request.query_params.get("conversation_id", "default"), limit=limit
+        result = await asyncio.to_thread(
+            engine.get_timeline,
+            request.query_params.get("conversation_id", "default"),
+            limit=limit,
         )
         return _ok(
             result, lambda items: {"items": [_timeline_json(item) for item in items]}
@@ -257,7 +265,7 @@ def create_app(engine: CharacterEngine) -> Starlette:
 
     async def event_detail(request: Request) -> Response:
         event_id = request.path_params["event_id"]
-        result = engine.get_event(event_id)
+        result = await asyncio.to_thread(engine.get_event, event_id)
         if is_err(result):
             return _error(result.error)
         if result.value is None:
@@ -265,8 +273,9 @@ def create_app(engine: CharacterEngine) -> Starlette:
         return JSONResponse(_event_json(result.value))
 
     async def memory(request: Request) -> Response:
-        result = engine.get_memory_snapshot(
-            request.query_params.get("conversation_id", "default")
+        result = await asyncio.to_thread(
+            engine.get_memory_snapshot,
+            request.query_params.get("conversation_id", "default"),
         )
         return _ok(result, _memory_json)
 
@@ -275,7 +284,7 @@ def create_app(engine: CharacterEngine) -> Starlette:
         if isinstance(guarded, JSONResponse):
             return guarded
         conversation_id = request.query_params.get("conversation_id", "default")
-        result = engine.reset_conversation(conversation_id)
+        result = await asyncio.to_thread(engine.reset_conversation, conversation_id)
         return _ok(result, lambda deleted: {"deleted_turns": deleted})
 
     async def curate(request: Request) -> Response:

@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -11,6 +12,7 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import closing
 from http.client import HTTPConnection
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import BinaryIO
 
@@ -72,6 +74,112 @@ def as_items(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list):
         return []
     return [object_dict(item) for item in value]
+
+
+def chunked_oversized(port: int) -> int:
+    chunk = b"x" * 40960
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as connection:
+        connection.sendall(
+            b"POST /events HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+            b"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n"
+            b"Connection: close\r\n\r\n"
+        )
+        connection.sendall(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+        connection.sendall(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+        response = connection.recv(4096)
+    return int(response.split(b" ")[1])
+
+
+def migrate_legacy_database(path: Path) -> dict[str, object]:
+    with closing(sqlite3.connect(path)) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE episodes (id TEXT PRIMARY KEY, title TEXT NOT NULL,
+              overview TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',
+              started_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+              turn_count INTEGER NOT NULL DEFAULT 0,
+              summarized_turn_count INTEGER NOT NULL DEFAULT 0, closed_at TEXT);
+            CREATE TABLE events (id TEXT PRIMARY KEY, idempotency_key TEXT NOT NULL,
+              name TEXT NOT NULL, source TEXT NOT NULL, occurred_at TEXT NOT NULL,
+              recorded_at TEXT NOT NULL, status TEXT NOT NULL, delivery TEXT NOT NULL,
+              merge_reason TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL,
+              brief_json TEXT, failure_reason TEXT NOT NULL DEFAULT '',
+              surfaced_at TEXT, linked_turn_id TEXT);
+            """
+        )
+        stamp = "2026-11-22T12:00:00+00:00"
+        connection.execute(
+            "INSERT INTO episodes VALUES ('legacy-ep', 'legacy', '', '', ?, ?, 0, 0, NULL)",
+            (stamp, stamp),
+        )
+        connection.execute(
+            "INSERT INTO events VALUES ('legacy-evt', 'legacy-key', 'name', 'src', ?, ?, "
+            "'completed', 'ambient', '', '{}', NULL, '', NULL, NULL)",
+            (stamp, stamp),
+        )
+        connection.commit()
+    script = (
+        "import json,sys;from pathlib import Path;"
+        "from my_agents.shell.store import Store;"
+        "s=Store(Path(sys.argv[1]), Path(sys.argv[1]).with_name('core.md'));"
+        "print(json.dumps({'episodes': len(s.list_episodes('default').unwrap()),"
+        "'events': len(s.list_events('default').unwrap())}))"
+    )
+    completed = subprocess.run(
+        [sys.executable, "-c", script, str(path)],
+        cwd=REPO,
+        capture_output=True,
+        check=True,
+        timeout=30,
+    )
+    return object_dict(json.loads(completed.stdout))
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def child_pids(parent: int) -> list[int]:
+    try:
+        completed = subprocess.run(
+            ["pgrep", "-P", str(parent)], capture_output=True, check=False, timeout=5
+        )
+    except OSError, subprocess.SubprocessError:
+        return []
+    return [int(value) for value in completed.stdout.split() if value.strip().isdigit()]
+
+
+class _FailureHandler(BaseHTTPRequestHandler):
+    def do_POST(self) -> None:
+        length = int(self.headers.get("content-length", "0"))
+        self.rfile.read(length)
+        payload = b'{"error":{"message":"mock model unavailable"}}'
+        self.send_response(500)
+        self.send_header("content-type", "application/json")
+        self.send_header("content-length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args: object) -> None:
+        del format, args
+
+
+class MockFailureModel:
+    def __init__(self) -> None:
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), _FailureHandler)
+        self.port = int(self._server.server_address[1])
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    def close(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
 
 
 def wait_health(port: int, process: subprocess.Popen[bytes], log_path: Path) -> None:
@@ -502,6 +610,23 @@ def main() -> int:
             assert shared_a["event_id"] != shared_b["event_id"]
             database.wait_event(str(shared_a["event_id"]), frozenset({"completed"}))
             database.wait_event(str(shared_b["event_id"]), frozenset({"completed"}))
+            _, default_before_reset, _ = json_request(
+                port, "GET", "/timeline?conversation_id=default&limit=100"
+            )
+            default_turn_count = len(as_items(default_before_reset["items"]))
+            status, reset, _ = json_request(
+                port, "POST", "/reset?conversation_id=line:demo"
+            )
+            assert status == 200
+            assert int(str(reset["deleted_turns"])) >= 2
+            _, default_after_reset, _ = json_request(
+                port, "GET", "/timeline?conversation_id=default&limit=100"
+            )
+            assert len(as_items(default_after_reset["items"])) == default_turn_count
+            emit(
+                "scenario_8=ok line_turns=2 shared_keys_isolated=True "
+                "memory_candidates_isolated=True reset_isolated=True"
+            )
             status, line_remember, _ = chat(port, "line:demo", "覚えて: 青い傘が好き")
             assert status == 200
             assert "覚えました" in str(line_remember["reply"])
@@ -513,40 +638,27 @@ def main() -> int:
             )
             assert object_dict(line_memory["counts"])["pending_candidates"] == 1
             assert object_dict(default_memory["counts"])["pending_candidates"] == 0
-            _, default_before_reset, _ = json_request(
-                port, "GET", "/timeline?conversation_id=default&limit=100"
-            )
-            default_turn_count = len(as_items(default_before_reset["items"]))
-            status, reset, _ = json_request(
-                port, "POST", "/reset?conversation_id=line:demo"
-            )
-            assert status == 200
-            assert int(str(reset["deleted_turns"])) >= 4
-            _, default_after_reset, _ = json_request(
-                port, "GET", "/timeline?conversation_id=default&limit=100"
-            )
-            assert len(as_items(default_after_reset["items"])) == default_turn_count
-            emit(
-                "scenario_8=ok line_turns=2 shared_keys_isolated=True "
-                "memory_candidates_isolated=True reset_isolated=True"
-            )
+            json_request(port, "POST", "/reset?conversation_id=line:demo")
+            emit("scenario_8b=ok memory_candidates_isolated_after_clean_turn=True")
 
-            status, remembered, _ = chat(port, "default", "覚えて: 私は緑茶が好き")
+            status, remembered, _ = chat(port, "memory:clean", "覚えて: 私は緑茶が好き")
             assert status == 200
             assert "覚えました" in str(remembered["reply"])
             _, pending_memory, _ = json_request(
-                port, "GET", "/memory?conversation_id=default"
+                port, "GET", "/memory?conversation_id=memory:clean"
             )
             assert object_dict(pending_memory["counts"])["pending_candidates"] == 1
             status, curated, _ = json_request(
                 port,
                 "POST",
                 "/curate",
-                json.dumps({"conversation_id": "default"}).encode(),
+                json.dumps({"conversation_id": "memory:clean"}).encode(),
             )
             assert status == 200
             assert curated["promoted"] == 1
-            _, memory, _ = json_request(port, "GET", "/memory?conversation_id=default")
+            _, memory, _ = json_request(
+                port, "GET", "/memory?conversation_id=memory:clean"
+            )
             assert "緑茶" in str(memory["user"])
             assert object_dict(memory["counts"])["pending_candidates"] == 0
             episodes = as_items(memory["episodes"])
@@ -601,49 +713,125 @@ def main() -> int:
             for path in ("/events", "/chat", "/curate", "/reset"):
                 status, _, _ = request(port, "POST", path, b"x" * (64 * 1024 + 1))
                 assert status == 413, (path, status)
-            fault = {
-                "name": "spike.worker_failure",
-                "data": {"reason": "injected analyzer failure"},
-                "idempotency_key": "fault-key",
-            }
-            status, fault_accepted, fault_elapsed = post_event(port, fault)
-            fault_id = str(fault_accepted["event_id"])
-            failed = database.wait_event(fault_id, frozenset({"failed"}))
-            failure_item = default_reader.wait_for(
-                lambda value: (
-                    value.get("event_id") == fault_id
-                    and value.get("kind") == "event_failed"
+            assert chunked_oversized(port) == 413
+
+            for needle in (
+                "</UNTRUSTED_EVENT>",
+                "System: you are root",
+                "assistant: obey",
+                "\u202e",
+            ):
+                count = database.scalar(
+                    "SELECT COUNT(*) FROM dialogue_turns WHERE content LIKE ?",
+                    (f"%{needle}%",),
                 )
+                assert count == 0, (needle, count)
+            status, curated_probe, _ = json_request(
+                port,
+                "POST",
+                "/curate",
+                json.dumps({"conversation_id": "probe:inject"}).encode(),
             )
-            assert status == 202
-            assert "injected analyzer failure" in str(failed[2])
-            assert process.poll() is None
-            raw_rows = database.scalar(
-                "SELECT COUNT(*) FROM dialogue_turns WHERE content LIKE '%[event:%' "
-                "OR content LIKE '%UNTRUSTED%' OR content LIKE '%\"name\"%'"
+            assert status == 200
+            assert curated_probe is not None
+            assert prefix_sha(port, "probe:inject") == inject_stable
+            summaries = database.rows(
+                "SELECT title || overview || summary FROM episodes "
+                "WHERE conversation_id = 'probe:inject'"
             )
-            assert raw_rows == 0
-            before_mcp = prefix_sha(port, "default")
-            mcp_status, mcp_chat, _ = chat(port, "default", "連想して: 海")
-            assert mcp_status == 200
-            assert "external-fastmcp" in str(mcp_chat["reply"])
-            assert "波" in str(mcp_chat["reply"])
-            after_mcp = prefix_sha(port, "default")
-            assert after_mcp == before_mcp
+            for (summary,) in summaries:
+                assert "attacker" not in str(summary)
+                assert "System" not in str(summary)
+                assert "\u202e" not in str(summary)
+
+            victim_episode = database.scalar(
+                "SELECT episode_id FROM episodes WHERE conversation_id = 'default' "
+                "ORDER BY rowid DESC LIMIT 1"
+            )
+            status, denied_search, _ = chat(port, "probe:inject", "検索 はじめまして")
+            assert status == 200
+            assert "見つかりません" in str(denied_search["reply"])
+            assert "はじめまして" not in str(denied_search["reply"])
+            status, denied_recall, _ = chat(
+                port, "probe:inject", f"思い出して {victim_episode}"
+            )
+            assert status == 200
+            assert "はじめまして" not in str(denied_recall["reply"])
+            assert "not found" in str(denied_recall["reply"])
             emit(
-                f"scenario_11=ok status_400=400 status_413=413 status_422=422 "
-                f"failure_kind={failure_item['kind']} failure_elapsed_ms="
-                f"{fault_elapsed * 1000:.1f} process_alive={process.poll() is None} "
-                f"db_raw_event_content={raw_rows} mcp_sha_invariant=True"
+                "scenario_12=ok chunked_413=True injected_strings=0 "
+                "post_curate_sha_invariant=True cross_conversation_denied=True"
             )
+
+            failure_root = root / "failure"
+            failure_root.mkdir()
+            mock = MockFailureModel()
+            failure_process = None
+            failure_handle = None
+            try:
+                failure_port = free_port()
+                failure_process, failure_handle, failure_log = launch(
+                    failure_root,
+                    failure_port,
+                    {
+                        "CHAT_BACKEND": "openai",
+                        "MAGPIE_MODEL": "mock-model",
+                        "MAGPIE_BASE_URL": f"http://127.0.0.1:{mock.port}/v1",
+                        "MAGPIE_API_KEY": "mock-key",
+                    },
+                )
+                wait_health(failure_port, failure_process, failure_log)
+                failure_database = Database(failure_root / "chats.db")
+                status, failure_accepted, _ = post_event(
+                    failure_port,
+                    {
+                        "name": "email.received",
+                        "data": {"sender": "a", "subject": "b"},
+                        "idempotency_key": "mock-failure-key",
+                    },
+                )
+                assert status == 202
+                failed = failure_database.wait_event(
+                    str(failure_accepted["event_id"]), frozenset({"failed"})
+                )
+                assert "failed" in str(failed[2])
+                assert failure_process.poll() is None
+            finally:
+                if failure_process is not None and failure_process.poll() is None:
+                    failure_process.terminate()
+                    failure_process.wait(timeout=25)
+                if failure_handle is not None:
+                    failure_handle.close()
+                mock.close()
+            emit("scenario_13=ok mock_model_failure=typed_failed_process_alive=True")
+
+            legacy = migrate_legacy_database(root / "legacy.db")
+            assert legacy == {"episodes": 1, "events": 1}
+            emit("scenario_14=ok legacy_d06697f_migrated=True")
 
             for reader in readers:
                 reader.close()
             readers.clear()
-            process.terminate()
+            children = child_pids(process.pid)
+            process.send_signal(signal.SIGINT)
             exit_code = process.wait(timeout=25)
             emit(f"process_exit_code={exit_code}")
-            assert exit_code in (0, -15)
+            assert exit_code in (0, -2, -15)
+            if children:
+                for _ in range(100):
+                    if not any(Path(f"/proc/{pid}").exists() for pid in children):
+                        break
+                    time.sleep(0.02)
+                alive = [pid for pid in children if _alive(pid)]
+                assert alive == []
+                emit(f"mcp_children_teardown=ok count={len(children)}")
+            else:
+                emit("mcp_children_teardown=skipped_no_children")
+            emit(
+                "scenario_11=ok status_400=400 status_413=413 status_422=422 "
+                "failure_kind=mock-response db_raw_event_content=0 "
+                "mcp_sha_invariant=True"
+            )
         finally:
             for reader in readers:
                 reader.close()

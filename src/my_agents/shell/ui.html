@@ -328,7 +328,9 @@
     conversationId: "default",
     source: null,
     lastReply: "",
-    streaming: false
+    streaming: false,
+    convGen: 0,
+    abort: null
   };
 
   const byId = (id) => document.getElementById(id);
@@ -438,16 +440,26 @@
   };
 
   const refreshTimeline = async () => {
-    const query = "?conversation_id=" + encodeURIComponent(state.conversationId) + "&limit=60";
-    const payload = await fetchJson("/timeline" + query);
+    const generation = state.convGen;
+    const conversationId = state.conversationId;
+    const query = "?conversation_id=" + encodeURIComponent(conversationId) + "&limit=60";
+    const payload = await fetchJson("/timeline" + query, {
+      signal: state.abort ? state.abort.signal : undefined
+    });
+    if (generation !== state.convGen || conversationId !== state.conversationId) return;
     const items = Array.isArray(payload.items) ? payload.items : [];
     renderTimeline(items);
     renderEvents(items);
   };
 
   const refreshMemory = async () => {
-    const query = "?conversation_id=" + encodeURIComponent(state.conversationId);
-    const payload = await fetchJson("/memory" + query);
+    const generation = state.convGen;
+    const conversationId = state.conversationId;
+    const query = "?conversation_id=" + encodeURIComponent(conversationId);
+    const payload = await fetchJson("/memory" + query, {
+      signal: state.abort ? state.abort.signal : undefined
+    });
+    if (generation !== state.convGen || conversationId !== state.conversationId) return;
     byId("memory-kv").replaceChildren();
     const pairs = [
       ["chars", String(payload.chars ?? 0)],
@@ -476,8 +488,13 @@
   };
 
   const refreshContext = async () => {
-    const query = "?conversation_id=" + encodeURIComponent(state.conversationId);
-    const payload = await fetchJson("/context" + query);
+    const generation = state.convGen;
+    const conversationId = state.conversationId;
+    const query = "?conversation_id=" + encodeURIComponent(conversationId);
+    const payload = await fetchJson("/context" + query, {
+      signal: state.abort ? state.abort.signal : undefined
+    });
+    if (generation !== state.convGen || conversationId !== state.conversationId) return;
     byId("context-kv").replaceChildren();
     const pairs = [
       ["epoch", String(payload.epoch ?? 0)],
@@ -522,6 +539,7 @@
         return;
       }
       if (!item) return;
+      if (item.conversation_id && String(item.conversation_id) !== state.conversationId) return;
       const kind = String(item.kind || "");
       if (kind === "turn" && item.delivery === "push") {
         appendBubble("assistant", String(item.content || ""), "proactive");
@@ -542,6 +560,9 @@
   const switchConversation = async (conversationId) => {
     const value = String(conversationId || "").trim();
     if (!value) return;
+    const generation = ++state.convGen;
+    if (state.abort) state.abort.abort();
+    state.abort = new AbortController();
     state.conversationId = value;
     state.lastReply = "";
     byId("conversation-label").textContent = value;
@@ -554,8 +575,10 @@
     try {
       await refreshTimeline();
       await refreshInspector();
+      if (generation !== state.convGen) return;
       setStatus("live", true);
     } catch (error) {
+      if (generation !== state.convGen) return;
       appendSystem("load failed: " + error.message, true);
     }
   };

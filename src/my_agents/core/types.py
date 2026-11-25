@@ -1,12 +1,13 @@
 __all__ = ["SecretStr"]
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
 from typing import Literal, assert_never
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
 
 
 class AppErrorKind(StrEnum):
@@ -187,6 +188,21 @@ class EventEnvelope:
     data: Mapping[str, object]
 
 
+def redact_secrets(text: str, secrets: tuple[str, ...]) -> str:
+    redacted = text
+    for secret in secrets:
+        if secret:
+            redacted = redacted.replace(secret, "***")
+    return re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1***@", redacted)
+
+
+def _clean(value: str) -> str:
+    # Local import keeps core.types loadable before core.events without a cycle.
+    from my_agents.core.events import sanitize_single_line
+
+    return sanitize_single_line(value)
+
+
 class EventBrief(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -210,6 +226,16 @@ class EventBrief(BaseModel):
     dedupe_key: str = Field(
         min_length=1, max_length=120, description="Stable key for duplicate suppression"
     )
+
+    @field_validator("headline", "impact", "suggested_angle", "dedupe_key")
+    @classmethod
+    def _clean_text(cls, value: str) -> str:
+        return _clean(value)
+
+    @field_validator("facts")
+    @classmethod
+    def _clean_facts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(_clean(item) for item in value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,6 +310,7 @@ class AssembledContext:
     instructions: str
     omitted_events: int
     omitted_episodes: int
+    dynamic_section: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -307,6 +334,7 @@ class ContextSnapshot:
     omitted_episodes: int
     counts: ConversationCounts
     memory_chars: int
+    dynamic_section: str = ""
 
 
 @dataclass(frozen=True, slots=True)

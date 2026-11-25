@@ -4,7 +4,6 @@ from my_agents.core.context import (
     _event_line,
     assemble_context,
     build_proactive_prompt,
-    render_event_section,
     stable_prefix_sha256,
 )
 from my_agents.core.types import (
@@ -90,9 +89,11 @@ def test_assemble_context_empty_memory_has_stable_sections() -> None:
     context = assemble_context(DEFAULT_PERSONA, MemoryBlocks(), (), (), now=_NOW)
     assert "# Sora" in context.stable_prefix
     assert "## Core Memory\n\n(empty)" in context.stable_prefix
-    assert "## 今日\n\n2026-11-22" in context.stable_prefix
+    assert "## 今日\n\n2026-11-22" in context.dynamic_section
+    assert "## 今日" not in context.stable_prefix
     assert context.event_section == ""
-    assert context.instructions == context.stable_prefix
+    assert context.instructions.startswith(context.stable_prefix)
+    assert context.dynamic_section in context.instructions
     assert (context.omitted_events, context.omitted_episodes) == (0, 0)
 
 
@@ -169,15 +170,24 @@ def test_event_section_covers_budget_omission_and_briefless_failure() -> None:
         _event("evt_1", EventDelivery.AMBIENT, brief=_brief()),
         _event("evt_2", EventDelivery.AMBIENT, brief=None, failure="失敗"),
     )
-    assert render_event_section(events, char_budget=0) == ""
-    tiny = render_event_section(events, char_budget=10)
-    assert tiny == ""
-    full = render_event_section(events, char_budget=5000)
+
+    def section(char_budget: int) -> str:
+        return assemble_context(
+            DEFAULT_PERSONA,
+            MemoryBlocks(),
+            (),
+            events,
+            now=_NOW,
+            event_budget=char_budget,
+        ).event_section
+
+    assert section(0) == ""
+    assert section(10) == ""
+    full = section(5000)
     assert "失敗" in full
     assert "事実3" in full
     assert "事実4" not in full
-    partial = render_event_section(events, char_budget=130)
-    assert "件のイベントを省略" in partial
+    assert "件のイベントを省略" in section(130)
 
 
 def test_event_section_limits_to_three_recent_events() -> None:
@@ -189,16 +199,18 @@ def test_event_section_limits_to_three_recent_events() -> None:
         )
         for index in range(4)
     )
-    rendered = render_event_section(events, char_budget=5000)
+    rendered = assemble_context(
+        DEFAULT_PERSONA, MemoryBlocks(), (), events, now=_NOW, event_budget=5000
+    ).event_section
     assert "evt_3" in rendered
     assert "evt_0" not in rendered
 
 
 def test_build_proactive_prompt_is_natural_and_brief_only() -> None:
-    prompt = build_proactive_prompt(_brief("暑さ"))
+    prompt = build_proactive_prompt(_brief("暑さ"), "nonce")
     assert "暑さ" in prompt
     assert "1〜2 文" in prompt
-    assert "{" not in prompt
+    assert '<<UNTRUSTED_EVENT nonce="nonce">>' in prompt
     assert "evt_" not in prompt
     assert isinstance(DEFAULT_PERSONA, object)
     assert TurnOrigin.PROACTIVE.value == "proactive"
