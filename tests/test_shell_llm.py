@@ -10,6 +10,9 @@ from pydantic_ai.messages import (
     ModelResponse,
     SystemPromptPart,
     TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    UserPromptPart,
 )
 from pydantic_ai.models.function import AgentInfo, FunctionModel
 
@@ -31,8 +34,10 @@ from my_agents.shell.llm import (
     ChatToolbox,
     Llm,
     _event_name,
+    _last_tool_return,
     _last_user,
     _local_brief,
+    _local_external_tool,
 )
 from my_agents.shell.logger import NOOP_LOGGER
 from my_agents.shell.settings import load_settings
@@ -343,3 +348,55 @@ async def test_external_toolsets_are_accepted(tmp_path: Path) -> None:
     )
     reply = await llm.chat("c", "hi", (), _context())
     assert reply.unwrap().text == "ok"
+
+
+def test_local_external_tool_routing_and_tool_returns() -> None:
+    returned = ToolReturnPart("diverge_associations", {"provider": "external-fastmcp"})
+    assert _last_tool_return([ModelRequest([returned])]) == returned
+    assert _last_tool_return([ModelResponse([TextPart("x")])]) is None
+    divergence = _local_external_tool("", {"diverge_associations"}, returned)
+    assert isinstance(divergence, ModelResponse)
+    divergence_part = divergence.parts[0]
+    assert isinstance(divergence_part, TextPart)
+    assert "external-fastmcp" in divergence_part.content
+    remembered = _local_external_tool(
+        "", {"remember"}, ToolReturnPart("remember", "ok")
+    )
+    assert isinstance(remembered, ModelResponse)
+    remembered_part = remembered.parts[0]
+    assert isinstance(remembered_part, TextPart)
+    assert remembered_part.content == "覚えました。"
+    assert _local_external_tool("hello", set(), None) is None
+    assert _local_external_tool("hello", set(), ToolReturnPart("other", "x")) is None
+    call = _local_external_tool("連想して: 海", {"diverge_associations"}, None)
+    assert isinstance(call, ModelResponse)
+    part = call.parts[0]
+    assert isinstance(part, ToolCallPart)
+    assert part.args == {"seed": "海", "context": "", "limit": 3}
+    bare = _local_external_tool("連想", {"diverge_associations"}, None)
+    assert isinstance(bare, ModelResponse)
+    bare_part = bare.parts[0]
+    assert isinstance(bare_part, ToolCallPart)
+    assert bare_part.args == {"seed": "連想", "context": "", "limit": 3}
+    remember = _local_external_tool("覚えて: 緑茶", {"remember"}, None)
+    assert isinstance(remember, ModelResponse)
+    remember_part = remember.parts[0]
+    assert isinstance(remember_part, ToolCallPart)
+    assert remember_part.args == {
+        "block": "user",
+        "content": "緑茶",
+        "reason": "user asked",
+    }
+    bare_remember = _local_external_tool("覚えて", {"remember"}, None)
+    assert isinstance(bare_remember, ModelResponse)
+    bare_remember_part = bare_remember.parts[0]
+    assert isinstance(bare_remember_part, ToolCallPart)
+    assert bare_remember_part.args == {
+        "block": "user",
+        "content": "覚えて",
+        "reason": "user asked",
+    }
+    assert (
+        _last_user([ModelRequest([ToolReturnPart("x", "y"), UserPromptPart("u")])])
+        == "u"
+    )

@@ -284,3 +284,34 @@ class AssembledContext:
     instructions: str
     omitted_events: int
     omitted_episodes: int
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationCounts:
+    turns: int = 0
+    episodes: int = 0
+    events: int = 0
+    pending_candidates: int = 0
+    promoted_candidates: int = 0
+    rejected_candidates: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class ContextSnapshot:
+    conversation_id: str
+    epoch: int
+    stable_prefix: str
+    stable_prefix_sha256: str
+    event_section: str
+    omitted_events: int
+    omitted_episodes: int
+    counts: ConversationCounts
+    memory_chars: int
+
+
+@dataclass(frozen=True, slots=True)
+class MemorySnapshot:
+    conversation_id: str
+    blocks: MemoryBlocks
+    counts: ConversationCounts
+    episodes: tuple[Episode, ...] = ()

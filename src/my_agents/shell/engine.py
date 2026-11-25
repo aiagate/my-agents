@@ -8,7 +8,11 @@ from uuid import uuid4
 
 from flow_res import Err, Ok, Result, is_err
 
-from my_agents.core.context import AssembledContext, assemble_context
+from my_agents.core.context import (
+    AssembledContext,
+    assemble_context,
+    stable_prefix_sha256,
+)
 from my_agents.core.events import (
     decide_merge,
     sanitize_single_line,
@@ -20,6 +24,7 @@ from my_agents.core.types import (
     AppError,
     AppErrorKind,
     CharacterPersona,
+    ContextSnapshot,
     DeliveryMode,
     DialogueTurn,
     EventBrief,
@@ -29,6 +34,7 @@ from my_agents.core.types import (
     EventRecord,
     EventStatus,
     MemoryBlocks,
+    MemorySnapshot,
     MemoryStatus,
     TimelineItem,
     TimelineKind,
@@ -42,6 +48,10 @@ from my_agents.shell.store import Store, TurnEntry
 
 
 class EngineLlm(Protocol):
+    async def start(self) -> None: ...
+
+    async def aclose(self) -> None: ...
+
     async def chat(
         self,
         conversation_id: str,
@@ -93,6 +103,9 @@ class CharacterEngine:
 
     def _lock(self, conversation_id: str) -> asyncio.Lock:
         return self._locks.setdefault(conversation_id, asyncio.Lock())
+
+    async def start(self) -> None:
+        await self._llm.start()
 
     def _publish(self, item: TimelineItem) -> None:
         for queue in self._subscribers.get(item.conversation_id, set()):
@@ -251,12 +264,14 @@ class CharacterEngine:
             return Ok(
                 EventReceipt(inserted.value.event_id, True, inserted.value.status)
             )
-        task = asyncio.create_task(self._process_event(envelope))
+        task = asyncio.create_task(self._process_event(envelope, ensured.value.epoch))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
         return Ok(EventReceipt(envelope.event_id, False, EventStatus.RECEIVED))
 
-    async def _process_event(self, envelope: EventEnvelope) -> None:
+    async def _process_event(
+        self, envelope: EventEnvelope, received_epoch: int
+    ) -> None:
         try:
             delay = self._settings.event_analysis_delay_ms / 1000
             if delay > 0:
@@ -293,7 +308,7 @@ class CharacterEngine:
                 if is_err(current):
                     self._fail(envelope, current.error.message)
                     return
-                if current.value.epoch != state.value.epoch:
+                if current.value.epoch != received_epoch:
                     self._quiet(
                         envelope, brief.value, EventDelivery.AMBIENT, "epoch_conflict"
                     )
@@ -437,6 +452,56 @@ class CharacterEngine:
     def get_memory(self) -> Result[MemoryBlocks, AppError]:
         return self._store.read_memory()
 
+    def get_memory_snapshot(
+        self, conversation_id: str
+    ) -> Result[MemorySnapshot, AppError]:
+        memory = self._store.read_memory()
+        if is_err(memory):
+            return memory
+        counts = self._store.counts(conversation_id)
+        if is_err(counts):
+            return counts
+        episodes = self._store.list_episodes(conversation_id, limit=10)
+        if is_err(episodes):
+            return episodes
+        return Ok(
+            MemorySnapshot(conversation_id, memory.value, counts.value, episodes.value)
+        )
+
+    async def context_snapshot(
+        self, conversation_id: str
+    ) -> Result[ContextSnapshot, AppError]:
+        state = self._store.get_state(conversation_id)
+        if is_err(state):
+            return state
+        assembled = await self._context(conversation_id, self._clock())
+        if is_err(assembled):
+            return assembled
+        counts = self._store.counts(conversation_id)
+        if is_err(counts):
+            return counts
+        memory = self._store.read_memory()
+        if is_err(memory):
+            return memory
+        context = assembled.value
+        return Ok(
+            ContextSnapshot(
+                conversation_id=conversation_id,
+                epoch=state.value.epoch,
+                stable_prefix=context.stable_prefix,
+                stable_prefix_sha256=stable_prefix_sha256(context.stable_prefix),
+                event_section=context.event_section,
+                omitted_events=context.omitted_events,
+                omitted_episodes=context.omitted_episodes,
+                counts=counts.value,
+                memory_chars=(
+                    len(memory.value.user)
+                    + len(memory.value.relationship)
+                    + len(memory.value.arc)
+                ),
+            )
+        )
+
     def reset_conversation(self, conversation_id: str) -> Result[int, AppError]:
         return self._store.reset_conversation(conversation_id)
 
@@ -511,6 +576,7 @@ class CharacterEngine:
         self._tasks.clear()
         self._subscribers.clear()
         self._locks.clear()
+        await self._llm.aclose()
 
 
 def _turn_delivery(origin: TurnOrigin) -> DeliveryMode:

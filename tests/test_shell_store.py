@@ -5,6 +5,7 @@ from pathlib import Path
 
 from my_agents.core.types import (
     AppErrorKind,
+    ConversationCounts,
     EventBrief,
     EventDelivery,
     EventRecord,
@@ -45,10 +46,11 @@ def _event(
     key: str = "key",
     status: EventStatus = EventStatus.RECEIVED,
     delivery: EventDelivery = EventDelivery.SILENT,
+    conversation_id: str = "c",
 ) -> EventRecord:
     return EventRecord(
         event_id,
-        "c",
+        conversation_id,
         key,
         "name",
         "source",
@@ -366,3 +368,53 @@ def test_search_episodes_spans_conversations_and_honours_limit(
     assert store.search_episodes("topic", limit=1).unwrap()[0].title == "beta topic"
     assert store.search_episodes("topic", limit=0).unwrap() == ()
     assert store.search_episodes("missing").unwrap() == ()
+
+
+def test_idempotency_is_scoped_to_one_conversation(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    assert store.insert_event(_event("evt_a", "shared")).unwrap().event_id == "evt_a"
+    assert store.insert_event(_event("evt_b", "shared")).unwrap().event_id == "evt_a"
+    assert (
+        store.insert_event(_event("evt_c", "shared", conversation_id="other"))
+        .unwrap()
+        .event_id
+        == "evt_c"
+    )
+
+
+def test_counts_cover_turns_episodes_events_and_candidates(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    assert store.counts("c").unwrap() == ConversationCounts()
+    store.record_turns(
+        "c",
+        None,
+        _turns(),
+        now=_NOW,
+        title="topic",
+        max_turns=10,
+        gap_minutes=60,
+    ).unwrap()
+    store.insert_event(_event())
+    for candidate_id, status in (
+        ("p", MemoryStatus.PENDING),
+        ("q", MemoryStatus.PROMOTED),
+        ("r", MemoryStatus.REJECTED),
+    ):
+        store.save_candidate(
+            MemoryCandidate(
+                candidate_id,
+                "c",
+                MemoryBlock.USER,
+                "x",
+                "r",
+                _NOW,
+                status,
+            )
+        ).unwrap()
+    counts = store.counts("c").unwrap()
+    assert (counts.turns, counts.episodes, counts.events) == (2, 1, 1)
+    assert (
+        counts.pending_candidates,
+        counts.promoted_candidates,
+        counts.rejected_candidates,
+    ) == (1, 1, 1)

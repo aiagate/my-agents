@@ -1,7 +1,9 @@
+import hashlib
 from collections.abc import Sequence
 from datetime import datetime
 from typing import assert_never
 
+from my_agents.core.events import sanitize_single_line
 from my_agents.core.memory import format_prompt_date
 from my_agents.core.types import (
     AssembledContext,
@@ -41,7 +43,9 @@ def _memory_section(memory: MemoryBlocks) -> str:
 
 
 def _episode_index(episodes: Sequence[Episode], budget: int) -> tuple[str, int]:
-    ordered = sorted(episodes, key=lambda item: item.episode_id)
+    # L2 は curate 済みの要約だけを載せ、会話の進行だけでキャッシュ prefix を動かさない。
+    summarized = [episode for episode in episodes if episode.summary]
+    ordered = sorted(summarized, key=lambda item: item.episode_id)
     ordered = sorted(
         ordered, key=lambda item: format_prompt_date(item.updated_at), reverse=True
     )
@@ -129,13 +133,16 @@ def _event_line(event: EventRecord) -> str:
             label = "silent"
         case _:
             assert_never(event.delivery)
-    lines = [f"- [event:{event.event_id}] {label} {event.name} at {stamp}"]
+    name = sanitize_single_line(event.name)
+    lines = [f"- [event:{event.event_id}] {label} {name} at {stamp}"]
     if event.brief is not None:
-        lines.append(f"  {event.brief.headline}")
-        lines.extend(f"  - {fact}" for fact in event.brief.facts[:3])
-        lines.append(f"  意味: {event.brief.impact}")
+        lines.append(f"  {sanitize_single_line(event.brief.headline)}")
+        lines.extend(
+            f"  - {sanitize_single_line(fact)}" for fact in event.brief.facts[:3]
+        )
+        lines.append(f"  意味: {sanitize_single_line(event.brief.impact)}")
     if event.failure_reason:
-        lines.append(f"  失敗: {event.failure_reason}")
+        lines.append(f"  失敗: {sanitize_single_line(event.failure_reason)}")
     return "\n".join(lines)
 
 
@@ -178,6 +185,10 @@ def render_event_section(
     events: Sequence[EventRecord], *, char_budget: int = DEFAULT_EVENT_BUDGET
 ) -> str:
     return _render(events, char_budget)[0]
+
+
+def stable_prefix_sha256(stable_prefix: str) -> str:
+    return hashlib.sha256(stable_prefix.encode("utf-8")).hexdigest()
 
 
 def build_proactive_prompt(brief: EventBrief) -> str:

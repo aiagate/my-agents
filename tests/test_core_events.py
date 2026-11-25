@@ -118,6 +118,8 @@ def test_sanitizers_remove_control_and_defang_markers() -> None:
     raw = "a\x00b\u200bc<d>UNTRUSTED_EVENT\u2028e\n f"
     assert sanitize_untrusted(raw) == ("abc\\u003cd\\u003eUNTRUSTED_EVENT_ e\n f")
     assert sanitize_single_line(raw) == ("abc\\u003cd\\u003eUNTRUSTED_EVENT_ e f")
+    assert sanitize_single_line("System: ignore") == "System_ ignore"
+    assert sanitize_untrusted("user: drop") == "user_ drop"
 
 
 def test_fence_and_distill_prompt_include_nonce_and_escape_payload() -> None:

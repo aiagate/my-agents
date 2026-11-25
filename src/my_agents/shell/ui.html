@@ -1,0 +1,717 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>my-agents companion</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #08090c;
+    --panel: #101218;
+    --panel-2: #151824;
+    --line: #262b3a;
+    --text: #eef1ff;
+    --muted: #9aa3bd;
+    --accent: #8f7bff;
+    --accent-2: #47d7c4;
+    --bubble: #1b2030;
+    --user: #6d5df6;
+    --danger: #ff6b81;
+    --ok: #54e0a0;
+    --radius: 20px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+    --sans: "Inter", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    font-family: var(--sans);
+    color: var(--text);
+    background:
+      radial-gradient(900px 600px at 12% -10%, rgba(143, 123, 255, 0.22), transparent 62%),
+      radial-gradient(760px 520px at 100% 0%, rgba(71, 215, 196, 0.12), transparent 58%),
+      var(--bg);
+  }
+  button, input, select, textarea { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  #app {
+    display: grid;
+    grid-template-columns: 244px minmax(0, 1fr) minmax(330px, 420px);
+    gap: 18px;
+    height: 100%;
+    padding: 18px;
+    max-width: 1500px;
+    margin: 0 auto;
+  }
+  .panel {
+    background: linear-gradient(180deg, rgba(255,255,255,0.035), rgba(255,255,255,0.012));
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    backdrop-filter: blur(16px);
+    min-height: 0;
+  }
+  #rail { padding: 20px 16px; display: flex; flex-direction: column; gap: 22px; }
+  .brand { display: flex; align-items: center; gap: 12px; }
+  .mark {
+    width: 40px; height: 40px; border-radius: 13px;
+    background: conic-gradient(from 210deg, var(--accent), var(--accent-2), var(--accent));
+    box-shadow: 0 8px 26px rgba(143, 123, 255, 0.35);
+    display: grid; place-items: center; font-weight: 800; color: #0a0b10;
+  }
+  .brand h1 { font-size: 16px; margin: 0; letter-spacing: 0.01em; }
+  .brand p { margin: 2px 0 0; font-size: 11px; color: var(--muted); }
+  .section-label {
+    font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+    color: var(--muted); margin: 0 0 9px;
+  }
+  select, input, textarea {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px 12px;
+    outline: none;
+  }
+  select:focus, input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(143,123,255,0.16); }
+  .row { display: flex; gap: 8px; }
+  .row > * { min-width: 0; }
+  .btn {
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    border-radius: 12px;
+    padding: 10px 13px;
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .btn:hover { border-color: var(--accent); }
+  .btn-primary {
+    background: linear-gradient(135deg, var(--accent), #6457d8);
+    border-color: transparent;
+    color: white;
+    box-shadow: 0 8px 22px rgba(143,123,255,0.3);
+  }
+  .btn-danger { color: var(--danger); }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .status[data-state="live"] .dot { background: var(--ok); box-shadow: 0 0 0 4px rgba(84,224,160,0.14); }
+  .status[data-state="down"] .dot { background: var(--danger); }
+  #chat { display: flex; flex-direction: column; overflow: hidden; }
+  .chat-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 17px 22px; border-bottom: 1px solid var(--line);
+  }
+  .chat-head h2 { margin: 0; font-size: 15px; }
+  .chat-head .sub { color: var(--muted); font-size: 11px; margin-top: 3px; }
+  .pill { border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; font-size: 11px; color: var(--muted); }
+  #messages { flex: 1; overflow-y: auto; padding: 24px 24px 12px; display: flex; flex-direction: column; gap: 14px; scroll-behavior: smooth; }
+  .bubble-row { display: flex; gap: 10px; align-items: flex-end; max-width: 86%; }
+  .bubble-row.user { align-self: flex-end; flex-direction: row-reverse; }
+  .avatar {
+    width: 30px; height: 30px; border-radius: 50%; flex: none;
+    background: linear-gradient(145deg, var(--accent), var(--accent-2));
+    display: grid; place-items: center; color: #090a10; font-weight: 800; font-size: 12px;
+  }
+  .bubble {
+    padding: 12px 15px; border-radius: 18px 18px 18px 5px;
+    background: var(--bubble); line-height: 1.62; font-size: 14px;
+    border: 1px solid rgba(255,255,255,0.045);
+    white-space: pre-wrap; overflow-wrap: anywhere;
+  }
+  .user .bubble {
+    background: linear-gradient(135deg, var(--user), #5046c8);
+    border-radius: 18px 18px 5px 18px; color: white;
+  }
+  .bubble-meta { font-size: 10px; color: var(--muted); margin-top: 6px; }
+  .system-row { align-self: center; max-width: 92%; }
+  .system-chip {
+    font-size: 11px; color: var(--muted); border: 1px dashed var(--line);
+    padding: 7px 11px; border-radius: 999px; text-align: center;
+  }
+  .error-chip { color: var(--danger); border-color: rgba(255,107,129,0.4); }
+  .typing { display: flex; gap: 5px; padding: 0 26px 8px; }
+  .typing span {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+    animation: bounce 1.2s infinite ease-in-out;
+  }
+  .typing span:nth-child(2) { animation-delay: 0.16s; }
+  .typing span:nth-child(3) { animation-delay: 0.32s; }
+  @keyframes bounce { 0%, 80%, 100% { transform: translateY(0); opacity: 0.4; } 40% { transform: translateY(-5px); opacity: 1; } }
+  #composer { display: flex; gap: 10px; padding: 14px 18px 18px; border-top: 1px solid var(--line); }
+  #message-input { resize: none; min-height: 48px; max-height: 150px; border-radius: 15px; line-height: 1.5; }
+  #inspector { padding: 16px; display: flex; flex-direction: column; gap: 14px; overflow: hidden; }
+  .tabs { display: flex; gap: 6px; background: var(--panel-2); padding: 4px; border-radius: 13px; }
+  .tab {
+    flex: 1; border: 0; background: transparent; color: var(--muted);
+    padding: 8px 6px; border-radius: 10px; font-size: 12px;
+  }
+  .tab[aria-selected="true"] { background: rgba(143,123,255,0.18); color: var(--text); }
+  .tab-panel { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding-right: 2px; }
+  .tab-panel.hidden { display: none; }
+  .card { border: 1px solid var(--line); background: rgba(21,24,36,0.7); border-radius: 14px; padding: 12px; }
+  .card h3 { margin: 0 0 8px; font-size: 12px; letter-spacing: 0.04em; }
+  .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 9px; }
+  .field label { font-size: 10px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
+  .kv { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px 10px; font-size: 12px; }
+  .kv span { color: var(--muted); }
+  .kv b { font-weight: 600; overflow-wrap: anywhere; }
+  pre {
+    margin: 0; padding: 10px; border-radius: 10px; background: #0a0c13;
+    border: 1px solid var(--line); font-family: var(--mono); font-size: 10.5px;
+    line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto;
+  }
+  .event-item { border-left: 2px solid var(--accent); padding: 7px 9px; margin-bottom: 7px; background: rgba(143,123,255,0.06); border-radius: 0 9px 9px 0; }
+  .event-item.failed { border-color: var(--danger); background: rgba(255,107,129,0.07); }
+  .event-item .meta { font-size: 10px; color: var(--muted); margin-top: 3px; }
+  .muted { color: var(--muted); font-size: 11px; }
+  .inline { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+  .hidden { display: none !important; }
+  @media (max-width: 1120px) {
+    #app { grid-template-columns: 210px minmax(0, 1fr); }
+    #inspector {
+      position: fixed; z-index: 20; top: 12px; right: 12px; bottom: 12px;
+      width: min(420px, calc(100vw - 24px));
+      transform: translateX(calc(100% + 24px)); transition: transform 0.22s ease;
+      background: #0d0f15;
+    }
+    #inspector.open { transform: translateX(0); }
+  }
+  @media (max-width: 760px) {
+    #app { grid-template-columns: 1fr; padding: 10px; }
+    #rail { display: none; }
+    #inspector { width: calc(100vw - 20px); }
+    .bubble-row { max-width: 94%; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside id="rail" class="panel">
+    <div class="brand">
+      <div class="mark">S</div>
+      <div>
+        <h1>my-agents</h1>
+        <p>headless companion</p>
+      </div>
+    </div>
+    <div>
+      <p class="section-label">Conversation</p>
+      <select id="conversation-select" aria-label="Conversation"></select>
+      <form id="conversation-form" class="row" style="margin-top:8px">
+        <input id="conversation-input" placeholder="custom id" aria-label="Custom conversation id">
+        <button class="btn" type="submit">Switch</button>
+      </form>
+    </div>
+    <div class="status" id="connection-status" data-state="down">
+      <span class="dot"></span><span id="connection-text">offline</span>
+    </div>
+    <div class="row">
+      <button class="btn btn-primary" id="inspector-toggle" type="button">Inspector</button>
+    </div>
+    <p class="muted" style="margin-top:auto">
+      Events stay in the ledger. Ambient context waits for the next turn.
+    </p>
+  </aside>
+
+  <main id="chat" class="panel">
+    <header class="chat-head">
+      <div>
+        <h2>Sora</h2>
+        <div class="sub" id="conversation-label">default</div>
+      </div>
+      <span class="pill" id="epoch-pill">epoch 0</span>
+    </header>
+    <div id="messages" role="log" aria-live="polite"></div>
+    <div id="typing" class="typing hidden" aria-hidden="true"><span></span><span></span><span></span></div>
+    <form id="composer">
+      <textarea id="message-input" rows="2" placeholder="Message Sora…" aria-label="Message"></textarea>
+      <button class="btn btn-primary" id="send-button" type="submit">Send</button>
+    </form>
+  </main>
+
+  <aside id="inspector" class="panel">
+    <div class="inline">
+      <strong style="font-size:13px">Inspector</strong>
+      <button class="btn" id="inspector-close" type="button">Close</button>
+    </div>
+    <div class="tabs" role="tablist">
+      <button class="tab" role="tab" data-tab="events" aria-selected="true">Events</button>
+      <button class="tab" role="tab" data-tab="memory" aria-selected="false">Memory</button>
+      <button class="tab" role="tab" data-tab="context" aria-selected="false">Context</button>
+    </div>
+
+    <section class="tab-panel" id="tab-events" role="tabpanel">
+      <div class="card">
+        <h3>Simulate external event</h3>
+        <form id="event-form">
+          <div class="field">
+            <label for="event-name">kind</label>
+            <input id="event-name" value="email.received">
+          </div>
+          <div class="field">
+            <label for="event-source">source</label>
+            <input id="event-source" value="simulator">
+          </div>
+          <div class="field">
+            <label for="event-summary">summary</label>
+            <input id="event-summary" value="定例のお知らせ">
+          </div>
+          <div class="field">
+            <label for="event-urgency">urgency</label>
+            <input id="event-urgency" type="number" min="0" max="10" value="6">
+          </div>
+          <div class="field">
+            <label for="event-key">idempotency_key</label>
+            <input id="event-key" placeholder="optional">
+          </div>
+          <button class="btn btn-primary" type="submit">POST /events</button>
+        </form>
+        <div id="event-result" class="muted" style="margin-top:8px"></div>
+      </div>
+      <div class="card">
+        <h3>Event ledger</h3>
+        <div id="event-list"><p class="muted">No events yet.</p></div>
+        <div id="event-omissions" class="muted" style="margin-top:8px"></div>
+      </div>
+    </section>
+
+    <section class="tab-panel hidden" id="tab-memory" role="tabpanel">
+      <div class="card">
+        <h3>Core Memory</h3>
+        <div class="kv" id="memory-kv"></div>
+        <pre id="memory-user"></pre>
+        <pre id="memory-relationship"></pre>
+        <pre id="memory-arc"></pre>
+      </div>
+      <div class="card">
+        <h3>Episode summaries</h3>
+        <pre id="memory-episodes"></pre>
+      </div>
+      <div class="card">
+        <div class="inline">
+          <h3 style="margin:0">Sleep-time curation</h3>
+          <span class="muted" id="candidate-counts"></span>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn" id="curate-button" type="button">POST /curate</button>
+          <button class="btn btn-danger" id="reset-button" type="button">POST /reset</button>
+        </div>
+        <div id="memory-result" class="muted" style="margin-top:8px"></div>
+      </div>
+    </section>
+
+    <section class="tab-panel hidden" id="tab-context" role="tabpanel">
+      <div class="card">
+        <div class="inline">
+          <h3 style="margin:0">Cache inspector</h3>
+          <button class="btn" id="context-refresh" type="button">Refresh</button>
+        </div>
+        <div class="kv" id="context-kv"></div>
+      </div>
+      <div class="card">
+        <h3>L0–L2 stable prefix</h3>
+        <pre id="context-stable"></pre>
+      </div>
+      <div class="card">
+        <h3>L3 event section</h3>
+        <pre id="context-events"></pre>
+      </div>
+    </section>
+  </aside>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const state = {
+    conversationId: "default",
+    source: null,
+    lastReply: "",
+    streaming: false
+  };
+
+  const byId = (id) => document.getElementById(id);
+
+  const node = (tag, className, text) => {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (text !== undefined) element.textContent = text;
+    return element;
+  };
+
+  const setStatus = (text, live) => {
+    byId("connection-text").textContent = text;
+    byId("connection-status").dataset.state = live ? "live" : "down";
+  };
+
+  const setResult = (id, text, failed) => {
+    const target = byId(id);
+    target.textContent = text;
+    target.classList.toggle("error-chip", Boolean(failed));
+  };
+
+  const fetchJson = async (path, options) => {
+    const response = await fetch(path, options);
+    let payload = {};
+    try {
+      payload = await response.json();
+    } catch (error) {
+      payload = {};
+    }
+    if (!response.ok) {
+      const message = payload.message || payload.error || String(response.status);
+      throw new Error(message);
+    }
+    return payload;
+  };
+
+  const scrollDown = () => {
+    const messages = byId("messages");
+    messages.scrollTop = messages.scrollHeight;
+  };
+
+  const appendBubble = (role, text, meta) => {
+    const row = node("div", "bubble-row " + role);
+    if (role !== "user") row.appendChild(node("div", "avatar", "S"));
+    const body = node("div", "bubble");
+    body.textContent = text;
+    const holder = node("div");
+    holder.appendChild(body);
+    if (meta) holder.appendChild(node("div", "bubble-meta", meta));
+    row.appendChild(holder);
+    byId("messages").appendChild(row);
+    scrollDown();
+    return body;
+  };
+
+  const appendSystem = (text, failed) => {
+    const row = node("div", "bubble-row system-row");
+    row.appendChild(node("div", "system-chip" + (failed ? " error-chip" : ""), text));
+    byId("messages").appendChild(row);
+    scrollDown();
+  };
+
+  const clearMessages = () => {
+    byId("messages").replaceChildren();
+  };
+
+  const renderTimeline = (items) => {
+    clearMessages();
+    for (const item of items) {
+      const kind = String(item.kind || "");
+      const text = String(item.content || "");
+      if (kind === "turn") {
+        const role = item.origin === "user" ? "user" : "assistant";
+        const meta = item.origin === "proactive" ? "proactive" : "";
+        appendBubble(role, text, meta);
+        if (role === "assistant") state.lastReply = text;
+      } else if (kind === "event_failed") {
+        appendSystem("event failed: " + text, true);
+      } else {
+        appendSystem("event: " + text, false);
+      }
+    }
+  };
+
+  const renderEvents = (items) => {
+    const list = byId("event-list");
+    const events = items.filter((item) => String(item.kind).startsWith("event"));
+    if (events.length === 0) {
+      list.replaceChildren(node("p", "muted", "No events yet."));
+      return;
+    }
+    list.replaceChildren();
+    for (const item of events) {
+      const row = node("div", "event-item" + (item.kind === "event_failed" ? " failed" : ""));
+      row.appendChild(node("div", "", String(item.content || "")));
+      const meta = node("div", "meta");
+      meta.textContent = [
+        String(item.kind || ""),
+        String(item.event_id || ""),
+        String(item.delivery || ""),
+        String(item.created_at || "")
+      ].join(" · ");
+      row.appendChild(meta);
+      list.appendChild(row);
+    }
+  };
+
+  const refreshTimeline = async () => {
+    const query = "?conversation_id=" + encodeURIComponent(state.conversationId) + "&limit=60";
+    const payload = await fetchJson("/timeline" + query);
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    renderTimeline(items);
+    renderEvents(items);
+  };
+
+  const refreshMemory = async () => {
+    const query = "?conversation_id=" + encodeURIComponent(state.conversationId);
+    const payload = await fetchJson("/memory" + query);
+    byId("memory-kv").replaceChildren();
+    const pairs = [
+      ["chars", String(payload.chars ?? 0)],
+      ["pending", String(payload.counts?.pending_candidates ?? 0)],
+      ["promoted", String(payload.counts?.promoted_candidates ?? 0)],
+      ["rejected", String(payload.counts?.rejected_candidates ?? 0)]
+    ];
+    for (const [key, value] of pairs) {
+      byId("memory-kv").appendChild(node("span", "", key));
+      byId("memory-kv").appendChild(node("b", "", value));
+    }
+    byId("memory-user").textContent = String(payload.user || "(empty)");
+    byId("memory-relationship").textContent = String(payload.relationship || "(empty)");
+    byId("memory-arc").textContent = String(payload.arc || "(empty)");
+    const episodes = Array.isArray(payload.episodes) ? payload.episodes : [];
+    const lines = episodes.map((episode) => {
+      const title = String(episode.title || "");
+      const overview = String(episode.overview || "");
+      const summary = String(episode.summary || "");
+      const body = summary || overview;
+      return "- " + title + (body ? ": " + body : "");
+    });
+    byId("memory-episodes").textContent = lines.length ? lines.join("\n") : "(no episodes)";
+    byId("candidate-counts").textContent =
+      String(payload.counts?.pending_candidates ?? 0) + " pending";
+  };
+
+  const refreshContext = async () => {
+    const query = "?conversation_id=" + encodeURIComponent(state.conversationId);
+    const payload = await fetchJson("/context" + query);
+    byId("context-kv").replaceChildren();
+    const pairs = [
+      ["epoch", String(payload.epoch ?? 0)],
+      ["sha256", String(payload.stable_prefix_sha256 || "")],
+      ["events", String(payload.counts?.events ?? 0)],
+      ["episodes", String(payload.counts?.episodes ?? 0)],
+      ["turns", String(payload.counts?.turns ?? 0)],
+      ["omitted e", String(payload.omitted_events ?? 0)],
+      ["omitted p", String(payload.omitted_episodes ?? 0)],
+      ["memory", String(payload.memory_chars ?? 0)]
+    ];
+    for (const [key, value] of pairs) {
+      byId("context-kv").appendChild(node("span", "", key));
+      byId("context-kv").appendChild(node("b", "", value));
+    }
+    byId("context-stable").textContent = String(payload.stable_prefix || "");
+    byId("context-events").textContent = String(payload.event_section || "(none)");
+    byId("epoch-pill").textContent = "epoch " + String(payload.epoch ?? 0);
+    byId("event-omissions").textContent =
+      "omitted events: " + String(payload.omitted_events ?? 0) +
+      " / omitted episodes: " + String(payload.omitted_episodes ?? 0);
+  };
+
+  const refreshInspector = async () => {
+    await Promise.all([refreshMemory(), refreshContext()]);
+  };
+
+  const connectStream = () => {
+    if (state.source) state.source.close();
+    setStatus("connecting", false);
+    const source = new EventSource(
+      "/stream?conversation_id=" + encodeURIComponent(state.conversationId)
+    );
+    state.source = source;
+    source.onopen = () => setStatus("live", true);
+    source.onerror = () => setStatus("reconnecting", false);
+    source.onmessage = (message) => {
+      let item = null;
+      try {
+        item = JSON.parse(message.data);
+      } catch (error) {
+        return;
+      }
+      if (!item) return;
+      const kind = String(item.kind || "");
+      if (kind === "turn" && item.delivery === "push") {
+        appendBubble("assistant", String(item.content || ""), "proactive");
+        state.lastReply = String(item.content || "");
+        refreshTimeline().catch(() => {});
+        refreshContext().catch(() => {});
+      } else if (kind === "turn" && String(item.content || "") !== state.lastReply) {
+        appendBubble("assistant", String(item.content || ""));
+        state.lastReply = String(item.content || "");
+        refreshContext().catch(() => {});
+      } else if (kind === "event" || kind === "event_failed") {
+        refreshTimeline().catch(() => {});
+        refreshContext().catch(() => {});
+      }
+    };
+  };
+
+  const switchConversation = async (conversationId) => {
+    const value = String(conversationId || "").trim();
+    if (!value) return;
+    state.conversationId = value;
+    state.lastReply = "";
+    byId("conversation-label").textContent = value;
+    byId("conversation-input").value = "";
+    const select = byId("conversation-select");
+    const known = Array.from(select.options).some((option) => option.value === value);
+    if (!known) select.appendChild(new Option(value, value));
+    select.value = value;
+    connectStream();
+    try {
+      await refreshTimeline();
+      await refreshInspector();
+      setStatus("live", true);
+    } catch (error) {
+      appendSystem("load failed: " + error.message, true);
+    }
+  };
+
+  const sendMessage = async (event) => {
+    event.preventDefault();
+    const input = byId("message-input");
+    const text = input.value.trim();
+    if (!text || state.streaming) return;
+    state.streaming = true;
+    input.value = "";
+    byId("send-button").disabled = true;
+    byId("typing").classList.remove("hidden");
+    appendBubble("user", text);
+    try {
+      const payload = await fetchJson("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: state.conversationId, message: text })
+      });
+      const reply = String(payload.reply || "");
+      if (reply !== state.lastReply) {
+        appendBubble("assistant", reply);
+        state.lastReply = reply;
+      }
+      await refreshTimeline();
+      await refreshInspector();
+    } catch (error) {
+      appendSystem("chat failed: " + error.message, true);
+    } finally {
+      state.streaming = false;
+      byId("typing").classList.add("hidden");
+      byId("send-button").disabled = false;
+      input.focus();
+    }
+  };
+
+  const submitEvent = async (event) => {
+    event.preventDefault();
+    const name = byId("event-name").value.trim() || "email.received";
+    const key = byId("event-key").value.trim();
+    const body = {
+      conversation_id: state.conversationId,
+      name,
+      source: byId("event-source").value.trim() || "simulator",
+      data: {
+        summary: byId("event-summary").value.trim(),
+        urgency: Number(byId("event-urgency").value || 0)
+      }
+    };
+    if (key) body.idempotency_key = key;
+    try {
+      const payload = await fetchJson("/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+      });
+      setResult(
+        "event-result",
+        "accepted " + String(payload.event_id || "") + " duplicate=" + String(payload.duplicate),
+        false
+      );
+      await refreshTimeline();
+      await refreshContext();
+    } catch (error) {
+      setResult("event-result", "rejected: " + error.message, true);
+    }
+  };
+
+  const curate = async () => {
+    try {
+      const payload = await fetchJson("/curate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ conversation_id: state.conversationId })
+      });
+      setResult(
+        "memory-result",
+        "summarized=" + String(payload.summarized) + " promoted=" + String(payload.promoted),
+        false
+      );
+      await refreshMemory();
+      await refreshContext();
+      await refreshTimeline();
+    } catch (error) {
+      setResult("memory-result", "curate failed: " + error.message, true);
+    }
+  };
+
+  const resetConversation = async () => {
+    try {
+      const query = "?conversation_id=" + encodeURIComponent(state.conversationId);
+      const payload = await fetchJson("/reset" + query, { method: "POST" });
+      setResult("memory-result", "deleted turns=" + String(payload.deleted_turns), false);
+      await refreshTimeline();
+      await refreshInspector();
+    } catch (error) {
+      setResult("memory-result", "reset failed: " + error.message, true);
+    }
+  };
+
+  const selectTab = (name) => {
+    for (const tab of document.querySelectorAll(".tab")) {
+      tab.setAttribute("aria-selected", String(tab.dataset.tab === name));
+    }
+    for (const panel of document.querySelectorAll(".tab-panel")) {
+      panel.classList.toggle("hidden", panel.id !== "tab-" + name);
+    }
+  };
+
+  const bind = () => {
+    byId("composer").addEventListener("submit", sendMessage);
+    byId("message-input").addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        byId("composer").requestSubmit();
+      }
+    });
+    byId("event-form").addEventListener("submit", submitEvent);
+    byId("curate-button").addEventListener("click", curate);
+    byId("reset-button").addEventListener("click", resetConversation);
+    byId("context-refresh").addEventListener("click", () => {
+      refreshInspector().catch((error) => setResult("memory-result", error.message, true));
+    });
+    byId("inspector-toggle").addEventListener("click", () => {
+      byId("inspector").classList.toggle("open");
+    });
+    byId("inspector-close").addEventListener("click", () => {
+      byId("inspector").classList.remove("open");
+    });
+    byId("conversation-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      switchConversation(byId("conversation-input").value).catch(() => {});
+    });
+    byId("conversation-select").addEventListener("change", (event) => {
+      switchConversation(event.target.value).catch(() => {});
+    });
+    for (const tab of document.querySelectorAll(".tab")) {
+      tab.addEventListener("click", () => selectTab(String(tab.dataset.tab)));
+    }
+  };
+
+  const start = async () => {
+    const select = byId("conversation-select");
+    select.appendChild(new Option("default", "default"));
+    select.appendChild(new Option("line:demo", "line:demo"));
+    select.value = "default";
+    bind();
+    await switchConversation("default");
+  };
+
+  start().catch((error) => {
+    setStatus("offline", false);
+    appendSystem("startup failed: " + error.message, true);
+  });
+})();
+</script>
+</body>
+</html>

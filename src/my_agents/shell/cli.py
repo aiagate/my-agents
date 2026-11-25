@@ -60,19 +60,25 @@ def _repl(
     read_input: Callable[[str], str],
     write_output: Callable[[str], None],
 ) -> None:
-    write_output("my-agents local chat. exit / quit で終了します。")
-    while True:
-        try:
-            text = read_input("You > ")
-        except EOFError:
-            return
-        if text.strip().lower() in {"exit", "quit"}:
-            return
-        result = asyncio.run(engine.submit_message("default", text))
-        if is_err(result):
-            write_output(f"Error: {result.error.message}")
-        else:
-            write_output(f"AI > {result.value.reply}")
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(engine.start())
+        write_output("my-agents local chat. exit / quit で終了します。")
+        while True:
+            try:
+                text = read_input("You > ")
+            except EOFError:
+                return
+            if text.strip().lower() in {"exit", "quit"}:
+                return
+            result = loop.run_until_complete(engine.submit_message("default", text))
+            if is_err(result):
+                write_output(f"Error: {result.error.message}")
+            else:
+                write_output(f"AI > {result.value.reply}")
+    finally:
+        loop.run_until_complete(engine.aclose())
+        loop.close()
 
 
 def main(
@@ -87,27 +93,31 @@ def main(
         arguments = _parser().parse_args(argv)
     except SystemExit as exc:
         return 0 if exc.code is None else int(exc.code)
-    loaded = load_settings(env=env, env_path=Path.cwd() / ".env")
-    if is_err(loaded):
-        write_error(f"Error: {loaded.error.message}")
-        return 1
-    settings = loaded.value
-    logger = _open_logger(arguments.log_file or settings.log_file, write_error)
-    persona = load_persona(settings.persona_path)
-    if is_err(persona):
-        write_error(f"Error: {persona.error.message}")
-        return 1
+    logger: IAppLogger = NOOP_LOGGER
     try:
-        engine = _engine(settings, persona.value, logger)
-    except RuntimeError as exc:
-        write_error(f"Error: {exc}")
-        return 1
-    if arguments.command == "serve":
-        write_output(
-            f"my-agents listening on http://{settings.server_host}:{settings.server_port}"
-        )
-        serve(engine, settings.server_host, settings.server_port)
+        loaded = load_settings(env=env, env_path=Path.cwd() / ".env")
+        if is_err(loaded):
+            write_error(f"Error: {loaded.error.message}")
+            return 1
+        settings = loaded.value
+        logger = _open_logger(arguments.log_file or settings.log_file, write_error)
+        persona = load_persona(settings.persona_path)
+        if is_err(persona):
+            write_error(f"Error: {persona.error.message}")
+            return 1
+        try:
+            engine = _engine(settings, persona.value, logger)
+        except RuntimeError as exc:
+            write_error(f"Error: {exc}")
+            return 1
+        if arguments.command == "serve":
+            write_output(
+                f"my-agents listening on http://{settings.server_host}:{settings.server_port}"
+            )
+            serve(engine, settings.server_host, settings.server_port)
+            return 0
+        _repl(engine, read_input or input, write_output)
+        logger.log(LogEntry(LogLevel.INFO, "cli_exit", "session finished"))
         return 0
-    _repl(engine, read_input or input, write_output)
-    logger.log(LogEntry(LogLevel.INFO, "cli_exit", "session finished"))
-    return 0
+    finally:
+        logger.close()

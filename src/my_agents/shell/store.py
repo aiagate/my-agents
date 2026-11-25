@@ -14,6 +14,7 @@ from my_agents.core.memory import should_rollover
 from my_agents.core.types import (
     AppError,
     AppErrorKind,
+    ConversationCounts,
     ConversationState,
     DialogueTurn,
     Episode,
@@ -38,7 +39,8 @@ CREATE TABLE IF NOT EXISTS episodes (episode_id TEXT PRIMARY KEY, conversation_i
 CREATE UNIQUE INDEX IF NOT EXISTS one_open_episode_per_conversation ON episodes(conversation_id) WHERE closed_at IS NULL;
 CREATE TABLE IF NOT EXISTS dialogue_turns (episode_id TEXT NOT NULL REFERENCES episodes(episode_id) ON DELETE CASCADE, conversation_id TEXT NOT NULL, seq INTEGER NOT NULL, turn_index INTEGER NOT NULL, role TEXT NOT NULL, origin TEXT NOT NULL, content TEXT NOT NULL, source_event_id TEXT, created_at TEXT NOT NULL, PRIMARY KEY (episode_id, turn_index));
 CREATE INDEX IF NOT EXISTS dialogue_turns_seq ON dialogue_turns(conversation_id, seq);
-CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, idempotency_key TEXT NOT NULL UNIQUE, name TEXT NOT NULL, source TEXT NOT NULL, occurred_at TEXT NOT NULL, received_at TEXT NOT NULL, status TEXT NOT NULL, delivery TEXT NOT NULL, merge_reason TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL, brief_json TEXT, failure_reason TEXT NOT NULL DEFAULT '', surfaced_at TEXT, linked_turn_id TEXT);
+CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, occurred_at TEXT NOT NULL, received_at TEXT NOT NULL, status TEXT NOT NULL, delivery TEXT NOT NULL, merge_reason TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL, brief_json TEXT, failure_reason TEXT NOT NULL DEFAULT '', surfaced_at TEXT, linked_turn_id TEXT);
+CREATE UNIQUE INDEX IF NOT EXISTS events_idempotency ON events(conversation_id, idempotency_key);
 CREATE INDEX IF NOT EXISTS events_recency ON events(conversation_id, received_at DESC);
 CREATE TABLE IF NOT EXISTS memory_candidates (candidate_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, block TEXT NOT NULL, content TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS candidates_status ON memory_candidates(conversation_id, status);
@@ -112,13 +114,17 @@ class Store:
         else:
             self._db.parent.mkdir(parents=True, exist_ok=True)
             connection = sqlite3.connect(self._db)
-        connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
-        if not readonly:
-            with suppress(sqlite3.OperationalError):
-                connection.execute("PRAGMA journal_mode = WAL")
-            connection.executescript(_SCHEMA)
+        try:
+            connection.row_factory = sqlite3.Row
+            connection.execute("PRAGMA foreign_keys = ON")
+            connection.execute("PRAGMA busy_timeout = 5000")
+            if not readonly:
+                with suppress(sqlite3.OperationalError):
+                    connection.execute("PRAGMA journal_mode = WAL")
+                connection.executescript(_SCHEMA)
+        except Exception:
+            connection.close()
+            raise
         return connection
 
     def _read[T](
@@ -143,18 +149,23 @@ class Store:
         except (sqlite3.Error, OSError, ValueError) as exc:
             return Err(_storage(str(exc)))
 
+    def _ensure_conversation(
+        self, connection: sqlite3.Connection, conversation_id: str, now: datetime
+    ) -> None:
+        connection.execute(
+            "INSERT OR IGNORE INTO conversations VALUES (?, ?)",
+            (conversation_id, _stamp(now)),
+        )
+        connection.execute(
+            "INSERT OR IGNORE INTO conversation_state (conversation_id) VALUES (?)",
+            (conversation_id,),
+        )
+
     def ensure_conversation(
         self, conversation_id: str, now: datetime
     ) -> Result[ConversationState, AppError]:
         def run(connection: sqlite3.Connection) -> ConversationState:
-            connection.execute(
-                "INSERT OR IGNORE INTO conversations VALUES (?, ?)",
-                (conversation_id, _stamp(now)),
-            )
-            connection.execute(
-                "INSERT OR IGNORE INTO conversation_state (conversation_id) VALUES (?)",
-                (conversation_id,),
-            )
+            self._ensure_conversation(connection, conversation_id, now)
             return self._state_or_default(connection, conversation_id)
 
         return self._write(run)
@@ -263,14 +274,7 @@ class Store:
         def run(
             connection: sqlite3.Connection,
         ) -> tuple[Episode, tuple[DialogueTurn, ...]]:
-            connection.execute(
-                "INSERT OR IGNORE INTO conversations VALUES (?, ?)",
-                (conversation_id, _stamp(now)),
-            )
-            connection.execute(
-                "INSERT OR IGNORE INTO conversation_state (conversation_id) VALUES (?)",
-                (conversation_id,),
-            )
+            self._ensure_conversation(connection, conversation_id, now)
             episode = (
                 None
                 if episode_id is None
@@ -468,7 +472,9 @@ class Store:
                 ),
             )
             existing = self._event_or_none(
-                "idempotency_key", record.idempotency_key, connection
+                connection,
+                "conversation_id = ? AND idempotency_key = ?",
+                (record.conversation_id, record.idempotency_key),
             )
             return record if existing is None else existing
 
@@ -505,17 +511,48 @@ class Store:
 
     def get_event(self, event_id: str) -> Result[EventRecord | None, AppError]:
         return self._read(
-            lambda connection: self._event_or_none("event_id", event_id, connection),
+            lambda connection: self._event_or_none(
+                connection, "event_id = ?", (event_id,)
+            ),
             empty=None,
         )
 
     def _event_or_none(
-        self, column: str, value: str, connection: sqlite3.Connection
+        self,
+        connection: sqlite3.Connection,
+        where: str,
+        parameters: tuple[object, ...],
     ) -> EventRecord | None:
         row = connection.execute(
-            f"SELECT * FROM events WHERE {column} = ?", (value,)
+            f"SELECT * FROM events WHERE {where}", parameters
         ).fetchone()
         return None if row is None else _event(row)
+
+    def counts(self, conversation_id: str) -> Result[ConversationCounts, AppError]:
+        def run(connection: sqlite3.Connection) -> ConversationCounts:
+            row = connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM dialogue_turns WHERE conversation_id = ?), "
+                "(SELECT COUNT(*) FROM episodes WHERE conversation_id = ?), "
+                "(SELECT COUNT(*) FROM events WHERE conversation_id = ?), "
+                "(SELECT COUNT(*) FROM memory_candidates WHERE conversation_id = ? AND status = ?), "
+                "(SELECT COUNT(*) FROM memory_candidates WHERE conversation_id = ? AND status = ?), "
+                "(SELECT COUNT(*) FROM memory_candidates WHERE conversation_id = ? AND status = ?)",
+                (
+                    conversation_id,
+                    conversation_id,
+                    conversation_id,
+                    conversation_id,
+                    MemoryStatus.PENDING.value,
+                    conversation_id,
+                    MemoryStatus.PROMOTED.value,
+                    conversation_id,
+                    MemoryStatus.REJECTED.value,
+                ),
+            ).fetchone()
+            return ConversationCounts(*(int(value) for value in row))
+
+        return self._read(run, empty=ConversationCounts())
 
     def list_events(
         self,
@@ -537,20 +574,31 @@ class Store:
 
         return self._read(run, empty=())
 
+    def _set_ids(
+        self,
+        table: str,
+        column: str,
+        assignment: str,
+        leading: tuple[object, ...],
+        identifiers: Sequence[str],
+    ) -> Result[None, AppError]:
+        def run(connection: sqlite3.Connection) -> None:
+            markers = ", ".join("?" for _ in identifiers)
+            connection.execute(
+                f"UPDATE {table} SET {assignment} WHERE {column} IN ({markers})",
+                (*leading, *identifiers),
+            )
+
+        return self._write(run)
+
     def mark_surfaced(
         self, event_ids: Sequence[str], now: datetime
     ) -> Result[None, AppError]:
         if not event_ids:
             return Ok(None)
-
-        def run(connection: sqlite3.Connection) -> None:
-            markers = ", ".join("?" for _ in event_ids)
-            connection.execute(
-                f"UPDATE events SET surfaced_at = ? WHERE event_id IN ({markers})",
-                (_stamp(now), *event_ids),
-            )
-
-        return self._write(run)
+        return self._set_ids(
+            "events", "event_id", "surfaced_at = ?", (_stamp(now),), event_ids
+        )
 
     def save_candidate(self, candidate: MemoryCandidate) -> Result[None, AppError]:
         def run(connection: sqlite3.Connection) -> None:
@@ -586,15 +634,13 @@ class Store:
     ) -> Result[None, AppError]:
         if not candidate_ids:
             return Ok(None)
-
-        def run(connection: sqlite3.Connection) -> None:
-            markers = ", ".join("?" for _ in candidate_ids)
-            connection.execute(
-                f"UPDATE memory_candidates SET status = ? WHERE candidate_id IN ({markers})",
-                (status.value, *candidate_ids),
-            )
-
-        return self._write(run)
+        return self._set_ids(
+            "memory_candidates",
+            "candidate_id",
+            "status = ?",
+            (status.value,),
+            candidate_ids,
+        )
 
     def reset_conversation(self, conversation_id: str) -> Result[int, AppError]:
         def run(connection: sqlite3.Connection) -> int:

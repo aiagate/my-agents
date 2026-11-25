@@ -1,6 +1,7 @@
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from contextlib import AsyncExitStack
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from typing import Annotated, Literal
@@ -8,13 +9,14 @@ from uuid import uuid4
 
 from flow_res import Err, Ok, Result
 from pydantic import BaseModel, Field, SecretStr
-from pydantic_ai import Agent, FunctionToolset, Tool, UsageLimits
+from pydantic_ai import Agent, AgentRunResult, FunctionToolset, Tool, UsageLimits
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
     ModelResponse,
     TextPart,
     ToolCallPart,
+    ToolReturnPart,
     UserPromptPart,
 )
 from pydantic_ai.models import Model
@@ -37,6 +39,7 @@ from my_agents.core.types import (
     MemoryCandidate,
 )
 from my_agents.shell.logger import IAppLogger, LogEntry, LogLevel
+from my_agents.shell.mcp import build_toolsets
 from my_agents.shell.settings import Settings
 from my_agents.shell.store import Store
 
@@ -166,6 +169,61 @@ def _local_proactive(instructions: str) -> str:
     return f"{headline}。少し気になったので共有しますね。"
 
 
+def _last_tool_return(messages: Sequence[ModelMessage]) -> ToolReturnPart | None:
+    for message in reversed(messages):
+        if isinstance(message, ModelRequest):
+            for part in reversed(message.parts):
+                if isinstance(part, ToolReturnPart):
+                    return part
+    return None
+
+
+def _tool_names(info: AgentInfo) -> set[str]:
+    return {tool.name for tool in info.function_tools}
+
+
+def _prompt_after(prompt: str, marker: str) -> str:
+    tail = prompt.replace(marker, "", 1).lstrip(":：、 ").strip()
+    return tail.removeprefix("して").lstrip(":：、 ").strip()
+
+
+def _local_external_tool(
+    prompt: str, names: set[str], returned: ToolReturnPart | None
+) -> ModelResponse | None:
+    if returned is not None:
+        if returned.tool_name == "diverge_associations":
+            return ModelResponse([TextPart(f"連想: {returned.content}")])
+        if returned.tool_name == "remember":
+            return ModelResponse([TextPart("覚えました。")])
+    if "diverge_associations" in names and "連想" in prompt:
+        return ModelResponse(
+            [
+                ToolCallPart(
+                    "diverge_associations",
+                    {
+                        "seed": _prompt_after(prompt, "連想") or prompt,
+                        "context": "",
+                        "limit": 3,
+                    },
+                )
+            ]
+        )
+    if "remember" in names and "覚えて" in prompt:
+        return ModelResponse(
+            [
+                ToolCallPart(
+                    "remember",
+                    {
+                        "block": "user",
+                        "content": _prompt_after(prompt, "覚えて") or prompt,
+                        "reason": "user asked",
+                    },
+                )
+            ]
+        )
+    return None
+
+
 def _local_respond(messages: list[ModelMessage], info: AgentInfo) -> ModelResponse:
     instructions = info.instructions or ""
     prompt = _last_user(messages)
@@ -179,6 +237,11 @@ def _local_respond(messages: list[ModelMessage], info: AgentInfo) -> ModelRespon
         return ModelResponse(
             [ToolCallPart(tool.name, _local_summary(source).model_dump())]
         )
+    routed = _local_external_tool(
+        prompt, _tool_names(info), _last_tool_return(messages)
+    )
+    if routed is not None:
+        return routed
     if "能動発話" in source:
         return ModelResponse([TextPart(_local_proactive(source))])
     return ModelResponse([TextPart(_local_chat(instructions, prompt))])
@@ -349,6 +412,7 @@ class Llm:
         self._external_toolsets = tuple(external_toolsets)
         self._logger = logger
         self._clock = clock or (lambda: datetime.now(UTC))
+        self._stack: AsyncExitStack | None = None
         self._chat: Agent[None, str] = Agent(model)
         self._distill: Agent[None, EventBrief] = Agent(model, output_type=EventBrief)
         self._composer: Agent[None, str] = Agent(model)
@@ -358,8 +422,19 @@ class Llm:
     def from_settings(
         cls, settings: Settings, *, store: Store, logger: IAppLogger
     ) -> Result[Llm, AppError]:
+        servers = settings.mcp_servers
+        if isinstance(servers, Err):
+            return servers
+        toolsets = build_toolsets(servers.value)
         if settings.chat_backend == "local":
-            return Ok(cls(FunctionModel(_local_respond), store=store, logger=logger))
+            return Ok(
+                cls(
+                    FunctionModel(_local_respond),
+                    store=store,
+                    logger=logger,
+                    external_toolsets=toolsets,
+                )
+            )
         api_key: SecretStr | None = settings.magpie_api_key
         if api_key is None:
             return Err(
@@ -375,7 +450,44 @@ class Llm:
                 api_key=api_key.get_secret_value(),
             ),
         )
-        return Ok(cls(model, store=store, logger=logger))
+        return Ok(
+            cls(
+                model,
+                store=store,
+                logger=logger,
+                external_toolsets=toolsets,
+            )
+        )
+
+    async def start(self) -> None:
+        if self._stack is not None or not self._external_toolsets:
+            return
+        stack = AsyncExitStack()
+        await stack.__aenter__()
+        try:
+            for toolset in self._external_toolsets:
+                await stack.enter_async_context(toolset)
+        except Exception:
+            await stack.aclose()
+            raise
+        self._stack = stack
+
+    async def aclose(self) -> None:
+        if self._stack is None:
+            return
+        stack = self._stack
+        self._stack = None
+        await stack.aclose()
+
+    async def _run[T](
+        self,
+        label: str,
+        invoke: Callable[[], Awaitable[AgentRunResult[T]]],
+    ) -> Result[AgentRunResult[T], AppError]:
+        try:
+            return Ok(await invoke())
+        except Exception as exc:
+            return Err(AppError(AppErrorKind.LLM, f"{label} failed: {exc}"))
 
     def _log_usage(self, result: object, event: str) -> None:
         usage = getattr(result, "usage", None)
@@ -398,43 +510,55 @@ class Llm:
     ) -> Result[ChatReply, AppError]:
         recorded: list[str] = []
         toolbox = ChatToolbox(self._store, conversation_id, recorded, self._clock())
-        try:
-            result = await self._chat.run(
-                user_text,
-                message_history=_history(history),
-                instructions=context.instructions,
-                toolsets=[toolbox.toolset(), *self._external_toolsets],
-                usage_limits=_REQUEST_LIMITS,
+        async with AsyncExitStack() as stack:
+            toolsets: list[AbstractToolset[None]] = [toolbox.toolset()]
+            for toolset in self._external_toolsets:
+                if self._stack is None:
+                    await stack.enter_async_context(toolset)
+                toolsets.append(toolset)
+            result = await self._run(
+                "Chat",
+                lambda: self._chat.run(
+                    user_text,
+                    message_history=_history(history),
+                    instructions=context.instructions,
+                    toolsets=toolsets,
+                    usage_limits=_REQUEST_LIMITS,
+                ),
             )
-        except Exception as exc:
-            return Err(AppError(AppErrorKind.LLM, f"Chat failed: {exc}"))
-        self._log_usage(result, "chat_completed")
-        return Ok(ChatReply(str(result.output), tuple(recorded)))
+        if isinstance(result, Err):
+            return result
+        self._log_usage(result.value, "chat_completed")
+        return Ok(ChatReply(str(result.value.output), tuple(recorded)))
 
     async def distill(self, envelope: EventEnvelope) -> Result[EventBrief, AppError]:
-        try:
-            result = await self._distill.run(
+        result = await self._run(
+            "Distillation",
+            lambda: self._distill.run(
                 build_distill_prompt(envelope, uuid4().hex),
                 usage_limits=_REQUEST_LIMITS,
-            )
-        except Exception as exc:
-            return Err(AppError(AppErrorKind.LLM, f"Distillation failed: {exc}"))
-        self._log_usage(result, "distill_completed")
-        return Ok(result.output)
+            ),
+        )
+        if isinstance(result, Err):
+            return result
+        self._log_usage(result.value, "distill_completed")
+        return Ok(result.value.output)
 
     async def compose(
         self, brief: EventBrief, context: AssembledContext
     ) -> Result[str, AppError]:
-        try:
-            result = await self._composer.run(
+        result = await self._run(
+            "Composer",
+            lambda: self._composer.run(
                 build_proactive_prompt(brief),
                 instructions=context.instructions,
                 usage_limits=_REQUEST_LIMITS,
-            )
-        except Exception as exc:
-            return Err(AppError(AppErrorKind.LLM, f"Composer failed: {exc}"))
-        self._log_usage(result, "compose_completed")
-        text = str(result.output).strip()
+            ),
+        )
+        if isinstance(result, Err):
+            return result
+        self._log_usage(result.value, "compose_completed")
+        text = str(result.value.output).strip()
         if not validate_proactive_message(text):
             return Err(
                 AppError(
@@ -447,18 +571,20 @@ class Llm:
     async def summarize(
         self, turns: Sequence[DialogueTurn], previous_summary: str
     ) -> Result[SummaryOutput, AppError]:
-        try:
-            result = await self._summarizer.run(
+        result = await self._run(
+            "Summarizer",
+            lambda: self._summarizer.run(
                 build_summary_prompt(turns, previous_summary),
                 usage_limits=_REQUEST_LIMITS,
-            )
-        except Exception as exc:
-            return Err(AppError(AppErrorKind.LLM, f"Summarizer failed: {exc}"))
-        self._log_usage(result, "summary_completed")
+            ),
+        )
+        if isinstance(result, Err):
+            return result
+        self._log_usage(result.value, "summary_completed")
         title, overview, summary = normalize_summary(
-            result.output.title,
-            result.output.overview,
-            result.output.summary,
+            result.value.output.title,
+            result.value.output.overview,
+            result.value.output.summary,
             fallback_title="会話",
         )
         return Ok(SummaryOutput(title, overview, summary))

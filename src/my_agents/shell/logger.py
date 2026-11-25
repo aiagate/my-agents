@@ -26,9 +26,14 @@ class LogEntry:
 class IAppLogger(Protocol):
     def log(self, entry: LogEntry, /) -> None: ...
 
+    def close(self) -> None: ...
+
 
 class _NoopLogger:
     def log(self, _entry: LogEntry, /) -> None:
+        return
+
+    def close(self) -> None:
         return
 
 

@@ -108,6 +108,17 @@ async def test_health_index_and_memory(tmp_path: Path) -> None:
     status, index = await _call(app, "GET", "/")
     assert status == 200
     assert b"my-agents" in index
+    assert b"EventSource(" in index
+    assert b"textContent" in index
+    assert b"line:demo" in index
+    for forbidden in (
+        b"innerHTML",
+        b"outerHTML",
+        b"insertAdjacentHTML",
+        b"document.write",
+        b"onclick=",
+    ):
+        assert forbidden not in index
     status, memory = await _json(app, "GET", "/memory")
     assert (status, memory["chars"]) == (200, 0)
     await engine.aclose()
@@ -201,6 +212,88 @@ async def test_chat_timeline_reset_and_curate(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
+@pytest.mark.anyio
+async def test_context_endpoint_reports_stable_prefix_and_counts(
+    tmp_path: Path,
+) -> None:
+    engine = _engine(tmp_path)
+    app = create_app(engine)
+    status, first = await _json(
+        app,
+        "POST",
+        "/chat",
+        json.dumps({"conversation_id": "c", "message": "hi"}).encode(),
+    )
+    assert (status, first["turn_index"]) == (200, 2)
+    status, context = await _json(app, "GET", "/context?conversation_id=c")
+    assert status == 200
+    assert context["conversation_id"] == "c"
+    assert context["epoch"] == 1
+    assert len(context["stable_prefix_sha256"]) == 64
+    assert context["counts"]["turns"] == 2
+    assert context["counts"]["episodes"] == 1
+    assert context["memory_chars"] == 0
+    status, second = await _json(
+        app,
+        "POST",
+        "/chat",
+        json.dumps({"conversation_id": "c", "message": "again"}).encode(),
+    )
+    assert status == 200
+    status, after = await _json(app, "GET", "/context?conversation_id=c")
+    assert after["stable_prefix_sha256"] == context["stable_prefix_sha256"]
+    assert after["epoch"] == 2
+    status, memory = await _json(app, "GET", "/memory?conversation_id=c")
+    assert memory["counts"]["turns"] == 4
+    assert memory["chars"] == 0
+    episodes = memory["episodes"]
+    assert isinstance(episodes, list)
+    first_episode = episodes[0]
+    assert isinstance(first_episode, dict)
+    assert first_episode["title"] == "hi"
+    await engine.aclose()
+
+
+@pytest.mark.anyio
+async def test_reset_rejects_oversized_bodies(tmp_path: Path) -> None:
+    engine = _engine(tmp_path)
+    app = create_app(engine)
+    status, payload = await _json(
+        app, "POST", "/reset", b"{}", {"content-length": str(MAX_BODY_BYTES + 1)}
+    )
+    assert (status, payload["error"]) == (413, "payload_too_large")
+    status, payload = await _json(app, "POST", "/reset", b"x" * (MAX_BODY_BYTES + 1))
+    assert (status, payload["error"]) == (413, "payload_too_large")
+    status, payload = await _json(app, "POST", "/reset", b"", {"content-length": "bad"})
+    assert (status, payload["error"]) == (400, "invalid_content_length")
+    status, payload = await _json(app, "POST", "/reset")
+    assert (status, payload["deleted_turns"]) == (200, 0)
+    await engine.aclose()
+
+
+class LifecycleEngine(CharacterEngine):
+    def __init__(self) -> None:
+        self.started = 0
+        self.closed = 0
+
+    async def start(self) -> None:
+        self.started += 1
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+@pytest.mark.anyio
+async def test_lifespan_starts_and_closes_the_engine() -> None:
+    engine = LifecycleEngine()
+    app = create_app(engine)
+    async with app.router.lifespan_context(app):
+        assert engine.started == 1
+        assert engine.closed == 0
+    assert engine.closed == 1
+
+
+@pytest.mark.anyio
 async def test_stream_delivers_sse_and_cleans_up(tmp_path: Path) -> None:
     engine = _engine(tmp_path)
     app = create_app(engine)
@@ -267,6 +360,14 @@ class ErrorEngine(CharacterEngine):
     def get_memory(self):
         return self._error()
 
+    def get_memory_snapshot(self, conversation_id: str):
+        del conversation_id
+        return self._error()
+
+    async def context_snapshot(self, conversation_id: str):
+        del conversation_id
+        return self._error()
+
     def get_timeline(self, conversation_id: str, *, limit: int = 50):
         del conversation_id, limit
         return self._error()
@@ -305,6 +406,7 @@ async def test_error_kinds_map_to_http_status(kind: AppErrorKind, status: int) -
     app = create_app(ErrorEngine(kind))
     for method, target, body in (
         ("GET", "/memory", b""),
+        ("GET", "/context", b""),
         ("GET", "/timeline", b""),
         ("GET", "/events/x", b""),
         ("POST", "/reset", b""),

@@ -22,6 +22,7 @@ from my_agents.core.types import (
     CharacterPersona,
     ProactivePolicy,
 )
+from my_agents.shell.mcp import McpServerSpec, parse_mcp_servers
 
 
 def _optional_path(value: object) -> object:
@@ -118,6 +119,10 @@ class Settings(BaseModel):
             quiet_hours_end=self.quiet_hours_end,
             user_active_minutes=self.proactive_user_active_minutes,
         )
+
+    @property
+    def mcp_servers(self) -> Result[tuple[McpServerSpec, ...], AppError]:
+        return parse_mcp_servers(self.mcp_servers_json)
 
 
 def load_settings(

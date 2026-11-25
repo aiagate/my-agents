@@ -1,6 +1,7 @@
 import hashlib
 import json
 import math
+import re
 import unicodedata
 from collections.abc import Mapping
 from datetime import UTC, datetime
@@ -26,6 +27,7 @@ _NAME_PATTERN = r"^[a-z][a-z0-9_.-]{0,63}$"
 _CONTROL_ALLOWED = frozenset({"\n", "\r", "\t"})
 _SINGLE_LINE_BREAKS = ("\r", "\n", "\t", "\u2028", "\u2029")
 _MARKER = "UNTRUSTED_EVENT"
+_ROLE_SPOOF = re.compile(r"\b(system|assistant|user|developer|tool)\s*:", re.IGNORECASE)
 
 
 class _EnvelopeInput(BaseModel):
@@ -105,11 +107,12 @@ def _strip_controls(text: str) -> str:
 
 
 def _defang(text: str) -> str:
-    return (
-        text.replace(_MARKER, f"{_MARKER}_")
+    escaped = (
+        re.sub(rf"{re.escape(_MARKER)}(?!_)", f"{_MARKER}_", text)
         .replace("<", "\\u003c")
         .replace(">", "\\u003e")
     )
+    return _ROLE_SPOOF.sub(lambda match: f"{match.group(1)}_", escaped)
 
 
 def sanitize_untrusted(text: str) -> str:

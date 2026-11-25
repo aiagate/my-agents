@@ -19,6 +19,7 @@ from my_agents.core.types import (
     EventRecord,
     EventStatus,
     MemoryBlock,
+    MemoryBlocks,
     MemoryCandidate,
     MemoryStatus,
     TimelineKind,
@@ -78,6 +79,14 @@ class FakeLlm:
         self.summary_error = summary_error
         self.chat_error = chat_error
         self.raise_distill = raise_distill
+        self.started = 0
+        self.closed = 0
+
+    async def start(self) -> None:
+        self.started += 1
+
+    async def aclose(self) -> None:
+        self.closed += 1
 
     async def chat(
         self,
@@ -595,3 +604,86 @@ async def test_aclose_cancels_background_tasks_and_clears_state(tmp_path: Path) 
 def test_error_helpers_are_distinct() -> None:
     assert AppErrorKind.STORAGE != AppErrorKind.LLM
     assert TimelineKind.EVENT_FAILED.value == "event_failed"
+
+
+@pytest.mark.anyio
+async def test_context_and_memory_snapshots_report_live_counts(tmp_path: Path) -> None:
+    engine, store = _harness(tmp_path)
+    await engine.submit_message("c", "こんにちは")
+    snapshot = (await engine.context_snapshot("c")).unwrap()
+    assert snapshot.conversation_id == "c"
+    assert snapshot.epoch == 1
+    assert snapshot.counts.turns == 2
+    assert snapshot.counts.episodes == 1
+    assert snapshot.counts.events == 0
+    assert snapshot.omitted_events == 0
+    assert len(snapshot.stable_prefix_sha256) == 64
+    assert "今日" in snapshot.stable_prefix
+    memory = engine.get_memory_snapshot("c").unwrap()
+    assert memory.conversation_id == "c"
+    assert memory.blocks.user == ""
+    assert memory.counts.turns == 2
+    assert memory.episodes[0].title == "こんにちは"
+    assert store.counts("missing").unwrap().turns == 0
+    await engine.aclose()
+
+
+@pytest.mark.anyio
+async def test_snapshot_errors_propagate(tmp_path: Path) -> None:
+    storage = AppError(AppErrorKind.STORAGE, "store failed")
+    engine, store = _harness(tmp_path)
+    with patch.object(store, "get_state", return_value=Err(storage)):
+        assert_err(
+            await engine.context_snapshot("c"),
+            kind=AppErrorKind.STORAGE,
+            message_contains="store failed",
+        )
+    with patch.object(store, "read_memory", return_value=Err(storage)):
+        assert_err(
+            engine.get_memory_snapshot("c"),
+            kind=AppErrorKind.STORAGE,
+            message_contains="store failed",
+        )
+        assert_err(
+            await engine.context_snapshot("c"),
+            kind=AppErrorKind.STORAGE,
+            message_contains="store failed",
+        )
+    with patch.object(store, "counts", return_value=Err(storage)):
+        assert_err(
+            engine.get_memory_snapshot("c"),
+            kind=AppErrorKind.STORAGE,
+            message_contains="store failed",
+        )
+        assert_err(
+            await engine.context_snapshot("c"),
+            kind=AppErrorKind.STORAGE,
+            message_contains="store failed",
+        )
+    with patch.object(store, "list_episodes", return_value=Err(storage)):
+        assert_err(
+            engine.get_memory_snapshot("c"),
+            kind=AppErrorKind.STORAGE,
+            message_contains="store failed",
+        )
+    with patch.object(
+        store,
+        "read_memory",
+        side_effect=[Ok(MemoryBlocks()), Err(storage)],
+    ):
+        assert_err(
+            await engine.context_snapshot("c"),
+            kind=AppErrorKind.STORAGE,
+            message_contains="store failed",
+        )
+    await engine.aclose()
+
+
+@pytest.mark.anyio
+async def test_engine_start_delegates_to_llm(tmp_path: Path) -> None:
+    llm = FakeLlm()
+    engine = _engine(tmp_path, llm)
+    await engine.start()
+    assert llm.started == 1
+    await engine.aclose()
+    assert llm.closed == 1
