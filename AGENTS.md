@@ -1,6 +1,6 @@
 # 規約と強制手段
 
-制約の本体は tools/project_lint/rules/（PL001〜PL023、廃止番号を除く 19 ルール）と
+制約の本体は tools/project_lint/rules/（PL001〜PL023、廃止番号を除く 18 ルール）と
 pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`（純粋関数・
 不変モデル・副作用ゼロ）と `shell/`（SQLite・pydantic-ai・Starlette・CLI）の 2 層で、
 依存は `shell/` → `core/` の一方向だけである。この表は規約と強制手段の対応を示す
@@ -26,8 +26,8 @@ pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`�
 | ty の既定診断を有効にし、警告でも失敗させる | PL005 + pyproject（ty 設定） |
 | 説明 Docstring を書かない。仕様は型・命名・テストで表す | PL006（hint が修正行動を指示） |
 | カバレッジ 100%（分岐込み）を維持 | pyproject（fail_under=100 / branch）+ PL007 |
-| インライン抑止（noqa / type: ignore / cast）を使わない | PL008 + Ruff PGH003/PGH004/RUF100 |
-| src で cast による型のすり替えをしない | PL009 |
+| インライン抑止（noqa / type: ignore）を使わない | PL008 + Ruff PGH003/PGH004/RUF100 |
+| cast による型のすり替えをしない（src 限定から全リポジトリへ拡大、PL009 は廃止） | pyproject.toml（Ruff TID251） |
 | テストは実挙動を検証し内部実装を写さない | PL010 |
 | dataclass は init 外フィールド・プライベートフィールドにしない | PL011 |
 | エントリポイントと __init__ は thin に保つ | PL014 |

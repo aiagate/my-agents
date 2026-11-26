@@ -1,6 +1,5 @@
 import tomllib
 from pathlib import Path
-from typing import cast
 
 from tools.project_lint.common import (
     PROJECT_ROOT,
@@ -22,10 +21,8 @@ _ALLOWED_COVERAGE_EXCLUDE_PATTERNS = frozenset(
 def _as_str_list(value: object) -> list[str] | None:
     if not isinstance(value, list):
         return None
-    items = cast(list[object], value)
-    if not all(isinstance(item, str) for item in items):
-        return None
-    return cast(list[str], items)
+    items = [item for item in value if isinstance(item, str)]
+    return items if len(items) == len(value) else None
 
 
 def check_strict_coverage_config(

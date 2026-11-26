@@ -64,6 +64,9 @@ ignore = [
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "__future__.annotations".msg = "Do not use 'from __future__ import annotations' on Python 3.14+ (PEP 649 is standard)."
 "typing.Any".msg = "Avoid typing.Any; use concrete types, TypeVar, or None/object. Do not blindly replace contravariant generic parameters (e.g. Agent[None, str] deps) with object."
+"typing_extensions.Any".msg = "Avoid typing_extensions.Any; use concrete types, TypeVar, or None/object."
+"typing.cast".msg = "typing.cast is banned; narrow types or fix the annotation instead."
+"typing_extensions.cast".msg = "typing_extensions.cast is banned; narrow types or fix the annotation instead."
 
 [tool.ruff.lint.per-file-ignores]
 "tools/project_lint/__init__.py" = ["T201"]

@@ -14,7 +14,6 @@ from tools.project_lint.rules.pl007_coverage_config import check_strict_coverage
 from tools.project_lint.rules.pl008_inline_suppressions import (
     check_no_inline_suppressions,
 )
-from tools.project_lint.rules.pl009_no_cast import check_no_cast_in_src
 from tools.project_lint.rules.pl010_shallow_tests import check_no_shallow_tests
 from tools.project_lint.rules.pl011_private_dataclass_fields import (
     check_no_private_dataclass_init_fields,
@@ -56,7 +55,6 @@ _PATH_RULES: tuple[tuple[str, str, tuple[str, ...], _PathCheck], ...] = (
         ("pyproject.toml",),
         check_strict_coverage_config,
     ),
-    ("PL009", "no_cast_in_src", _SRC, check_no_cast_in_src),
     ("PL010", "no_shallow_tests", ("tests",), check_no_shallow_tests),
     (
         "PL011",

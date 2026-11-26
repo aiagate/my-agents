@@ -18,7 +18,6 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from typing import cast
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SRC_PACKAGE_DIR = PROJECT_ROOT / "src" / "my_agents"
@@ -175,9 +174,10 @@ def find_line_number(content: str, token: str) -> int:
 
 
 def as_table(value: object) -> dict[str, object] | None:
-    if isinstance(value, dict):
-        return cast(dict[str, object], value)
-    return None
+    if not isinstance(value, dict):
+        return None
+    table = {key: item for key, item in value.items() if isinstance(key, str)}
+    return table if len(table) == len(value) else None
 
 
 def resolve_import_targets(

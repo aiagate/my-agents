@@ -1,3 +1,6 @@
+import shutil
+import subprocess
+import sys
 from pathlib import Path
 from textwrap import dedent
 
@@ -6,7 +9,6 @@ from tools.project_lint.rules import (
     check_exhaustive_branch,
     check_immutable_frozen_dataclass_fields,
     check_layer_boundaries,
-    check_no_cast_in_src,
     check_no_cross_layer_internal_monkeypatch,
     check_no_direct_logging,
     check_no_docstrings,
@@ -23,6 +25,8 @@ from tools.project_lint.rules import (
     check_tool_descriptions,
 )
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _write(path: Path, content: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -32,6 +36,17 @@ def _write(path: Path, content: str) -> Path:
 
 def _package(root: Path) -> Path:
     return root / "src" / "my_agents"
+
+
+def _ruff_check(directory: Path) -> subprocess.CompletedProcess[str]:
+    ruff = shutil.which("ruff") or str(Path(sys.executable).with_name("ruff"))
+    return subprocess.run(
+        [ruff, "check", "--no-cache", "--output-format", "concise", "."],
+        cwd=directory,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
 
 
 def test_pl001_flags_plain_str_secret_and_allows_vo_and_non_secrets(
@@ -407,39 +422,101 @@ def test_pl008_flags_inline_suppressions_and_ignores_strings(tmp_path: Path) -> 
     assert all(f.path.name == "bad.py" for f in findings)
 
 
-def test_pl009_flags_typing_cast_in_src(tmp_path: Path) -> None:
-    src = _package(tmp_path)
+def test_tid251_regression_cast_and_any_banned_repo_wide(tmp_path: Path) -> None:
+    # Replaces PL009 (retired 2026-11-26, thread 8019e06b, base 5de388f): cast is
+    # banned repo-wide, including tests/ and tools/, not only src/.
+    shutil.copy(_PROJECT_ROOT / "pyproject.toml", tmp_path / "pyproject.toml")
     _write(
-        src / "bad_import.py",
+        tmp_path / "tests" / "cast_from.py",
         """
         from typing import cast
-        def f(x: object) -> int:
-            return cast(int, x)
+
+        _ = cast(int, 1)
         """,
     )
     _write(
-        src / "bad_attr.py",
+        tmp_path / "tests" / "cast_alias.py",
+        """
+        from typing import cast as c
+
+        _ = c(int, 1)
+        """,
+    )
+    _write(
+        tmp_path / "tests" / "cast_module.py",
+        """
+        import typing
+
+        _ = typing.cast(int, 1)
+        """,
+    )
+    _write(
+        tmp_path / "tests" / "cast_module_alias.py",
         """
         import typing as t
-        def f(x: object) -> int:
-            return t.cast(int, x)
+
+        _ = t.cast(int, 1)
         """,
     )
     _write(
-        src / "good.py",
+        tmp_path / "tests" / "cast_typing_extensions.py",
         """
-        def f(x: object) -> int:
-            if isinstance(x, int):
-                return x
-            return 0
+        from typing_extensions import cast
+
+        _ = cast(int, 1)
+        """,
+    )
+    _write(
+        tmp_path / "tests" / "any_use.py",
+        """
+        from typing import Any
+        from typing_extensions import Any as ExtAny
+
+        _ = Any
+        _ = ExtAny
+        """,
+    )
+    _write(
+        tmp_path / "tools" / "any_use.py",
+        """
+        from typing import Any
+        from typing_extensions import Any as ExtAny
+
+        _ = Any
+        _ = ExtAny
         """,
     )
 
-    findings = check_no_cast_in_src(src)
+    result = _ruff_check(tmp_path)
 
-    assert len(findings) == 2
-    assert {f.rule for f in findings} == {"PL009"}
-    assert {f.path.name for f in findings} == {"bad_import.py", "bad_attr.py"}
+    violations = [line for line in result.stdout.splitlines() if "TID251" in line]
+    cast_violations = [
+        line
+        for line in violations
+        if "typing.cast" in line or "typing_extensions.cast" in line
+    ]
+    any_violations = [
+        line
+        for line in violations
+        if "typing.Any" in line or "typing_extensions.Any" in line
+    ]
+    assert result.returncode == 1
+    assert len(violations) == 9
+    assert len(any_violations) == 4
+    assert {line.split(":")[0] for line in cast_violations} == {
+        "tests/cast_alias.py",
+        "tests/cast_from.py",
+        "tests/cast_module.py",
+        "tests/cast_module_alias.py",
+        "tests/cast_typing_extensions.py",
+    }
+    assert all(
+        "narrow types or fix the annotation instead" in line for line in cast_violations
+    )
+    assert {line.split(":")[0] for line in any_violations} == {
+        "tests/any_use.py",
+        "tools/any_use.py",
+    }
 
 
 def test_pl010_flags_shallow_or_assertionless_tests(tmp_path: Path) -> None:
