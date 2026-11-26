@@ -50,6 +50,7 @@ pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`�
 - メインセッションはの子エージェントのオーケストレーションに専念し、実装・調査・テスト実行は サブエージェントdsh+Deepseek v4.1 Flashで回す。
 - 子エージェント／別スレッドのキックオフ 1 行目は「Read the worker.md at the repository root before anything else.」で始める（AGENTS.md の子への自動注入は前提としない、上流 Issue #28704）。修正ラウンド・再試行・次タスクでは既存の子を延命せず、目的・直前の報告・ブランチを渡してフレッシュ起動する（Fresh subagents by default。延命は未コミット変更や実行中プロセスなど移動コストが高い状態のときだけ）。子への固有の指示はキックオフ本文に書き、この契約を子ごとに書き直さない。子の報告は「変更内容・検証方法（正確なコマンドと出力）・未カバー範囲」で受け取る。
 - ヘッドレスサーバの動作確認は `.agents/skills/verify-my-agents/SKILL.md` の手順に従う。
+- リポジトリやスレッド履歴の横断調査・棚卸し・改善探索は `.agents/skills/chunked-investigation/SKILL.md` の手順に従う。
 
 # 主要ライブラリ
 
