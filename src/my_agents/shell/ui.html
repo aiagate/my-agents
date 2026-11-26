@@ -274,19 +274,19 @@
         <form id="event-form">
           <div class="field">
             <label for="event-name">name</label>
-            <input id="event-name" value="email.received">
+            <input id="event-name">
           </div>
           <div class="field">
             <label for="event-source">source</label>
-            <input id="event-source" value="mail-bridge">
+            <input id="event-source">
           </div>
           <div class="field">
             <label for="event-summary">summary</label>
-            <input id="event-summary" value="鈴木さんから金曜14時の定例変更メール">
+            <input id="event-summary">
           </div>
           <div class="field">
             <label for="event-details">details</label>
-            <textarea id="event-details" rows="2">場所が会議室Bに変更されました。返信は不要です。</textarea>
+            <textarea id="event-details" rows="2"></textarea>
           </div>
           <div class="field">
             <label for="event-key">idempotency_key</label>
@@ -777,6 +777,7 @@
 
   const start = async () => {
     byId("conversation-select").value = "default";
+    applyPreset("normal");
     bind();
     await switchConversation("default");
   };

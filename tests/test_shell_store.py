@@ -1,10 +1,13 @@
 import errno
 import sqlite3
+import subprocess
+import sys
 from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from flow_res import Err, Ok
 
 from my_agents.core.types import (
@@ -55,6 +58,23 @@ def _record(
     )
 
 
+_CONCURRENT_INIT_SCRIPT = """
+import sys
+from datetime import UTC, datetime
+from pathlib import Path
+
+from flow_res import Ok
+
+from my_agents.shell.store import Store
+
+store = Store(Path(sys.argv[1]), Path(sys.argv[2]))
+result = store.ensure_conversation("default", datetime(2026, 5, 1, tzinfo=UTC))
+if not isinstance(result, Ok):
+    print(result.error.message, file=sys.stderr)
+    raise SystemExit(1)
+"""
+
+
 def test_uninitialized_store_reads_empty_without_creating_files(tmp_path: Path) -> None:
     db_path = tmp_path / "missing.db"
     mem_path = tmp_path / "core.md"
@@ -84,6 +104,25 @@ def test_uninitialized_store_reads_empty_without_creating_files(tmp_path: Path) 
     assert memory.value == MemoryBlocks()
     assert not db_path.exists()
     assert not mem_path.exists()
+
+
+def test_read_only_open_does_not_initialize_existing_empty_database(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "empty.db"
+    db_path.touch()
+    store = Store(db_path, tmp_path / "core.md")
+
+    assert_err(
+        store.get_state("default"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="no such table: conversations",
+    )
+    assert db_path.stat().st_size == 0
+
+    written = store.ensure_conversation("default", _t())
+    assert isinstance(written, Ok)
+    assert written.value.conversation_id == "default"
 
 
 def test_store_messages_epochs_and_reset_isolation(tmp_path: Path) -> None:
@@ -383,3 +422,158 @@ def test_store_rejects_incompatible_schema_and_corrupt_rows(tmp_path: Path) -> N
                 kind=AppErrorKind.STORAGE,
                 message_contains="locked",
             )
+
+
+def test_late_incompatible_schema_returns_storage_error(tmp_path: Path) -> None:
+    db_path = tmp_path / "state.db"
+    store = Store(db_path, tmp_path / "core.md")
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("CREATE TABLE legacy (id TEXT)")
+        conn.execute("PRAGMA user_version = 1")
+        conn.commit()
+
+    assert_err(
+        store.ensure_conversation("default", _t()),
+        kind=AppErrorKind.STORAGE,
+        message_contains=(
+            f"Incompatible database schema version 1 "
+            f"(expected {CURRENT_SCHEMA_VERSION})"
+        ),
+    )
+    with closing(sqlite3.connect(db_path)) as conn:
+        tables = [
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        ]
+    assert tables == ["legacy"]
+
+
+def test_mid_ddl_failure_rolls_back_atomically_and_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = Store(db_path, tmp_path / "core.md")
+    with monkeypatch.context() as injected:
+        injected.setattr(
+            "my_agents.shell.store._SCHEMA_STATEMENTS",
+            ("CREATE TABLE probe (id INTEGER)", "NOT_A_STATEMENT"),
+        )
+        failure = store.ensure_conversation("default", _t())
+    assert_err(failure, kind=AppErrorKind.STORAGE, message_contains="syntax error")
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        tables = conn.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert tables == []
+    assert version == 0
+
+    recovered = store.ensure_conversation("default", _t(1))
+    assert isinstance(recovered, Ok)
+    assert recovered.value.conversation_id == "default"
+    with closing(sqlite3.connect(db_path)) as conn:
+        names = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+    assert names == {"conversations", "messages", "events"}
+    assert version == CURRENT_SCHEMA_VERSION
+
+
+def test_v2_database_missing_table_returns_storage_error_without_recreating(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = Store(db_path, tmp_path / "core.md")
+    assert isinstance(store.ensure_conversation("default", _t()), Ok)
+    with closing(sqlite3.connect(db_path)) as conn:
+        conn.execute("DROP TABLE events")
+        conn.commit()
+
+    corrupted = Store(db_path, tmp_path / "other.md")
+    assert_err(
+        corrupted.insert_event(_record("evt_1")),
+        kind=AppErrorKind.STORAGE,
+        message_contains="no such table: events",
+    )
+    with closing(sqlite3.connect(db_path)) as conn:
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    assert tables == {"conversations", "messages"}
+
+
+def test_initialized_v2_database_skips_ddl_on_normal_writes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = Store(db_path, tmp_path / "core.md")
+    assert isinstance(store.ensure_conversation("default", _t()), Ok)
+    with monkeypatch.context() as injected:
+        injected.setattr(
+            "my_agents.shell.store._SCHEMA_STATEMENTS", ("NOT_A_STATEMENT",)
+        )
+        appended = store.append_messages(
+            "default",
+            (("user", MessageOrigin.USER, "hello", None),),
+            _t(1),
+        )
+    assert isinstance(appended, Ok)
+    assert [message.content for message in appended.value] == ["hello"]
+    persisted = store.recent_messages("default", limit=1)
+    assert isinstance(persisted, Ok)
+    assert persisted.value[0].content == "hello"
+
+
+def test_concurrent_first_time_initialization_from_two_processes(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                _CONCURRENT_INIT_SCRIPT,
+                str(db_path),
+                str(tmp_path / f"core-{index}.md"),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=tmp_path,
+        )
+        for index in range(2)
+    ]
+    outputs = [process.communicate(timeout=30) for process in processes]
+    assert [process.returncode for process in processes] == [0, 0]
+    assert [stderr for _stdout, stderr in outputs] == ["", ""]
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        conversations = conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
+        tables = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+    assert integrity == "ok"
+    assert version == CURRENT_SCHEMA_VERSION
+    assert conversations == 1
+    assert tables == {"conversations", "messages", "events"}

@@ -43,45 +43,60 @@ class EventCommit:
     message: ChatMessage | None = None
 
 
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS conversations (
-    conversation_id TEXT PRIMARY KEY,
-    epoch INTEGER NOT NULL DEFAULT 0,
-    last_user_activity_at TEXT,
-    proactive_count_today INTEGER NOT NULL DEFAULT 0,
-    proactive_day TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS messages (
-    message_id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
-    role TEXT NOT NULL,
-    origin TEXT NOT NULL,
-    content TEXT NOT NULL,
-    source_event_id TEXT,
-    created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS messages_recency ON messages(conversation_id, message_id DESC);
-CREATE TABLE IF NOT EXISTS events (
-    event_id TEXT PRIMARY KEY,
-    conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
-    idempotency_key TEXT NOT NULL,
-    name TEXT NOT NULL,
-    source TEXT NOT NULL,
-    occurred_at TEXT NOT NULL,
-    received_at TEXT NOT NULL,
-    status TEXT NOT NULL,
-    action TEXT NOT NULL,
-    reason TEXT NOT NULL DEFAULT '',
-    note TEXT NOT NULL DEFAULT '',
-    payload_json TEXT NOT NULL,
-    failure_reason TEXT NOT NULL DEFAULT '',
-    surfaced_at TEXT,
-    linked_message_id INTEGER
-);
-CREATE UNIQUE INDEX IF NOT EXISTS events_idempotency ON events(conversation_id, idempotency_key);
-CREATE INDEX IF NOT EXISTS events_recency ON events(conversation_id, received_at DESC);
-"""
+_SCHEMA_STATEMENTS: tuple[str, ...] = (
+    """
+    CREATE TABLE IF NOT EXISTS conversations (
+        conversation_id TEXT PRIMARY KEY,
+        epoch INTEGER NOT NULL DEFAULT 0,
+        last_user_activity_at TEXT,
+        proactive_count_today INTEGER NOT NULL DEFAULT 0,
+        proactive_day TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS messages (
+        message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+        role TEXT NOT NULL,
+        origin TEXT NOT NULL,
+        content TEXT NOT NULL,
+        source_event_id TEXT,
+        created_at TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS messages_recency
+    ON messages(conversation_id, message_id DESC)
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS events (
+        event_id TEXT PRIMARY KEY,
+        conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+        idempotency_key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        source TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        status TEXT NOT NULL,
+        action TEXT NOT NULL,
+        reason TEXT NOT NULL DEFAULT '',
+        note TEXT NOT NULL DEFAULT '',
+        payload_json TEXT NOT NULL,
+        failure_reason TEXT NOT NULL DEFAULT '',
+        surfaced_at TEXT,
+        linked_message_id INTEGER
+    )
+    """,
+    """
+    CREATE UNIQUE INDEX IF NOT EXISTS events_idempotency
+    ON events(conversation_id, idempotency_key)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS events_recency
+    ON events(conversation_id, received_at DESC)
+    """,
+)
 
 
 def _stamp(value: datetime) -> str:
@@ -155,13 +170,18 @@ def _event(row: sqlite3.Row) -> EventRecord:
 
 
 def _require_supported_version(connection: sqlite3.Connection) -> None:
-    version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+    # One statement keeps user_version and sqlite_master in one snapshot: a
+    # concurrent first-time commit must not look like v0 with tables present.
+    row = connection.execute(
+        "SELECT (SELECT user_version FROM pragma_user_version), "
+        "(SELECT COUNT(*) FROM sqlite_master "
+        "WHERE type = 'table' AND name NOT LIKE 'sqlite_%')"
+    ).fetchone()
+    version = int(row[0])
+    tables = int(row[1])
     if version == CURRENT_SCHEMA_VERSION:
         return
-    tables = connection.execute(
-        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
-    ).fetchall()
-    if version == 0 and not tables:
+    if version == 0 and tables == 0:
         return
     raise ValueError(
         f"Incompatible database schema version {version} (expected "
@@ -188,21 +208,45 @@ class Store:
             )
         else:
             self._db.parent.mkdir(parents=True, exist_ok=True)
-            connection = sqlite3.connect(self._db)
+            connection = sqlite3.connect(self._db, isolation_level=None)
         try:
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA foreign_keys = ON")
             connection.execute("PRAGMA busy_timeout = 5000")
-            _require_supported_version(connection)
-            if not readonly:
+            if readonly:
+                _require_supported_version(connection)
+            else:
                 with suppress(sqlite3.OperationalError):
                     connection.execute("PRAGMA journal_mode = WAL")
-                connection.executescript(_SCHEMA)
-                connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
-        except Exception:
+                self._initialize(connection)
+        except BaseException:
             connection.close()
             raise
         return connection
+
+    def _initialize(self, connection: sqlite3.Connection) -> None:
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            version = int(connection.execute("PRAGMA user_version").fetchone()[0])
+            if version == CURRENT_SCHEMA_VERSION:
+                return
+            tables = connection.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+            if version != 0 or tables:
+                raise ValueError(
+                    f"Incompatible database schema version {version} (expected "
+                    f"{CURRENT_SCHEMA_VERSION}). Remove the old database or choose "
+                    "a fresh DATA_DIR."
+                )
+            for statement in _SCHEMA_STATEMENTS:
+                connection.execute(statement)
+            connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
+        except BaseException:
+            with suppress(sqlite3.Error):
+                connection.execute("ROLLBACK")
+            raise
 
     def _read[T](
         self, operation: Callable[[sqlite3.Connection], T], *, empty: T
@@ -224,11 +268,21 @@ class Store:
             return Err(self._init_error)
         try:
             connection = self._open(readonly=False)
-            with closing(connection), connection:
-                connection.execute("BEGIN IMMEDIATE")
-                return Ok(operation(connection))
         except (sqlite3.Error, OSError, ValueError) as exc:
             return Err(_storage(str(exc)))
+        try:
+            try:
+                value = operation(connection)
+            except BaseException:
+                with suppress(sqlite3.Error):
+                    connection.execute("ROLLBACK")
+                raise
+            connection.execute("COMMIT")
+            return Ok(value)
+        except (sqlite3.Error, OSError, ValueError) as exc:
+            return Err(_storage(str(exc)))
+        finally:
+            connection.close()
 
     def _ensure_conversation(
         self, connection: sqlite3.Connection, conversation_id: str, now: datetime
