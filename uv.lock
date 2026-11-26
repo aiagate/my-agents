@@ -820,7 +820,7 @@ name = "my-agents"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "fastmcp-slim", extra = ["server"] },
+    { name = "fastmcp-slim", extra = ["client"] },
     { name = "flow-res" },
     { name = "pydantic-ai-slim", extra = ["mcp", "openai", "web"] },
     { name = "python-dotenv" },
@@ -831,6 +831,7 @@ dependencies = [
 [package.dev-dependencies]
 dev = [
     { name = "anyio" },
+    { name = "fastmcp-slim", extra = ["server"] },
     { name = "pytest" },
     { name = "pytest-cov" },
     { name = "ruff" },
@@ -839,7 +840,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastmcp-slim", extras = ["server"], specifier = ">=4.2.6" },
+    { name = "fastmcp-slim", extras = ["client"], specifier = ">=4.2.6" },
     { name = "flow-res", specifier = ">=0.2.0" },
     { name = "pydantic-ai-slim", extras = ["openai", "web", "mcp"], specifier = ">=2.71.0" },
     { name = "python-dotenv", specifier = ">=1.2.4" },
@@ -850,6 +851,7 @@ requires-dist = [
 [package.metadata.requires-dev]
 dev = [
     { name = "anyio", specifier = ">=4.16.0" },
+    { name = "fastmcp-slim", extras = ["server"], specifier = ">=4.2.6" },
     { name = "pytest", specifier = ">=9.2.0" },
     { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "ruff", specifier = ">=0.17.6" },

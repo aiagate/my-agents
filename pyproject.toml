@@ -5,7 +5,7 @@ description = "Headless character AI engine with event-driven handoff and MCP to
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
-    "fastmcp-slim[server]>=4.2.6",
+    "fastmcp-slim[client]>=4.2.6",
     "flow-res>=0.2.0",
     "pydantic-ai-slim[openai,web,mcp]>=2.71.0",
     "python-dotenv>=1.2.4",
@@ -19,6 +19,7 @@ my-agents = "my_agents:main"
 [dependency-groups]
 dev = [
     "anyio>=4.16.0",
+    "fastmcp-slim[server]>=4.2.6",
     "pytest>=9.2.0",
     "pytest-cov>=7.1.0",
     "ruff>=0.17.6",
