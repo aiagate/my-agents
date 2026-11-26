@@ -1,6 +1,6 @@
 # 規約と強制手段
 
-制約の本体は tools/project_lint/rules/（PL001〜PL023、廃止番号を除く 18 ルール）と
+制約の本体は tools/project_lint/rules/ と
 pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`（純粋関数・
 不変モデル・副作用ゼロ）と `shell/`（SQLite・pydantic-ai・Starlette・CLI）の 2 層で、
 依存は `shell/` → `core/` の一方向だけである。この表は規約と強制手段の対応を示す
@@ -41,12 +41,13 @@ pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`�
 | Python 3.14+ 前提・__future__ annotations と typing.Any を使わない | pyproject（requires-python / Ruff TID251）+ ty python-version |
 | コミットメッセージは Conventional Commits 形式（英語） | .githooks/commit-msg（type・形式・ASCII。字数・命令形は判断） |
 
-# 判断のみの規約（強制手段なし）
+# 判断のみの規約
 
 - コミットメッセージの件名は英語・命令形。補足は本文（body）に理由や要点を短い英文で書く。
 - `#` コメントは外部制約や罠など、コードと型から読み取れない Why に限る
   （Ruff ERA001 はコメントアウトコードのみ検出。What コメントの排除は判断）。
 - ジェネリクスの型引数は定義の TypeVar と変性（入出力の向き）を確認して決める。
+- メインセッションはの子エージェントのオーケストレーションに専念し、実装・調査・テスト実行は サブエージェントdsh+Deepseek v4.1 Flashで回す。
 - 子エージェント／別スレッドのキックオフ 1 行目は「Read the worker.md at the repository root before anything else.」で始める（AGENTS.md の子への自動注入は前提としない、上流 Issue #28704）。修正ラウンド・再試行・次タスクでは既存の子を延命せず、目的・直前の報告・ブランチを渡してフレッシュ起動する（Fresh subagents by default。延命は未コミット変更や実行中プロセスなど移動コストが高い状態のときだけ）。子への固有の指示はキックオフ本文に書き、この契約を子ごとに書き直さない。子の報告は「変更内容・検証方法（正確なコマンドと出力）・未カバー範囲」で受け取る。
 - CLI の動作確認は `.agents/skills/verify-my-agents/SKILL.md` の手順に従う。
 
