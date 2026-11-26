@@ -7,7 +7,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Literal, assert_never
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 
 class AppErrorKind(StrEnum):
@@ -24,13 +24,12 @@ class AppErrorKind(StrEnum):
 class AppError:
     kind: AppErrorKind
     message: str
-    detail: str | None = None
 
 
 type Role = Literal["user", "assistant"]
 
 
-class TurnOrigin(StrEnum):
+class MessageOrigin(StrEnum):
     USER = "user"
     REPLY = "reply"
     PROACTIVE = "proactive"
@@ -42,23 +41,16 @@ class MemoryBlock(StrEnum):
     ARC = "arc"
 
 
-class MemoryStatus(StrEnum):
-    PENDING = "pending"
-    PROMOTED = "promoted"
-    REJECTED = "rejected"
-
-
-class EventDelivery(StrEnum):
-    PROACTIVE = "proactive"
-    AMBIENT = "ambient"
-    SILENT = "silent"
+class EventAction(StrEnum):
+    SPEAK = "speak"
+    NOTE = "note"
+    IGNORE = "ignore"
 
 
 class EventStatus(StrEnum):
     RECEIVED = "received"
     COMPLETED = "completed"
     FAILED = "failed"
-    SUPPRESSED = "suppressed"
 
 
 class DeliveryMode(StrEnum):
@@ -130,48 +122,20 @@ class MemoryBlocks:
 
 
 @dataclass(frozen=True, slots=True)
-class MemoryCandidate:
-    candidate_id: str
-    conversation_id: str
-    block: MemoryBlock
-    content: str
-    reason: str
-    created_at: datetime
-    status: MemoryStatus = MemoryStatus.PENDING
-
-
-@dataclass(frozen=True, slots=True)
 class ConversationState:
     conversation_id: str
     epoch: int = 0
     last_user_activity_at: datetime | None = None
-    last_proactive_at: datetime | None = None
     proactive_count_today: int = 0
     proactive_day: str = ""
 
 
 @dataclass(frozen=True, slots=True)
-class Episode:
-    episode_id: str
+class ChatMessage:
+    message_id: int
     conversation_id: str
-    title: str
-    overview: str
-    summary: str
-    started_at: datetime
-    updated_at: datetime
-    turn_count: int
-    summarized_turn_count: int
-    closed_at: datetime | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class DialogueTurn:
-    conversation_id: str
-    episode_id: str
-    seq: int
-    turn_index: int
     role: Role
-    origin: TurnOrigin
+    origin: MessageOrigin
     content: str
     source_event_id: str | None
     created_at: datetime
@@ -196,46 +160,35 @@ def redact_secrets(text: str, secrets: tuple[str, ...]) -> str:
     return re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1***@", redacted)
 
 
-def _clean(value: str) -> str:
-    # Local import keeps core.types loadable before core.events without a cycle.
-    from my_agents.core.events import sanitize_single_line
-
-    return sanitize_single_line(value)
-
-
-class EventBrief(BaseModel):
+class EventDecision(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
-    headline: str = Field(
-        min_length=1, max_length=160, description="One-line event summary"
+    action: EventAction = Field(
+        description=(
+            "speak to message the user now, note to remember for the next chat turn, "
+            "or ignore if noise."
+        )
     )
-    facts: tuple[str, ...] = Field(
+    message: str = Field(
+        default="",
+        max_length=400,
+        description=(
+            "Natural 1-2 sentence Japanese message to send now when action is speak; "
+            "empty otherwise."
+        ),
+    )
+    note: str = Field(
+        default="",
+        max_length=240,
+        description=(
+            "Concise factual note for the next chat turn when action is speak or note."
+        ),
+    )
+    reason: str = Field(
         min_length=1,
-        max_length=5,
-        description="Concrete facts extracted from the event",
+        max_length=160,
+        description="Short reason why this action was chosen.",
     )
-    impact: str = Field(max_length=240, description="Why the event matters to the user")
-    suggested_angle: str = Field(
-        max_length=200, description="Natural conversation angle for a proactive message"
-    )
-    urgency: int = Field(ge=0, le=10, description="How time-critical the event is")
-    relevance: int = Field(ge=0, le=10, description="How relevant it is to this user")
-    confidence: float = Field(ge=0, le=1, description="Confidence in the extraction")
-    requires_user_action: bool = Field(description="Whether the user must act")
-    sensitive: bool = Field(description="Whether the topic needs silence")
-    dedupe_key: str = Field(
-        min_length=1, max_length=120, description="Stable key for duplicate suppression"
-    )
-
-    @field_validator("headline", "impact", "suggested_angle", "dedupe_key")
-    @classmethod
-    def _clean_text(cls, value: str) -> str:
-        return _clean(value)
-
-    @field_validator("facts")
-    @classmethod
-    def _clean_facts(cls, value: tuple[str, ...]) -> tuple[str, ...]:
-        return tuple(_clean(item) for item in value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,31 +201,27 @@ class EventRecord:
     occurred_at: datetime
     received_at: datetime
     status: EventStatus
-    delivery: EventDelivery
-    merge_reason: str
+    action: EventAction
+    reason: str
+    note: str
     payload_json: str
-    brief: EventBrief | None
     failure_reason: str
     surfaced_at: datetime | None
-    linked_turn_id: str | None
+    linked_message_id: int | None
 
 
 @dataclass(frozen=True, slots=True)
-class MergeDecision:
-    delivery: EventDelivery
+class PolicyOutcome:
+    action: EventAction
     reason: str
 
 
 @dataclass(frozen=True, slots=True)
 class ProactivePolicy:
-    cooldown_minutes: int
     daily_cap: int
-    quiet_hours_start: int
-    quiet_hours_end: int
+    quiet_hours_start_utc: int
+    quiet_hours_end_utc: int
     user_active_minutes: int
-    min_urgency: int = 6
-    min_relevance: int = 5
-    min_confidence: float = 0.6
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,16 +232,26 @@ class TimelineItem:
     created_at: datetime
     event_id: str | None = None
     source_event_id: str | None = None
-    origin: TurnOrigin | None = None
-    delivery: DeliveryMode = DeliveryMode.REPLY
+    origin: MessageOrigin | None = None
+    status: EventStatus | None = None
+    action: EventAction | None = None
+    reason: str = ""
+
+    @property
+    def delivery(self) -> DeliveryMode:
+        return (
+            DeliveryMode.PUSH
+            if self.origin is not None and self.origin is MessageOrigin.PROACTIVE
+            else DeliveryMode.REPLY
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class TurnOutcome:
     conversation_id: str
     reply: str
-    turn_index: int
-    source_event_ids: tuple[str, ...]
+    message_id: int
+    surfaced_event_ids: tuple[str, ...]
     memory_updates: tuple[str, ...]
 
 
@@ -306,21 +265,23 @@ class EventReceipt:
 @dataclass(frozen=True, slots=True)
 class AssembledContext:
     stable_prefix: str
+    dynamic_section: str
     event_section: str
-    instructions: str
     omitted_events: int
-    omitted_episodes: int
-    dynamic_section: str = ""
+
+    @property
+    def instructions(self) -> str:
+        return "\n\n".join(
+            part
+            for part in (self.stable_prefix, self.dynamic_section, self.event_section)
+            if part
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class ConversationCounts:
-    turns: int = 0
-    episodes: int = 0
+    messages: int = 0
     events: int = 0
-    pending_candidates: int = 0
-    promoted_candidates: int = 0
-    rejected_candidates: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -329,12 +290,11 @@ class ContextSnapshot:
     epoch: int
     stable_prefix: str
     stable_prefix_sha256: str
+    dynamic_section: str
     event_section: str
     omitted_events: int
-    omitted_episodes: int
     counts: ConversationCounts
     memory_chars: int
-    dynamic_section: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,4 +302,3 @@ class MemorySnapshot:
     conversation_id: str
     blocks: MemoryBlocks
     counts: ConversationCounts
-    episodes: tuple[Episode, ...] = ()

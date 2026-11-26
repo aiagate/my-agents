@@ -2,18 +2,11 @@ import json
 from collections.abc import Mapping
 from os import environ
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated
 
 from dotenv import dotenv_values
 from flow_res import Err, Ok, Result
-from pydantic import (
-    BaseModel,
-    BeforeValidator,
-    ConfigDict,
-    Field,
-    SecretStr,
-    ValidationError,
-)
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationError
 
 from my_agents.core.types import (
     DEFAULT_PERSONA,
@@ -21,11 +14,14 @@ from my_agents.core.types import (
     AppErrorKind,
     CharacterPersona,
     ProactivePolicy,
+    SecretStr,
 )
 from my_agents.shell.mcp import McpServerSpec, parse_mcp_servers
 
+DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
 
-def _optional_path(value: object) -> object:
+
+def _optional_path(value: object) -> Path | None:
     if value is None:
         return None
     if isinstance(value, Path):
@@ -34,9 +30,8 @@ def _optional_path(value: object) -> object:
     return Path(text).expanduser() if text else None
 
 
-def _memory_dir(value: object) -> Path:
-    path = _optional_path(value)
-    return Path.cwd() / "memory" if path is None else Path(str(path))
+def _data_dir(value: object) -> Path:
+    return _optional_path(value) or Path.cwd() / "data"
 
 
 def _blank_to_none(value: object) -> object:
@@ -45,78 +40,55 @@ def _blank_to_none(value: object) -> object:
     return value
 
 
+def _llm_base_url(value: object) -> str:
+    return str(value or "").strip() or DEFAULT_LLM_BASE_URL
+
+
 class Settings(BaseModel):
     model_config = ConfigDict(
         str_strip_whitespace=True,
         populate_by_name=True,
         extra="ignore",
+        alias_generator=str.upper,
     )
 
-    magpie_model: Annotated[str, Field(alias="MAGPIE_MODEL")] = "local"
-    magpie_base_url: Annotated[str, Field(alias="MAGPIE_BASE_URL")] = (
-        "http://127.0.0.1:9/v1"
+    llm_model: Annotated[str | None, BeforeValidator(_blank_to_none)] = None
+    llm_base_url: Annotated[str, BeforeValidator(_llm_base_url)] = DEFAULT_LLM_BASE_URL
+    llm_api_key: Annotated[SecretStr | None, BeforeValidator(_blank_to_none)] = None
+    data_dir: Annotated[Path, BeforeValidator(_data_dir)] = Field(
+        default_factory=lambda: Path.cwd() / "data"
     )
-    magpie_api_key: Annotated[
-        SecretStr | None,
-        Field(alias="MAGPIE_API_KEY"),
-        BeforeValidator(_blank_to_none),
+    db_path_override: Annotated[
+        Path | None, Field(alias="DB_PATH"), BeforeValidator(_optional_path)
     ] = None
-    memory_dir: Annotated[
-        Path, Field(alias="MEMORY_PATH"), BeforeValidator(_memory_dir)
-    ] = Field(default_factory=lambda: Path.cwd() / "memory")
-    chats_db_path: Annotated[
-        Path | None, Field(alias="CHATS_DB_PATH"), BeforeValidator(_optional_path)
-    ] = None
-    persona_path: Annotated[
-        Path | None, Field(alias="PERSONA_PATH"), BeforeValidator(_optional_path)
-    ] = None
-    mcp_servers_json: Annotated[
-        SecretStr | None,
-        Field(alias="MCP_SERVERS_JSON"),
-        BeforeValidator(_blank_to_none),
-    ] = None
-    chat_backend: Annotated[Literal["openai", "local"], Field(alias="CHAT_BACKEND")] = (
-        "local"
+    persona_path: Annotated[Path | None, BeforeValidator(_optional_path)] = None
+    mcp_servers_json: Annotated[SecretStr | None, BeforeValidator(_blank_to_none)] = (
+        None
     )
-    server_host: Annotated[str, Field(alias="SERVER_HOST")] = "127.0.0.1"
-    server_port: Annotated[int, Field(alias="SERVER_PORT", ge=0, le=65535)] = 8080
-    event_analysis_delay_ms: Annotated[
-        int, Field(alias="EVENT_ANALYSIS_DELAY_MS", ge=0)
-    ] = 0
-    proactive_cooldown_minutes: Annotated[
-        int, Field(alias="PROACTIVE_COOLDOWN_MINUTES", ge=0)
-    ] = 180
-    proactive_daily_cap: Annotated[int, Field(alias="PROACTIVE_DAILY_CAP", ge=0)] = 3
-    quiet_hours_start: Annotated[int, Field(alias="QUIET_HOURS_START", ge=0, le=23)] = (
-        22
-    )
-    quiet_hours_end: Annotated[int, Field(alias="QUIET_HOURS_END", ge=0, le=23)] = 7
-    proactive_user_active_minutes: Annotated[
-        int, Field(alias="PROACTIVE_USER_ACTIVE_MINUTES", ge=0)
-    ] = 10
-    episode_max_turns: Annotated[int, Field(alias="EPISODE_MAX_TURNS", gt=0)] = 40
-    episode_gap_minutes: Annotated[int, Field(alias="EPISODE_GAP_MINUTES", gt=0)] = 60
-    summary_every_turns: Annotated[int, Field(alias="SUMMARY_EVERY_TURNS", gt=0)] = 6
-    recent_turns_limit: Annotated[int, Field(alias="RECENT_TURNS_LIMIT", gt=0)] = 20
-    log_file: Annotated[
-        Path | None, Field(alias="LOG_FILE"), BeforeValidator(_optional_path)
-    ] = None
+    server_host: str = "127.0.0.1"
+    server_port: Annotated[int, Field(ge=0, le=65535)] = 8080
+    event_eval_delay_ms: Annotated[int, Field(ge=0)] = 0
+    proactive_daily_cap: Annotated[int, Field(ge=0)] = 5
+    proactive_quiet_hours_start_utc: Annotated[int, Field(ge=0, le=23)] = 22
+    proactive_quiet_hours_end_utc: Annotated[int, Field(ge=0, le=23)] = 7
+    proactive_user_active_minutes: Annotated[int, Field(ge=0)] = 10
+    recent_messages_limit: Annotated[int, Field(gt=0)] = 30
+    log_path: Annotated[Path | None, BeforeValidator(_optional_path)] = None
 
     @property
     def db_path(self) -> Path:
-        return self.chats_db_path or self.memory_dir / "chats.db"
+        return self.db_path_override or self.data_dir / "state.db"
 
     @property
     def core_memory_path(self) -> Path:
-        return self.memory_dir / "core.md"
+        return self.data_dir / "core.md"
 
     @property
     def proactive_policy(self) -> ProactivePolicy:
         return ProactivePolicy(
-            cooldown_minutes=self.proactive_cooldown_minutes,
             daily_cap=self.proactive_daily_cap,
-            quiet_hours_start=self.quiet_hours_start,
-            quiet_hours_end=self.quiet_hours_end,
+            quiet_hours_start_utc=self.proactive_quiet_hours_start_utc,
+            quiet_hours_end_utc=self.proactive_quiet_hours_end_utc,
             user_active_minutes=self.proactive_user_active_minutes,
         )
 

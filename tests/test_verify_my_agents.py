@@ -17,13 +17,13 @@ def test_verify_driver_overrides_the_inherited_chat_database(
     commands = tmp_path / "commands.txt"
     commands.write_text("exit\n")
     launcher = tmp_path / "launcher.sh"
-    launcher.write_text('printf "verification chat\\n" > "$CHATS_DB_PATH"\n')
+    launcher.write_text('printf "verification chat\\n" > "$DB_PATH"\n')
     scratch = tmp_path / "artifacts/verify/run/tmp"
-    env = {"CHATS_DB_PATH": str(production), "MY_AGENTS_BIN": f"sh {launcher.name}"}
-    expected = scratch / "chat-memory/chats.db"
+    env = {"DB_PATH": str(production), "MY_AGENTS_BIN": f"sh {launcher.name}"}
+    expected = scratch / "chat-data/state.db"
     if shared_db:
         expected = scratch / "shared.db"
-        env["VERIFY_CHATS_DB_PATH"] = str(expected)
+        env["VERIFY_DB_PATH"] = str(expected)
 
     subprocess.run(
         ("sh", str(_DRIVER), "run", "chat", str(commands)),
@@ -52,8 +52,9 @@ def test_skill_and_readme_cover_the_two_layer_server_surface() -> None:
         "| GET | `/stream?conversation_id=` |",
         "| POST | `/events` |",
         "| POST | `/chat` |",
+        "| GET | `/timeline?conversation_id=` |",
+        "| GET | `/events/{event_id}` |",
         "| GET | `/memory?conversation_id=` |",
-        "| POST | `/curate` |",
         "| POST | `/reset?conversation_id=` |",
     ):
         assert endpoint in readme, endpoint
@@ -76,8 +77,8 @@ def test_skill_and_readme_cover_the_two_layer_server_surface() -> None:
 
 def test_verify_helpers_preserve_isolated_databases_and_logs() -> None:
     driver = _DRIVER.read_text(encoding="utf-8")
-    assert 'MEMORY_PATH="$memory_dir"' in driver
-    assert 'CHATS_DB_PATH="$chats_db"' in driver
+    assert 'DATA_DIR="$data_dir"' in driver
+    assert 'DB_PATH="$db_path"' in driver
     assert '--log-file "$log_file"' in driver
-    assert "VERIFY_CHATS_DB_PATH" in driver
+    assert "VERIFY_DB_PATH" in driver
     assert "artifacts/verify/$run_id" in driver

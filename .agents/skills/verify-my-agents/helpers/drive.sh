@@ -4,8 +4,8 @@
 # Usage: drive.sh <run-id> <name> <commands-file> [cli-flags...]
 #
 # Feeds each line of <commands-file> to the my-agents REPL as typed input,
-# with an isolated MEMORY_PATH and --log-file under artifacts/verify/<run-id>/tmp/
-# so runs never touch ./memory/ or the default state log. Saves the transcript
+# with an isolated DATA_DIR and --log-file under artifacts/verify/<run-id>/tmp/
+# so runs never touch ./data/ or the default state log. Saves the transcript
 # (commands, stdout+stderr, exit code), the core.md snapshot, and the JSONL log
 # under artifacts/verify/<run-id>/.
 #
@@ -23,12 +23,12 @@ my_agents=${MY_AGENTS_BIN:-uv run my-agents}
 
 out_dir="artifacts/verify/$run_id"
 tmp_dir="$out_dir/tmp"
-memory_dir="$tmp_dir/$name-memory"
-chats_db=${VERIFY_CHATS_DB_PATH:-$memory_dir/chats.db}
+data_dir="$tmp_dir/$name-data"
+db_path=${VERIFY_DB_PATH:-$data_dir/state.db}
 log_file="$tmp_dir/$name-log.jsonl"
 transcript="$out_dir/$name.txt"
 
-mkdir -p "$memory_dir"
+mkdir -p "$data_dir"
 
 {
     printf 'my-agents: %s\n' "$my_agents"
@@ -39,11 +39,11 @@ mkdir -p "$memory_dir"
 } > "$transcript"
 
 set +e
-MEMORY_PATH="$memory_dir" CHATS_DB_PATH="$chats_db" $my_agents --log-file "$log_file" "$@" < "$commands_file" >> "$transcript" 2>&1
+DATA_DIR="$data_dir" DB_PATH="$db_path" $my_agents --log-file "$log_file" "$@" < "$commands_file" >> "$transcript" 2>&1
 status=$?
 set -e
 
 printf '\nexit=%s\n' "$status" >> "$transcript"
-cp "$memory_dir/core.md" "$out_dir/$name-core.md" 2>/dev/null || true
+cp "$data_dir/core.md" "$out_dir/$name-core.md" 2>/dev/null || true
 cp "$log_file" "$out_dir/$name-log.jsonl" 2>/dev/null || true
 printf 'saved %s (exit %s)\n' "$transcript" "$status"

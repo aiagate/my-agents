@@ -6,7 +6,7 @@ description: Verifies the my-agents CLI and headless server end to end. Use when
 # verify-my-agents
 
 my-agents CLI / headless server の実機検証スキル。単体・配線テスト
-（`uv run python -m pytest`）が green でも「実アプリを起動して操作し、証跡を残す」
+（`uv run --locked pytest`）が green でも「実アプリを起動して操作し、証跡を残す」
 ことまでは証明しない。このスキルがその隙間を埋める。
 
 最初に features/README.md（機能マップ・前提・証明規範）を読む。
@@ -17,38 +17,40 @@ my-agents CLI / headless server の実機検証スキル。単体・配線テス
   入力または EOF で終了する。
 - 1 駆動 = 1 パイプセッション: コマンド列を改行区切りで stdin に流し、最後に
   `exit` を流す。tmux や擬似端末は不要。
-- 駆動ごとに `--log-file`（tmp）と `MEMORY_PATH`（tmp の検証用ディレクトリ）を
-  明示指定する。既定パス `./memory/core.md` と状態ディレクトリ由来のログを検証に
-  使わない（2 インスタンス並走を許す設計のため）。
+- 駆動ごとに `--log-file`（tmp）と `DATA_DIR`（tmp の検証用ディレクトリ）を
+  明示指定する。既定パス `./data/core.md` と状態ディレクトリ由来のログを検証に
+  使わない。
+- `.env` または環境変数に `LLM_MODEL` と `LLM_API_KEY` が必要（E2E スクリプトの
+  `tools/e2e_event_chat.py` 自体は内部に `MockOpenAIServer` を立てるため外部 API キー不要）。
 
 ## Doctor
 
 Drive の前に全項目を確認する。1 つでも崩れたら Drive に入らない:
 
 1. `uv run my-agents --help` が exit 0 で usage を返す。
-2. 設定が読める（`.env` は任意。不正値がない）。
+2. 設定が読める（`LLM_MODEL` / `LLM_API_KEY` に不正値がない）。
 3. `--log-file <tmp>` 付きで起動すると空ファイル（0600）が作られる。
 4. `uv run --locked python tools/e2e_event_chat.py` が exit 0 で
-   `scenario_1`〜`scenario_14` と `process_exit_code` を出力する。
+   `scenario_1`〜`scenario_13` を出力する。
 
 ## Drive
 
-features/ の各レシピを順に実行する。実 API が必要なのは chat / core-memory /
-chat-history。API 不要なのは repl-commands / cli-flags / error-evidence /
-event-webhook / web-server。各レシピは helpers/drive.sh または
+features/ の各レシピを順に実行する。実 API（または OpenAI 互換エンドポイント）を使うのは
+chat / core-memory / chat-history / repl-commands。API 不要なのは cli-flags /
+error-evidence / event-webhook / web-server。各レシピは helpers/drive.sh または
 tools/e2e_event_chat.py で駆動し、トランスクリプトを Evidence に残す。
 
 ## Server / Web UI
 
 `uv run my-agents serve` を実プロセスで起動し、次を確認する。
 
-- `GET /` が `EventSource(` / `textContent` を含み、`innerHTML` /
+- `GET /` が `EventSource(` / `textContent` / プリセットボタンを含み、`innerHTML` /
   `outerHTML` / `insertAdjacentHTML` / `document.write` / `onclick=` を含まない。
 - `GET /context?conversation_id=default` が `stable_prefix_sha256` と
-  `counts` を返し、イベント前・後・チャット後で SHA が変わらない。
+  `counts`（`messages` / `events`）を返し、イベント前・後・チャット後で SHA が変わらない。
 - `MCP_SERVERS_JSON` で `tools/mcp_divergence_server.py` を接続したとき、
   外部ツール呼び出し後も SHA が変わらない。
-- 400 / 413 / 422、chunked 本文の 413、mock OpenAI 失敗による `event_failed`、
+- 400 / 404 / 413（chunked 含む）/ 422、mock OpenAI 失敗による `event_failed`、
   SSE の `source_event_id`、SIGINT 後の clean exit を確認する。
 
 網羅は `tools/e2e_event_chat.py` に任せ、手動では `curl` で 1 往復ずつ
@@ -66,7 +68,7 @@ tools/e2e_event_chat.py で駆動し、トランスクリプトを Evidence に�
 ## Cleanup
 
 - `exit` を流し込めばプロセスは自然終了する（kill 不要）。
-- `artifacts/verify/<run-id>/tmp/` の検証用 MEMORY_PATH ディレクトリと
+- `artifacts/verify/<run-id>/tmp/` の検証用 DATA_DIR ディレクトリと
   `--log-file` を削除する。
 - `artifacts/verify/<run-id>/` の証跡は削除しない。
 - 失敗した反復でも必ず Cleanup まで実行する。

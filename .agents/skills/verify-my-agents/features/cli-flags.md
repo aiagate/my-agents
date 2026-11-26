@@ -28,7 +28,7 @@ drive.sh の対象外（REPL 入力を使わない）。手動で実行して Ev
 
 - `--help` は設定ロードより前に打ち切られるため `.env` がなくても exit 0。
   error-evidence.md（設定ロード失敗）とは経路が違う。
-- `--log-file` に書けないパスを渡すと `Error:` で exit 1。環境変数 `LOG_FILE`
+- `--log-file` に書けないパスを渡すと `Error:` で exit 1。環境変数 `LOG_PATH`
   経由の解決では失敗しても `Warning:` のみで続行する（既定の状態ディレクトリ
   に空ファイルを作る）。
 - `--debug` 単独でも `Debug:` 行が出る。検証では `--log-file` と併用して

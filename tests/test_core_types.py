@@ -1,122 +1,150 @@
 from datetime import UTC, datetime
 
 import pytest
-from pydantic import SecretStr, ValidationError
+from pydantic import ValidationError
 
 from my_agents.core.types import (
     DEFAULT_PERSONA,
-    AppError,
-    AppErrorKind,
-    CharacterPersona,
+    AssembledContext,
+    ChatMessage,
+    ContextSnapshot,
+    ConversationCounts,
     ConversationState,
     DeliveryMode,
-    DialogueTurn,
-    Episode,
-    EventBrief,
-    EventDelivery,
+    EventAction,
+    EventDecision,
     EventEnvelope,
+    EventReceipt,
     EventRecord,
     EventStatus,
     MemoryBlock,
     MemoryBlocks,
-    MemoryCandidate,
-    MemoryStatus,
-    MergeDecision,
+    MemorySnapshot,
+    MessageOrigin,
+    PolicyOutcome,
     ProactivePolicy,
     TimelineItem,
     TimelineKind,
-    TurnOrigin,
+    TurnOutcome,
+    redact_secrets,
 )
 
-_NOW = datetime(2026, 11, 22, 12, tzinfo=UTC)
+
+def test_memory_blocks_value_and_with_value_for_all_blocks() -> None:
+    blocks = MemoryBlocks(user="tea lover", relationship="calm", arc="writing")
+    assert blocks.value(MemoryBlock.USER) == "tea lover"
+    assert blocks.value(MemoryBlock.RELATIONSHIP) == "calm"
+    assert blocks.value(MemoryBlock.ARC) == "writing"
+
+    updated = blocks.with_value(MemoryBlock.USER, "coffee")
+    assert updated == MemoryBlocks(user="coffee", relationship="calm", arc="writing")
+    updated = updated.with_value(MemoryBlock.RELATIONSHIP, "friendly")
+    assert updated.relationship == "friendly"
+    updated = updated.with_value(MemoryBlock.ARC, "shipping")
+    assert updated.arc == "shipping"
 
 
-def test_app_error_carries_kind_message_and_detail() -> None:
-    error = AppError(AppErrorKind.VALIDATION, "bad", "context")
-    assert error.kind is AppErrorKind.VALIDATION
-    assert (error.message, error.detail) == ("bad", "context")
+def test_redact_secrets_masks_tokens_and_url_credentials() -> None:
+    raw = "key=sk-12345 url=https://alice:topsecret@example.com/v1 empty="
+    redacted = redact_secrets(raw, ("", "sk-12345", "topsecret"))
+    assert "sk-12345" not in redacted
+    assert "topsecret" not in redacted
+    assert "https://***@example.com/v1" in redacted
+    assert "key=***" in redacted
 
 
-def test_secret_str_is_reexported() -> None:
-    assert SecretStr("secret").get_secret_value() == "secret"
+def test_event_decision_validation_and_immutability() -> None:
+    decision = EventDecision(
+        action=EventAction.SPEAK,
+        message="雨が降りそうです。",
+        note="rain expected",
+        reason="weather_alert",
+    )
+    assert decision.action is EventAction.SPEAK
+
+    with pytest.raises(ValidationError):
+        EventDecision(action=EventAction.IGNORE, reason="")
+
+    with pytest.raises(ValidationError):
+        EventDecision.model_validate(
+            {"action": "ignore", "reason": "ok", "unexpected": True}
+        )
+
+    field_name = "reason"
+    with pytest.raises(ValidationError):
+        setattr(decision, field_name, "mutated")
 
 
-@pytest.mark.parametrize(
-    ("block", "value"),
-    [
-        (MemoryBlock.USER, "u"),
-        (MemoryBlock.RELATIONSHIP, "r"),
-        (MemoryBlock.ARC, "a"),
-    ],
-)
-def test_memory_blocks_read_and_replace_each_block(
-    block: MemoryBlock, value: str
-) -> None:
-    blocks = MemoryBlocks(user="u", relationship="r", arc="a")
-    assert blocks.value(block) == value
-    assert blocks.with_value(block, "new").value(block) == "new"
-
-
-def test_persona_defaults_are_available() -> None:
+def test_snapshot_and_record_models_construct_cleanly() -> None:
+    now = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
     assert DEFAULT_PERSONA.name == "Sora"
-    assert "UNTRUSTED" in DEFAULT_PERSONA.boundaries or "未信頼" in (
-        DEFAULT_PERSONA.boundaries
+    state = ConversationState(
+        conversation_id="default", epoch=2, proactive_count_today=1
     )
-
-
-def test_event_brief_is_frozen_and_forbids_extra_fields() -> None:
-    brief = EventBrief(
-        headline="h",
-        facts=("f",),
-        impact="i",
-        suggested_angle="s",
-        urgency=8,
-        relevance=8,
-        confidence=0.9,
-        requires_user_action=True,
-        sensitive=False,
-        dedupe_key="k",
+    msg = ChatMessage(
+        1, "default", "assistant", MessageOrigin.PROACTIVE, "hi", "evt_1", now
     )
-    assert brief.headline == "h"
-    with pytest.raises(ValidationError):
-        EventBrief.model_validate({**brief.model_dump(), "unexpected": 1})
-    with pytest.raises(ValidationError):
-        EventBrief.model_validate({**brief.model_dump(), "urgency": 11})
-
-
-def test_value_objects_keep_their_fields() -> None:
-    state = ConversationState("c", 2, _NOW, None, 1, "2026-11-22")
-    episode = Episode("e", "c", "t", "o", "s", _NOW, _NOW, 2, 1, None)
-    turn = DialogueTurn("c", "e", 1, 1, "user", TurnOrigin.USER, "hi", None, _NOW)
-    envelope = EventEnvelope("evt_1", "c", "name", "src", _NOW, "key", {"x": 1})
-    record = EventRecord(
+    env = EventEnvelope("evt_1", "default", "alarm", "sensor", now, "k1", {"temp": 33})
+    rec = EventRecord(
         "evt_1",
-        "c",
-        "key",
-        "name",
-        "src",
-        _NOW,
-        _NOW,
+        "default",
+        "k1",
+        "alarm",
+        "sensor",
+        now,
+        now,
         EventStatus.COMPLETED,
-        EventDelivery.AMBIENT,
-        "reason",
+        EventAction.SPEAK,
+        "hot",
+        "temp 33",
         "{}",
-        None,
         "",
         None,
-        None,
+        msg.message_id,
     )
-    candidate = MemoryCandidate("m", "c", MemoryBlock.USER, "x", "r", _NOW)
-    item = TimelineItem(TimelineKind.TURN, "c", "hi", _NOW)
-    assert (state.epoch, episode.turn_count, turn.turn_index) == (2, 2, 1)
-    assert (envelope.data["x"], record.status, candidate.status) == (
-        1,
+    outcome = PolicyOutcome(EventAction.NOTE, "quiet_hours")
+    policy = ProactivePolicy(5, 22, 7, 15)
+    timeline = TimelineItem(
+        TimelineKind.TURN,
+        "default",
+        "hi",
+        now,
+        "evt_1",
+        "evt_1",
+        MessageOrigin.PROACTIVE,
         EventStatus.COMPLETED,
-        MemoryStatus.PENDING,
+        EventAction.SPEAK,
+        "hot",
     )
-    assert (item.delivery, MergeDecision(EventDelivery.SILENT, "r").reason) == (
-        DeliveryMode.REPLY,
-        "r",
+    reply_item = TimelineItem(
+        TimelineKind.TURN,
+        "default",
+        "hi",
+        now,
+        origin=MessageOrigin.REPLY,
     )
-    assert ProactivePolicy(1, 2, 3, 4, 5).min_urgency == 6
-    assert isinstance(DEFAULT_PERSONA, CharacterPersona)
+    event_item = TimelineItem(TimelineKind.EVENT, "default", "x", now)
+    turn = TurnOutcome("default", "ok", 2, ("evt_1",), ("append user",))
+    receipt = EventReceipt("evt_1", False, EventStatus.RECEIVED)
+    assembled = AssembledContext("p", "d", "e", 0)
+    sparse = AssembledContext("p", "", "e", 0)
+    only_prefix = AssembledContext("p", "", "", 0)
+    counts = ConversationCounts(messages=2, events=1)
+    ctx = ContextSnapshot("default", 2, "p", "a" * 64, "d", "e", 0, counts, 10)
+    mem = MemorySnapshot("default", MemoryBlocks(user="u"), counts)
+
+    assert state.epoch == 2
+    assert env.data["temp"] == 33
+    assert rec.linked_message_id == 1
+    assert (outcome.action, policy.daily_cap) == (EventAction.NOTE, 5)
+    assert (timeline.delivery, turn.message_id, receipt.duplicate) == (
+        DeliveryMode.PUSH,
+        2,
+        False,
+    )
+    assert reply_item.delivery is DeliveryMode.REPLY
+    assert event_item.delivery is DeliveryMode.REPLY
+    assert assembled.instructions == "p\n\nd\n\ne"
+    assert sparse.instructions == "p\n\ne"
+    assert only_prefix.instructions == "p"
+    assert (assembled.omitted_events, ctx.memory_chars, mem.blocks.user) == (0, 10, "u")

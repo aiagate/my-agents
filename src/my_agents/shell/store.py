@@ -1,71 +1,86 @@
 import fcntl
-import json
 import os
 import sqlite3
 import tempfile
-from collections.abc import Callable, Sequence
-from contextlib import closing, suppress
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Generator, Sequence
+from contextlib import closing, contextmanager, suppress
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import assert_never
-from uuid import uuid4
 
 from flow_res import Err, Ok, Result
 
-from my_agents.core.events import decide_merge, sanitize_single_line
-from my_agents.core.memory import should_rollover
+from my_agents.core.events import (
+    apply_policy,
+    sanitize_single_line,
+    sanitize_untrusted,
+)
 from my_agents.core.types import (
     AppError,
     AppErrorKind,
+    ChatMessage,
     ConversationCounts,
     ConversationState,
-    DialogueTurn,
-    Episode,
-    EventBrief,
-    EventDelivery,
+    EventAction,
+    EventDecision,
     EventRecord,
     EventStatus,
-    MemoryBlock,
     MemoryBlocks,
-    MemoryCandidate,
-    MemoryStatus,
+    MessageOrigin,
     ProactivePolicy,
     Role,
-    TurnOrigin,
 )
 
-type TurnEntry = tuple[Role, TurnOrigin, str, str | None]
-CURRENT_SCHEMA_VERSION = 1
-_LEGACY_TABLES = (
-    "dialogue_turns",
-    "conversation_state",
-    "memory_candidates",
-    "events",
-    "episodes",
-)
+type MessageEntry = tuple[Role, MessageOrigin, str, str | None]
+CURRENT_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
-class ProactiveCommit:
-    delivery: EventDelivery
+class EventCommit:
+    action: EventAction
     reason: str
-    episode_id: str | None = None
-    turn: DialogueTurn | None = None
+    note: str
+    message: ChatMessage | None = None
 
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS conversations (conversation_id TEXT PRIMARY KEY, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS conversation_state (conversation_id TEXT PRIMARY KEY REFERENCES conversations(conversation_id) ON DELETE CASCADE, epoch INTEGER NOT NULL DEFAULT 0, last_user_activity_at TEXT, last_proactive_at TEXT, proactive_count_today INTEGER NOT NULL DEFAULT 0, proactive_day TEXT NOT NULL DEFAULT '');
-CREATE TABLE IF NOT EXISTS episodes (episode_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE, title TEXT NOT NULL, overview TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '', started_at TEXT NOT NULL, updated_at TEXT NOT NULL, turn_count INTEGER NOT NULL DEFAULT 0, summarized_turn_count INTEGER NOT NULL DEFAULT 0, closed_at TEXT);
-CREATE UNIQUE INDEX IF NOT EXISTS one_open_episode_per_conversation ON episodes(conversation_id) WHERE closed_at IS NULL;
-CREATE TABLE IF NOT EXISTS dialogue_turns (episode_id TEXT NOT NULL REFERENCES episodes(episode_id) ON DELETE CASCADE, conversation_id TEXT NOT NULL, seq INTEGER NOT NULL, turn_index INTEGER NOT NULL, role TEXT NOT NULL, origin TEXT NOT NULL, content TEXT NOT NULL, source_event_id TEXT, created_at TEXT NOT NULL, PRIMARY KEY (episode_id, turn_index));
-CREATE INDEX IF NOT EXISTS dialogue_turns_seq ON dialogue_turns(conversation_id, seq);
-CREATE TABLE IF NOT EXISTS events (event_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, idempotency_key TEXT NOT NULL, name TEXT NOT NULL, source TEXT NOT NULL, occurred_at TEXT NOT NULL, received_at TEXT NOT NULL, status TEXT NOT NULL, delivery TEXT NOT NULL, merge_reason TEXT NOT NULL DEFAULT '', payload_json TEXT NOT NULL, brief_json TEXT, failure_reason TEXT NOT NULL DEFAULT '', surfaced_at TEXT, linked_turn_id TEXT);
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id TEXT PRIMARY KEY,
+    epoch INTEGER NOT NULL DEFAULT 0,
+    last_user_activity_at TEXT,
+    proactive_count_today INTEGER NOT NULL DEFAULT 0,
+    proactive_day TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS messages (
+    message_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+    role TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    content TEXT NOT NULL,
+    source_event_id TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS messages_recency ON messages(conversation_id, message_id DESC);
+CREATE TABLE IF NOT EXISTS events (
+    event_id TEXT PRIMARY KEY,
+    conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id) ON DELETE CASCADE,
+    idempotency_key TEXT NOT NULL,
+    name TEXT NOT NULL,
+    source TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    received_at TEXT NOT NULL,
+    status TEXT NOT NULL,
+    action TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    note TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL,
+    failure_reason TEXT NOT NULL DEFAULT '',
+    surfaced_at TEXT,
+    linked_message_id INTEGER
+);
 CREATE UNIQUE INDEX IF NOT EXISTS events_idempotency ON events(conversation_id, idempotency_key);
 CREATE INDEX IF NOT EXISTS events_recency ON events(conversation_id, received_at DESC);
-CREATE TABLE IF NOT EXISTS memory_candidates (candidate_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL, block TEXT NOT NULL, content TEXT NOT NULL, reason TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS candidates_status ON memory_candidates(conversation_id, status);
 """
 
 
@@ -73,8 +88,24 @@ def _stamp(value: datetime) -> str:
     return value.astimezone(UTC).isoformat(timespec="microseconds")
 
 
-def _date(value: str | None) -> datetime | None:
-    return None if value is None else datetime.fromisoformat(value).astimezone(UTC)
+def _required_date(value: object) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"Expected ISO timestamp string, got {value!r}")
+    return datetime.fromisoformat(value).astimezone(UTC)
+
+
+def _optional_date(value: object) -> datetime | None:
+    return None if value is None else _required_date(value)
+
+
+def _role(value: object) -> Role:
+    match value:
+        case "user":
+            return "user"
+        case "assistant":
+            return "assistant"
+        case _:
+            raise ValueError(f"Invalid message role: {value!r}")
 
 
 def _storage(message: str) -> AppError:
@@ -82,165 +113,60 @@ def _storage(message: str) -> AppError:
 
 
 def _state(row: sqlite3.Row) -> ConversationState:
-    data = dict(row)
-    data["last_user_activity_at"] = _date(data["last_user_activity_at"])
-    data["last_proactive_at"] = _date(data["last_proactive_at"])
-    return ConversationState(**data)
+    return ConversationState(
+        conversation_id=str(row["conversation_id"]),
+        epoch=int(row["epoch"]),
+        last_user_activity_at=_optional_date(row["last_user_activity_at"]),
+        proactive_count_today=int(row["proactive_count_today"]),
+        proactive_day=str(row["proactive_day"]),
+    )
 
 
-def _episode(row: sqlite3.Row) -> Episode:
-    data = dict(row)
-    data["started_at"] = _date(data["started_at"])
-    data["updated_at"] = _date(data["updated_at"])
-    data["closed_at"] = _date(data["closed_at"])
-    return Episode(**data)
-
-
-def _turn(row: sqlite3.Row) -> DialogueTurn:
-    data = dict(row)
-    data["origin"] = TurnOrigin(data["origin"])
-    data["created_at"] = _date(data["created_at"])
-    return DialogueTurn(**data)
+def _message(row: sqlite3.Row) -> ChatMessage:
+    return ChatMessage(
+        message_id=int(row["message_id"]),
+        conversation_id=str(row["conversation_id"]),
+        role=_role(row["role"]),
+        origin=MessageOrigin(str(row["origin"])),
+        content=str(row["content"]),
+        source_event_id=row["source_event_id"],
+        created_at=_required_date(row["created_at"]),
+    )
 
 
 def _event(row: sqlite3.Row) -> EventRecord:
-    data = dict(row)
-    data["status"] = EventStatus(data["status"])
-    data["delivery"] = EventDelivery(data["delivery"])
-    data["occurred_at"] = _date(data["occurred_at"])
-    data["received_at"] = _date(data["received_at"])
-    data["surfaced_at"] = _date(data["surfaced_at"])
-    brief = data.pop("brief_json")
-    data["brief"] = None if brief is None else EventBrief.model_validate_json(brief)
-    return EventRecord(**data)
-
-
-def _candidate(row: sqlite3.Row) -> MemoryCandidate:
-    data = dict(row)
-    data["block"] = MemoryBlock(data["block"])
-    data["status"] = MemoryStatus(data["status"])
-    data["created_at"] = _date(data["created_at"])
-    return MemoryCandidate(**data)
-
-
-def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    return {
-        str(row[1])
-        for row in connection.execute(f'PRAGMA table_info("{table}")').fetchall()
-    }
-
-
-def _unique_single_columns(connection: sqlite3.Connection, table: str) -> list[str]:
-    found: list[str] = []
-    for index in connection.execute(f'PRAGMA index_list("{table}")').fetchall():
-        if not index[2]:
-            continue
-        columns = [
-            str(row[2])
-            for row in connection.execute(f'PRAGMA index_info("{index[1]}")').fetchall()
-        ]
-        if len(columns) == 1:
-            found.extend(columns)
-    return found
-
-
-def _row_text(row: dict[str, object], name: str, default: str = "") -> str:
-    value = row.get(name)
-    return value if isinstance(value, str) else default
-
-
-def _row_int(row: dict[str, object], name: str, default: int = 0) -> int:
-    value = row.get(name)
-    return value if isinstance(value, int) else default
-
-
-def _row_optional_text(row: dict[str, object], name: str) -> str | None:
-    value = row.get(name)
-    return value if isinstance(value, str) else None
-
-
-def _conversation_id(row: dict[str, object], columns: set[str]) -> str:
-    if "conversation_id" not in columns:
-        return "default"
-    value = row.get("conversation_id")
-    return value if isinstance(value, str) and value else "default"
-
-
-def _legacy_findings(raw: str) -> tuple[str, ...]:
-    try:
-        decoded = json.loads(raw)
-    except ValueError:
-        return ()
-    return tuple(str(item) for item in decoded) if isinstance(decoded, list) else ()
-
-
-def _legacy_brief(
-    row: dict[str, object], event_id: str, name: str, key: str
-) -> str | None:
-    summary = _row_text(row, "summary")
-    findings = _row_text(row, "findings_json")
-    action = _row_text(row, "recommended_action")
-    if not summary and not findings and not action:
-        return None
-    headline = sanitize_single_line(summary)[:160] or name or event_id
-    facts = tuple(sanitize_single_line(item) for item in _legacy_findings(findings))[
-        :5
-    ] or (headline,)
-    brief = EventBrief.model_validate(
-        {
-            "headline": headline,
-            "facts": facts,
-            "impact": sanitize_single_line(action)[:240],
-            "suggested_angle": "",
-            "urgency": 0,
-            "relevance": 0,
-            "confidence": 0.0,
-            "requires_user_action": bool(action),
-            "sensitive": False,
-            "dedupe_key": sanitize_single_line(key)[:120] or event_id,
-        }
+    return EventRecord(
+        event_id=str(row["event_id"]),
+        conversation_id=str(row["conversation_id"]),
+        idempotency_key=str(row["idempotency_key"]),
+        name=str(row["name"]),
+        source=str(row["source"]),
+        occurred_at=_required_date(row["occurred_at"]),
+        received_at=_required_date(row["received_at"]),
+        status=EventStatus(str(row["status"])),
+        action=EventAction(str(row["action"])),
+        reason=str(row["reason"]),
+        note=str(row["note"]),
+        payload_json=str(row["payload_json"]),
+        failure_reason=str(row["failure_reason"]),
+        surfaced_at=_optional_date(row["surfaced_at"]),
+        linked_message_id=row["linked_message_id"],
     )
-    return brief.model_dump_json()
 
 
 def _require_supported_version(connection: sqlite3.Connection) -> None:
     version = int(connection.execute("PRAGMA user_version").fetchone()[0])
-    if version > CURRENT_SCHEMA_VERSION:
-        raise ValueError(
-            f"Database schema version {version} is newer than {CURRENT_SCHEMA_VERSION}."
-        )
-
-
-def _needs_migration(connection: sqlite3.Connection) -> bool:
-    tables = {
-        str(row[0])
-        for row in connection.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
-        ).fetchall()
-    }
-    for table in (
-        "episodes",
-        "dialogue_turns",
-        "events",
-        "memory_candidates",
-        "conversation_state",
-    ):
-        if table not in tables:
-            continue
-        columns = _table_columns(connection, table)
-        if "conversation_id" not in columns:
-            return True
-        if table == "episodes" and "episode_id" not in columns:
-            return True
-        if table == "events" and (
-            "event_id" not in columns or "received_at" not in columns
-        ):
-            return True
-        if table == "events" and "idempotency_key" in _unique_single_columns(
-            connection, table
-        ):
-            return True
-    return False
+    if version == CURRENT_SCHEMA_VERSION:
+        return
+    tables = connection.execute(
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+    ).fetchall()
+    if version == 0 and not tables:
+        return
+    raise ValueError(
+        f"Incompatible database schema version {version} (expected "
+        f"{CURRENT_SCHEMA_VERSION}). Remove the old database or choose a fresh DATA_DIR."
+    )
 
 
 class Store:
@@ -252,169 +178,8 @@ class Store:
             self._init_error = self._prepare()
 
     def _prepare(self) -> AppError | None:
-        try:
-            connection = sqlite3.connect(self._db)
-            try:
-                connection.row_factory = sqlite3.Row
-                connection.execute("PRAGMA busy_timeout = 5000")
-                _require_supported_version(connection)
-                if _needs_migration(connection):
-                    self._migrate(connection)
-                connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
-                connection.commit()
-            finally:
-                connection.close()
-        except (sqlite3.Error, OSError, ValueError) as exc:
-            return _storage(str(exc))
-        return None
-
-    def _migrate(self, connection: sqlite3.Connection) -> None:
-        connection.execute("PRAGMA foreign_keys = OFF")
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            tables = {
-                str(row[0])
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                ).fetchall()
-            }
-            present = [table for table in _LEGACY_TABLES if table in tables]
-            columns = {table: _table_columns(connection, table) for table in present}
-            legacy = {
-                table: [
-                    dict(row) for row in connection.execute(f'SELECT * FROM "{table}"')
-                ]
-                for table in present
-            }
-            for table in present:
-                for index in connection.execute(
-                    f'PRAGMA index_list("{table}")'
-                ).fetchall():
-                    name = str(index[1])
-                    if name.startswith("sqlite_autoindex"):
-                        continue
-                    connection.execute(f'DROP INDEX IF EXISTS "{name}"')
-                connection.execute(f'DROP TABLE "{table}"')
-            for statement in _SCHEMA.split(";"):
-                if statement.strip():
-                    connection.execute(statement)
-            now = _stamp(datetime.now(UTC))
-            conversation_ids = {"default"} | {
-                _conversation_id(row, columns[table])
-                for table in present
-                for row in legacy[table]
-            }
-            for conversation_id in sorted(conversation_ids):
-                connection.execute(
-                    "INSERT OR IGNORE INTO conversations "
-                    "(conversation_id, created_at) VALUES (?, ?)",
-                    (conversation_id, now),
-                )
-            for row in legacy.get("conversation_state", []):
-                connection.execute(
-                    "INSERT OR REPLACE INTO conversation_state "
-                    "(conversation_id, epoch, last_user_activity_at, "
-                    "last_proactive_at, proactive_count_today, proactive_day) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        _conversation_id(row, columns["conversation_state"]),
-                        _row_int(row, "epoch"),
-                        _row_optional_text(row, "last_user_activity_at"),
-                        _row_optional_text(row, "last_proactive_at"),
-                        _row_int(row, "proactive_count_today"),
-                        _row_text(row, "proactive_day"),
-                    ),
-                )
-            for row in legacy.get("episodes", []):
-                connection.execute(
-                    "INSERT INTO episodes (episode_id, conversation_id, title, "
-                    "overview, summary, started_at, updated_at, turn_count, "
-                    "summarized_turn_count, closed_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        _row_text(row, "episode_id", _row_text(row, "id")),
-                        _conversation_id(row, columns["episodes"]),
-                        _row_text(row, "title"),
-                        _row_text(row, "overview"),
-                        _row_text(row, "summary"),
-                        _row_text(row, "started_at", now),
-                        _row_text(row, "updated_at", now),
-                        _row_int(row, "turn_count"),
-                        _row_int(row, "summarized_turn_count"),
-                        _row_optional_text(row, "closed_at"),
-                    ),
-                )
-            for row in legacy.get("dialogue_turns", []):
-                connection.execute(
-                    "INSERT INTO dialogue_turns (episode_id, conversation_id, seq, "
-                    "turn_index, role, origin, content, source_event_id, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        _row_text(row, "episode_id"),
-                        _conversation_id(row, columns["dialogue_turns"]),
-                        _row_int(row, "seq", _row_int(row, "turn_index")),
-                        _row_int(row, "turn_index", _row_int(row, "seq")),
-                        _row_text(row, "role", "assistant"),
-                        _row_text(row, "origin", "reply"),
-                        _row_text(row, "content"),
-                        _row_optional_text(row, "source_event_id"),
-                        _row_text(row, "created_at", now),
-                    ),
-                )
-            for row in legacy.get("events", []):
-                event_id = _row_text(row, "event_id", _row_text(row, "id"))
-                key = _row_text(row, "idempotency_key", event_id)
-                name = _row_text(row, "name")
-                brief = row.get("brief_json")
-                if not isinstance(brief, str) or not brief:
-                    brief = _legacy_brief(row, event_id, name, key)
-                connection.execute(
-                    "INSERT INTO events (event_id, conversation_id, "
-                    "idempotency_key, name, source, occurred_at, received_at, "
-                    "status, delivery, merge_reason, payload_json, brief_json, "
-                    "failure_reason, surfaced_at, linked_turn_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        event_id,
-                        _conversation_id(row, columns["events"]),
-                        key,
-                        name,
-                        _row_text(row, "source"),
-                        _row_text(row, "occurred_at", now),
-                        _row_text(
-                            row, "received_at", _row_text(row, "recorded_at", now)
-                        ),
-                        _row_text(row, "status", "received"),
-                        _row_text(row, "delivery", "silent"),
-                        _row_text(row, "merge_reason"),
-                        _row_text(row, "payload_json", "{}"),
-                        brief,
-                        _row_text(row, "failure_reason"),
-                        _row_optional_text(row, "surfaced_at"),
-                        _row_optional_text(row, "linked_turn_id"),
-                    ),
-                )
-            for row in legacy.get("memory_candidates", []):
-                connection.execute(
-                    "INSERT INTO memory_candidates (candidate_id, "
-                    "conversation_id, block, content, reason, status, created_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        _row_text(row, "candidate_id", _row_text(row, "id")),
-                        _conversation_id(row, columns["memory_candidates"]),
-                        _row_text(row, "block", "user"),
-                        _row_optional_text(row, "content"),
-                        _row_text(row, "reason"),
-                        _row_text(row, "status", "pending"),
-                        _row_text(row, "created_at", now),
-                    ),
-                )
-            connection.execute("PRAGMA foreign_keys = ON")
-            connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
-            connection.commit()
-        except Exception:
-            connection.rollback()
-            connection.execute("PRAGMA foreign_keys = ON")
-            raise
+        checked = self._read(lambda _connection: None, empty=None)
+        return checked.error if isinstance(checked, Err) else None
 
     def _open(self, *, readonly: bool) -> sqlite3.Connection:
         if readonly:
@@ -469,13 +234,19 @@ class Store:
         self, connection: sqlite3.Connection, conversation_id: str, now: datetime
     ) -> None:
         connection.execute(
-            "INSERT OR IGNORE INTO conversations VALUES (?, ?)",
+            "INSERT OR IGNORE INTO conversations (conversation_id, created_at) "
+            "VALUES (?, ?)",
             (conversation_id, _stamp(now)),
         )
-        connection.execute(
-            "INSERT OR IGNORE INTO conversation_state (conversation_id) VALUES (?)",
+
+    def _state_or_default(
+        self, connection: sqlite3.Connection, conversation_id: str
+    ) -> ConversationState:
+        row = connection.execute(
+            "SELECT * FROM conversations WHERE conversation_id = ?",
             (conversation_id,),
-        )
+        ).fetchone()
+        return ConversationState(conversation_id) if row is None else _state(row)
 
     def ensure_conversation(
         self, conversation_id: str, now: datetime
@@ -485,15 +256,6 @@ class Store:
             return self._state_or_default(connection, conversation_id)
 
         return self._write(run)
-
-    def _state_or_default(
-        self, connection: sqlite3.Connection, conversation_id: str
-    ) -> ConversationState:
-        row = connection.execute(
-            "SELECT * FROM conversation_state WHERE conversation_id = ?",
-            (conversation_id,),
-        ).fetchone()
-        return ConversationState(conversation_id) if row is None else _state(row)
 
     def get_state(self, conversation_id: str) -> Result[ConversationState, AppError]:
         return self._read(
@@ -505,415 +267,86 @@ class Store:
         self, conversation_id: str, now: datetime
     ) -> Result[ConversationState, AppError]:
         def run(connection: sqlite3.Connection) -> ConversationState:
+            self._ensure_conversation(connection, conversation_id, now)
             connection.execute(
-                "UPDATE conversation_state SET epoch = epoch + 1, last_user_activity_at = ? WHERE conversation_id = ?",
+                "UPDATE conversations SET epoch = epoch + 1, "
+                "last_user_activity_at = ? WHERE conversation_id = ?",
                 (_stamp(now), conversation_id),
             )
             return self._state_or_default(connection, conversation_id)
 
         return self._write(run)
 
-    def record_proactive(
-        self, conversation_id: str, now: datetime
-    ) -> Result[ConversationState, AppError]:
-        def run(connection: sqlite3.Connection) -> ConversationState:
-            self._record_proactive(connection, conversation_id, now)
-            return self._state_or_default(connection, conversation_id)
-
-        return self._write(run)
-
-    def get_open_episode(
-        self, conversation_id: str
-    ) -> Result[Episode | None, AppError]:
-        return self._read(
-            lambda connection: self._episode_or_none(
-                connection,
-                "SELECT * FROM episodes WHERE conversation_id = ? AND closed_at IS NULL",
-                (conversation_id,),
-            ),
-            empty=None,
-        )
-
-    def get_episode(self, episode_id: str) -> Result[Episode | None, AppError]:
-        return self._read(
-            lambda connection: self._episode_or_none(
-                connection, "SELECT * FROM episodes WHERE episode_id = ?", (episode_id,)
-            ),
-            empty=None,
-        )
-
-    def get_episode_in(
-        self, conversation_id: str, episode_id: str
-    ) -> Result[Episode | None, AppError]:
-        return self._read(
-            lambda connection: self._episode_or_none(
-                connection,
-                "SELECT * FROM episodes WHERE conversation_id = ? AND episode_id = ?",
-                (conversation_id, episode_id),
-            ),
-            empty=None,
-        )
-
-    def _episode_or_none(
-        self,
-        connection: sqlite3.Connection,
-        sql: str,
-        parameters: tuple[object, ...],
-    ) -> Episode | None:
-        row = connection.execute(sql, parameters).fetchone()
-        return None if row is None else _episode(row)
-
-    def list_episodes(
-        self, conversation_id: str, *, limit: int = 20
-    ) -> Result[tuple[Episode, ...], AppError]:
-        if limit <= 0:
-            return Ok(())
-
-        def run(connection: sqlite3.Connection) -> tuple[Episode, ...]:
-            rows = connection.execute(
-                "SELECT * FROM episodes WHERE conversation_id = ? ORDER BY updated_at DESC, rowid DESC LIMIT ?",
-                (conversation_id, limit),
-            ).fetchall()
-            return tuple(_episode(row) for row in rows)
-
-        return self._read(run, empty=())
-
-    def record_turns(
-        self,
-        conversation_id: str,
-        episode_id: str | None,
-        entries: Sequence[TurnEntry],
-        *,
-        now: datetime,
-        title: str,
-        max_turns: int,
-        gap_minutes: int,
-    ) -> Result[tuple[Episode, tuple[DialogueTurn, ...]], AppError]:
-        def run(
-            connection: sqlite3.Connection,
-        ) -> tuple[Episode, tuple[DialogueTurn, ...]]:
-            return self._record_turns(
-                connection,
-                conversation_id,
-                episode_id,
-                entries,
-                now=now,
-                title=title,
-                max_turns=max_turns,
-                gap_minutes=gap_minutes,
-            )
-
-        return self._write(run)
-
-    def _record_turns(
+    def _insert_message(
         self,
         connection: sqlite3.Connection,
         conversation_id: str,
-        episode_id: str | None,
-        entries: Sequence[TurnEntry],
-        *,
+        entry: MessageEntry,
         now: datetime,
-        title: str,
-        max_turns: int,
-        gap_minutes: int,
-    ) -> tuple[Episode, tuple[DialogueTurn, ...]]:
-        self._ensure_conversation(connection, conversation_id, now)
-        episode = (
-            None
-            if episode_id is None
-            else self._episode_or_none(
-                connection,
-                "SELECT * FROM episodes WHERE episode_id = ?",
-                (episode_id,),
-            )
-        )
-        if episode is None or should_rollover(
-            episode, now, max_turns=max_turns, gap_minutes=gap_minutes
-        ):
-            if episode is not None and episode.closed_at is None:
-                connection.execute(
-                    "UPDATE episodes SET closed_at = ? WHERE episode_id = ?",
-                    (_stamp(now), episode.episode_id),
-                )
-            open_row = connection.execute(
-                "SELECT * FROM episodes WHERE conversation_id = ? AND closed_at IS NULL",
-                (conversation_id,),
-            ).fetchone()
-            episode = (
-                _episode(open_row)
-                if open_row is not None
-                else self._insert_episode(connection, conversation_id, title, now)
-            )
-        seq = self._next_seq(connection, conversation_id)
-        turns = tuple(
-            DialogueTurn(
+    ) -> ChatMessage:
+        role, origin, content, source_event_id = entry
+        cursor = connection.execute(
+            "INSERT INTO messages "
+            "(conversation_id, role, origin, content, source_event_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
                 conversation_id,
-                episode.episode_id,
-                seq + offset,
-                episode.turn_count + offset + 1,
                 role,
-                origin,
+                origin.value,
                 content,
                 source_event_id,
-                now,
-            )
-            for offset, (role, origin, content, source_event_id) in enumerate(entries)
-        )
-        connection.executemany(
-            "INSERT INTO dialogue_turns VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            [
-                (
-                    turn.episode_id,
-                    turn.conversation_id,
-                    turn.seq,
-                    turn.turn_index,
-                    turn.role,
-                    turn.origin.value,
-                    turn.content,
-                    turn.source_event_id,
-                    _stamp(turn.created_at),
-                )
-                for turn in turns
-            ],
-        )
-        connection.execute(
-            "UPDATE episodes SET turn_count = ?, updated_at = ? WHERE episode_id = ?",
-            (episode.turn_count + len(turns), _stamp(now), episode.episode_id),
-        )
-        return (
-            replace(
-                episode, turn_count=episode.turn_count + len(turns), updated_at=now
+                _stamp(now),
             ),
-            turns,
+        )
+        return ChatMessage(
+            message_id=int(cursor.lastrowid or 0),
+            conversation_id=conversation_id,
+            role=role,
+            origin=origin,
+            content=content,
+            source_event_id=source_event_id,
+            created_at=now.astimezone(UTC),
         )
 
-    def commit_proactive(
+    def append_messages(
         self,
         conversation_id: str,
-        event_id: str,
-        brief: EventBrief,
-        *,
-        received_epoch: int,
-        text: str,
+        entries: Sequence[MessageEntry],
         now: datetime,
-        policy: ProactivePolicy,
-        title: str,
-        max_turns: int,
-        gap_minutes: int,
-    ) -> Result[ProactiveCommit, AppError]:
-        def run(connection: sqlite3.Connection) -> ProactiveCommit:
-            state = self._state_or_default(connection, conversation_id)
-            if state.epoch != received_epoch:
-                self._downgrade(
-                    connection,
-                    event_id,
-                    brief,
-                    EventDelivery.AMBIENT,
-                    "epoch_conflict",
-                    EventStatus.COMPLETED,
-                )
-                return ProactiveCommit(EventDelivery.AMBIENT, "epoch_conflict")
-            decision = decide_merge(brief, state, now, policy)
-            if decision.delivery is not EventDelivery.PROACTIVE:
-                match decision.delivery:
-                    case EventDelivery.SILENT:
-                        status = EventStatus.SUPPRESSED
-                    case EventDelivery.AMBIENT | EventDelivery.PROACTIVE:
-                        status = EventStatus.COMPLETED
-                    case _:
-                        assert_never(decision.delivery)
-                self._downgrade(
-                    connection,
-                    event_id,
-                    brief,
-                    decision.delivery,
-                    decision.reason,
-                    status,
-                )
-                return ProactiveCommit(decision.delivery, decision.reason)
-            episode = self._episode_or_none(
-                connection,
-                "SELECT * FROM episodes WHERE conversation_id = ? AND closed_at IS NULL",
-                (conversation_id,),
-            )
-            entry: TurnEntry = ("assistant", TurnOrigin.PROACTIVE, text, event_id)
-            episode, turns = self._record_turns(
-                connection,
-                conversation_id,
-                None if episode is None else episode.episode_id,
-                (entry,),
-                now=now,
-                title=title,
-                max_turns=max_turns,
-                gap_minutes=gap_minutes,
-            )
-            turn = turns[-1]
-            connection.execute(
-                "UPDATE events SET status = ?, delivery = ?, merge_reason = ?, "
-                "brief_json = ?, failure_reason = '', surfaced_at = ?, "
-                "linked_turn_id = ? WHERE event_id = ?",
-                (
-                    EventStatus.COMPLETED.value,
-                    EventDelivery.PROACTIVE.value,
-                    decision.reason,
-                    brief.model_dump_json(),
-                    _stamp(now),
-                    f"{episode.episode_id}:{turn.turn_index}",
-                    event_id,
-                ),
-            )
-            self._record_proactive(connection, conversation_id, now)
-            return ProactiveCommit(
-                EventDelivery.PROACTIVE,
-                decision.reason,
-                episode.episode_id,
-                turn,
+    ) -> Result[tuple[ChatMessage, ...], AppError]:
+        def run(connection: sqlite3.Connection) -> tuple[ChatMessage, ...]:
+            self._ensure_conversation(connection, conversation_id, now)
+            return tuple(
+                self._insert_message(connection, conversation_id, entry, now)
+                for entry in entries
             )
 
         return self._write(run)
 
-    def _downgrade(
-        self,
-        connection: sqlite3.Connection,
-        event_id: str,
-        brief: EventBrief,
-        delivery: EventDelivery,
-        reason: str,
-        status: EventStatus,
-    ) -> None:
-        connection.execute(
-            "UPDATE events SET status = ?, delivery = ?, merge_reason = ?, "
-            "brief_json = ?, failure_reason = '', surfaced_at = NULL, "
-            "linked_turn_id = NULL WHERE event_id = ?",
-            (
-                status.value,
-                delivery.value,
-                reason,
-                brief.model_dump_json(),
-                event_id,
-            ),
-        )
-
-    def _record_proactive(
-        self, connection: sqlite3.Connection, conversation_id: str, now: datetime
-    ) -> None:
-        current = self._state_or_default(connection, conversation_id)
-        today = now.date().isoformat()
-        count = (
-            1 if current.proactive_day != today else current.proactive_count_today + 1
-        )
-        connection.execute(
-            "UPDATE conversation_state SET last_proactive_at = ?, "
-            "proactive_count_today = ?, proactive_day = ? WHERE conversation_id = ?",
-            (_stamp(now), count, today, conversation_id),
-        )
-
-    def _insert_episode(
-        self,
-        connection: sqlite3.Connection,
-        conversation_id: str,
-        title: str,
-        now: datetime,
-    ) -> Episode:
-        episode = Episode(
-            f"ep_{uuid4().hex[:12]}",
-            conversation_id,
-            title,
-            "",
-            "",
-            now,
-            now,
-            0,
-            0,
-            None,
-        )
-        connection.execute(
-            "INSERT INTO episodes (episode_id, conversation_id, title, started_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-            (episode.episode_id, conversation_id, title, _stamp(now), _stamp(now)),
-        )
-        return episode
-
-    def _next_seq(self, connection: sqlite3.Connection, conversation_id: str) -> int:
-        row = connection.execute(
-            "SELECT COALESCE(MAX(seq), 0) FROM dialogue_turns WHERE conversation_id = ?",
-            (conversation_id,),
-        ).fetchone()
-        return int(row[0]) + 1
-
-    def search_episodes(
-        self, conversation_id: str, query: str, *, limit: int = 10
-    ) -> Result[tuple[Episode, ...], AppError]:
-        if limit <= 0:
-            return Ok(())
-        pattern = f"%{query}%"
-
-        def run(connection: sqlite3.Connection) -> tuple[Episode, ...]:
-            rows = connection.execute(
-                "SELECT * FROM episodes WHERE conversation_id = ? AND "
-                "(title LIKE ? OR overview LIKE ? OR summary LIKE ?) "
-                "ORDER BY updated_at DESC, rowid DESC LIMIT ?",
-                (conversation_id, pattern, pattern, pattern, limit),
-            ).fetchall()
-            return tuple(_episode(row) for row in rows)
-
-        return self._read(run, empty=())
-
-    def list_turns(
-        self, episode_id: str, *, limit: int = 100
-    ) -> Result[tuple[DialogueTurn, ...], AppError]:
+    def recent_messages(
+        self, conversation_id: str, *, limit: int = 30
+    ) -> Result[tuple[ChatMessage, ...], AppError]:
         if limit <= 0:
             return Ok(())
 
-        def run(connection: sqlite3.Connection) -> tuple[DialogueTurn, ...]:
+        def run(connection: sqlite3.Connection) -> tuple[ChatMessage, ...]:
             rows = connection.execute(
-                "SELECT * FROM dialogue_turns WHERE episode_id = ? ORDER BY turn_index DESC LIMIT ?",
-                (episode_id, limit),
-            ).fetchall()
-            return tuple(_turn(row) for row in reversed(rows))
-
-        return self._read(run, empty=())
-
-    def recent_turns(
-        self, conversation_id: str, *, limit: int = 20
-    ) -> Result[tuple[DialogueTurn, ...], AppError]:
-        if limit <= 0:
-            return Ok(())
-
-        def run(connection: sqlite3.Connection) -> tuple[DialogueTurn, ...]:
-            rows = connection.execute(
-                "SELECT * FROM dialogue_turns WHERE conversation_id = ? ORDER BY seq DESC LIMIT ?",
+                "SELECT * FROM messages WHERE conversation_id = ? "
+                "ORDER BY message_id DESC LIMIT ?",
                 (conversation_id, limit),
             ).fetchall()
-            return tuple(_turn(row) for row in reversed(rows))
+            return tuple(_message(row) for row in reversed(rows))
 
         return self._read(run, empty=())
-
-    def update_summary(
-        self,
-        episode_id: str,
-        *,
-        title: str,
-        overview: str,
-        summary: str,
-        summarized_turn_count: int,
-    ) -> Result[Episode | None, AppError]:
-        def run(connection: sqlite3.Connection) -> Episode | None:
-            connection.execute(
-                "UPDATE episodes SET title = ?, overview = ?, summary = ?, summarized_turn_count = ? WHERE episode_id = ?",
-                (title, overview, summary, summarized_turn_count, episode_id),
-            )
-            return self._episode_or_none(
-                connection,
-                "SELECT * FROM episodes WHERE episode_id = ?",
-                (episode_id,),
-            )
-
-        return self._write(run)
 
     def insert_event(self, record: EventRecord) -> Result[EventRecord, AppError]:
         def run(connection: sqlite3.Connection) -> EventRecord:
+            self._ensure_conversation(
+                connection, record.conversation_id, record.received_at
+            )
             connection.execute(
-                "INSERT OR IGNORE INTO events VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO events VALUES "
+                "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     record.event_id,
                     record.conversation_id,
@@ -923,52 +356,114 @@ class Store:
                     _stamp(record.occurred_at),
                     _stamp(record.received_at),
                     record.status.value,
-                    record.delivery.value,
-                    record.merge_reason,
+                    record.action.value,
+                    record.reason,
+                    record.note,
                     record.payload_json,
-                    None if record.brief is None else record.brief.model_dump_json(),
                     record.failure_reason,
                     None if record.surfaced_at is None else _stamp(record.surfaced_at),
-                    record.linked_turn_id,
+                    record.linked_message_id,
                 ),
             )
-            existing = self._event_or_none(
-                connection,
-                "conversation_id = ? AND idempotency_key = ?",
+            row = connection.execute(
+                "SELECT * FROM events WHERE conversation_id = ? AND idempotency_key = ?",
                 (record.conversation_id, record.idempotency_key),
-            )
-            return record if existing is None else existing
+            ).fetchall()[0]
+            return _event(row)
 
         return self._write(run)
 
-    def update_event(
+    def finalize_event(
         self,
+        conversation_id: str,
         event_id: str,
+        decision: EventDecision,
         *,
-        status: EventStatus,
-        delivery: EventDelivery,
-        merge_reason: str,
-        brief: EventBrief | None,
-        failure_reason: str,
-        surfaced_at: datetime | None,
-        linked_turn_id: str | None,
-    ) -> Result[None, AppError]:
+        received_epoch: int,
+        now: datetime,
+        policy: ProactivePolicy,
+    ) -> Result[EventCommit, AppError]:
+        def run(connection: sqlite3.Connection) -> EventCommit:
+            state = self._state_or_default(connection, conversation_id)
+            outcome = apply_policy(
+                decision,
+                state,
+                now,
+                policy,
+                epoch_changed=(state.epoch != received_epoch),
+            )
+            reason = sanitize_single_line(outcome.reason)[:160] or "evaluated"
+            note = sanitize_single_line(decision.note)[:240]
+            inserted: ChatMessage | None = None
+            final_note = note
+            surfaced_at: str | None = None
+            linked_message_id: int | None = None
+            if outcome.action is EventAction.SPEAK:
+                spoken = sanitize_untrusted(decision.message).strip()
+                final_note = note or sanitize_single_line(spoken)[:240]
+                inserted = self._insert_message(
+                    connection,
+                    conversation_id,
+                    ("assistant", MessageOrigin.PROACTIVE, spoken, event_id),
+                    now,
+                )
+                surfaced_at = _stamp(now)
+                linked_message_id = inserted.message_id
+                today = now.date().isoformat()
+                count = (
+                    1
+                    if state.proactive_day != today
+                    else state.proactive_count_today + 1
+                )
+                connection.execute(
+                    "UPDATE conversations SET proactive_count_today = ?, "
+                    "proactive_day = ? WHERE conversation_id = ?",
+                    (count, today, conversation_id),
+                )
+            connection.execute(
+                "UPDATE events SET status = ?, action = ?, reason = ?, note = ?, "
+                "failure_reason = '', surfaced_at = ?, linked_message_id = ? "
+                "WHERE event_id = ?",
+                (
+                    EventStatus.COMPLETED.value,
+                    outcome.action.value,
+                    reason,
+                    final_note,
+                    surfaced_at,
+                    linked_message_id,
+                    event_id,
+                ),
+            )
+            return EventCommit(outcome.action, reason, final_note, inserted)
+
+        return self._write(run)
+
+    def fail_event(self, event_id: str, failure_reason: str) -> Result[None, AppError]:
         def run(connection: sqlite3.Connection) -> None:
             connection.execute(
-                "UPDATE events SET status = ?, delivery = ?, merge_reason = ?, brief_json = ?, failure_reason = ?, surfaced_at = ?, linked_turn_id = ? WHERE event_id = ?",
+                "UPDATE events SET status = ?, action = ?, reason = 'worker_failed', "
+                "failure_reason = ?, surfaced_at = NULL, linked_message_id = NULL "
+                "WHERE event_id = ?",
                 (
-                    status.value,
-                    delivery.value,
-                    merge_reason,
-                    None if brief is None else brief.model_dump_json(),
+                    EventStatus.FAILED.value,
+                    EventAction.IGNORE.value,
                     failure_reason,
-                    None if surfaced_at is None else _stamp(surfaced_at),
-                    linked_turn_id,
                     event_id,
                 ),
             )
 
         return self._write(run)
+
+    def _event_or_none(
+        self,
+        connection: sqlite3.Connection,
+        where: str,
+        parameters: tuple[object, ...],
+    ) -> EventRecord | None:
+        row = connection.execute(
+            f"SELECT * FROM events WHERE {where}", parameters
+        ).fetchone()
+        return None if row is None else _event(row)
 
     def get_event(self, event_id: str) -> Result[EventRecord | None, AppError]:
         return self._read(
@@ -990,48 +485,8 @@ class Store:
             empty=None,
         )
 
-    def _event_or_none(
-        self,
-        connection: sqlite3.Connection,
-        where: str,
-        parameters: tuple[object, ...],
-    ) -> EventRecord | None:
-        row = connection.execute(
-            f"SELECT * FROM events WHERE {where}", parameters
-        ).fetchone()
-        return None if row is None else _event(row)
-
-    def counts(self, conversation_id: str) -> Result[ConversationCounts, AppError]:
-        def run(connection: sqlite3.Connection) -> ConversationCounts:
-            row = connection.execute(
-                "SELECT "
-                "(SELECT COUNT(*) FROM dialogue_turns WHERE conversation_id = ?), "
-                "(SELECT COUNT(*) FROM episodes WHERE conversation_id = ?), "
-                "(SELECT COUNT(*) FROM events WHERE conversation_id = ?), "
-                "(SELECT COUNT(*) FROM memory_candidates WHERE conversation_id = ? AND status = ?), "
-                "(SELECT COUNT(*) FROM memory_candidates WHERE conversation_id = ? AND status = ?), "
-                "(SELECT COUNT(*) FROM memory_candidates WHERE conversation_id = ? AND status = ?)",
-                (
-                    conversation_id,
-                    conversation_id,
-                    conversation_id,
-                    conversation_id,
-                    MemoryStatus.PENDING.value,
-                    conversation_id,
-                    MemoryStatus.PROMOTED.value,
-                    conversation_id,
-                    MemoryStatus.REJECTED.value,
-                ),
-            ).fetchone()
-            return ConversationCounts(*(int(value) for value in row))
-
-        return self._read(run, empty=ConversationCounts())
-
     def list_events(
-        self,
-        conversation_id: str,
-        *,
-        limit: int = 10,
+        self, conversation_id: str, *, limit: int = 20
     ) -> Result[tuple[EventRecord, ...], AppError]:
         if limit <= 0:
             return Ok(())
@@ -1046,90 +501,48 @@ class Store:
 
         return self._read(run, empty=())
 
-    def _set_ids(
-        self,
-        table: str,
-        column: str,
-        assignment: str,
-        leading: tuple[object, ...],
-        identifiers: Sequence[str],
-    ) -> Result[None, AppError]:
-        def run(connection: sqlite3.Connection) -> None:
-            markers = ", ".join("?" for _ in identifiers)
-            connection.execute(
-                f"UPDATE {table} SET {assignment} WHERE {column} IN ({markers})",
-                (*leading, *identifiers),
-            )
-
-        return self._write(run)
-
     def mark_surfaced(
         self, event_ids: Sequence[str], now: datetime
     ) -> Result[None, AppError]:
         if not event_ids:
             return Ok(None)
-        return self._set_ids(
-            "events", "event_id", "surfaced_at = ?", (_stamp(now),), event_ids
-        )
 
-    def save_candidate(self, candidate: MemoryCandidate) -> Result[None, AppError]:
         def run(connection: sqlite3.Connection) -> None:
+            markers = ", ".join("?" for _ in event_ids)
             connection.execute(
-                "INSERT OR REPLACE INTO memory_candidates VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (
-                    candidate.candidate_id,
-                    candidate.conversation_id,
-                    candidate.block.value,
-                    candidate.content,
-                    candidate.reason,
-                    candidate.status.value,
-                    _stamp(candidate.created_at),
-                ),
+                f"UPDATE events SET surfaced_at = ? WHERE event_id IN ({markers})",
+                (_stamp(now), *event_ids),
             )
 
         return self._write(run)
 
-    def list_candidates(
-        self, conversation_id: str, status: MemoryStatus
-    ) -> Result[tuple[MemoryCandidate, ...], AppError]:
-        def run(connection: sqlite3.Connection) -> tuple[MemoryCandidate, ...]:
-            rows = connection.execute(
-                "SELECT * FROM memory_candidates WHERE conversation_id = ? AND status = ? ORDER BY created_at, rowid",
-                (conversation_id, status.value),
-            ).fetchall()
-            return tuple(_candidate(row) for row in rows)
+    def counts(self, conversation_id: str) -> Result[ConversationCounts, AppError]:
+        def run(connection: sqlite3.Connection) -> ConversationCounts:
+            row = connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM messages WHERE conversation_id = ?), "
+                "(SELECT COUNT(*) FROM events WHERE conversation_id = ?)",
+                (conversation_id, conversation_id),
+            ).fetchone()
+            return ConversationCounts(int(row[0]), int(row[1]))
 
-        return self._read(run, empty=())
-
-    def set_candidate_status(
-        self, candidate_ids: Sequence[str], status: MemoryStatus
-    ) -> Result[None, AppError]:
-        if not candidate_ids:
-            return Ok(None)
-        return self._set_ids(
-            "memory_candidates",
-            "candidate_id",
-            "status = ?",
-            (status.value,),
-            candidate_ids,
-        )
+        return self._read(run, empty=ConversationCounts())
 
     def reset_conversation(self, conversation_id: str) -> Result[int, AppError]:
         def run(connection: sqlite3.Connection) -> int:
-            count = connection.execute(
-                "SELECT COUNT(*) FROM dialogue_turns WHERE conversation_id = ?",
-                (conversation_id,),
-            ).fetchone()[0]
-            for table in ("dialogue_turns", "episodes", "events", "memory_candidates"):
-                connection.execute(
-                    f"DELETE FROM {table} WHERE conversation_id = ?",
-                    (conversation_id,),
-                )
+            deleted = connection.execute(
+                "DELETE FROM messages WHERE conversation_id = ?", (conversation_id,)
+            ).rowcount
             connection.execute(
-                "UPDATE conversation_state SET epoch = epoch + 1, last_user_activity_at = NULL, last_proactive_at = NULL, proactive_count_today = 0, proactive_day = '' WHERE conversation_id = ?",
+                "DELETE FROM events WHERE conversation_id = ?", (conversation_id,)
+            )
+            connection.execute(
+                "UPDATE conversations SET epoch = epoch + 1, "
+                "last_user_activity_at = NULL, proactive_count_today = 0, "
+                "proactive_day = '' WHERE conversation_id = ?",
                 (conversation_id,),
             )
-            return count
+            return deleted
 
         return self._write(run)
 
@@ -1146,7 +559,7 @@ class Store:
     ) -> Result[None, AppError]:
         try:
             with self._memory_lock():
-                memory = self._read_memory_unlocked()
+                memory = self.read_memory()
                 if isinstance(memory, Err):
                     return memory
                 updated = transform(memory.value)
@@ -1157,7 +570,8 @@ class Store:
             return Err(_storage(str(exc)))
         return Ok(None)
 
-    def _memory_lock(self) -> _FileLock:
+    @contextmanager
+    def _memory_lock(self) -> Generator[None]:
         self._memory.parent.mkdir(parents=True, exist_ok=True)
         lock_path = self._memory.with_name(f"{self._memory.name}.lock")
         handle = os.open(lock_path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, 0o600)
@@ -1166,16 +580,13 @@ class Store:
         except BaseException:
             os.close(handle)
             raise
-        return _FileLock(handle)
-
-    def _read_memory_unlocked(self) -> Result[MemoryBlocks, AppError]:
         try:
-            text = self._memory.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return Ok(MemoryBlocks())
-        except OSError as exc:
-            return Err(_storage(str(exc)))
-        return Ok(_parse_memory(text))
+            yield
+        finally:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+            finally:
+                os.close(handle)
 
     def _write_memory_unlocked(self, blocks: MemoryBlocks) -> None:
         temporary: Path | None = None
@@ -1195,22 +606,13 @@ class Store:
             raise
 
     def read_memory(self) -> Result[MemoryBlocks, AppError]:
-        return self._read_memory_unlocked()
-
-
-class _FileLock:
-    def __init__(self, handle: int) -> None:
-        self._handle = handle
-
-    def __enter__(self) -> None:
-        return None
-
-    def __exit__(self, *args: object) -> None:
-        del args
         try:
-            fcntl.flock(self._handle, fcntl.LOCK_UN)
-        finally:
-            os.close(self._handle)
+            text = self._memory.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return Ok(MemoryBlocks())
+        except OSError as exc:
+            return Err(_storage(str(exc)))
+        return Ok(_parse_memory(text))
 
 
 def _parse_memory(text: str) -> MemoryBlocks:

@@ -18,6 +18,7 @@
     --bubble: #1b2030;
     --user: #6d5df6;
     --danger: #ff6b81;
+    --warn: #f5b971;
     --ok: #54e0a0;
     --radius: 20px;
     --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
@@ -37,7 +38,7 @@
   button { cursor: pointer; }
   #app {
     display: grid;
-    grid-template-columns: 244px minmax(0, 1fr) minmax(330px, 420px);
+    grid-template-columns: 244px minmax(0, 1fr) minmax(340px, 430px);
     gap: 18px;
     height: 100%;
     padding: 18px;
@@ -61,28 +62,30 @@
   }
   .brand h1 { font-size: 16px; margin: 0; letter-spacing: 0.01em; }
   .brand p { margin: 2px 0 0; font-size: 11px; color: var(--muted); }
-  .section-label {
-    font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
-    color: var(--muted); margin: 0 0 9px;
+  .section-label, .field label {
+    font-size: 10px; color: var(--muted); text-transform: uppercase;
   }
+  .section-label { letter-spacing: 0.16em; margin: 0 0 9px; }
+  .field label { letter-spacing: 0.06em; }
   select, input, textarea {
     width: 100%;
     background: var(--panel-2);
     border: 1px solid var(--line);
     border-radius: 12px;
-    padding: 10px 12px;
+    padding: 9px 11px;
     outline: none;
   }
   select:focus, input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(143,123,255,0.16); }
-  .row { display: flex; gap: 8px; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
   .row > * { min-width: 0; }
   .btn {
     border: 1px solid var(--line);
     background: var(--panel-2);
     border-radius: 12px;
-    padding: 10px 13px;
+    padding: 9px 12px;
     color: var(--text);
     white-space: nowrap;
+    font-size: 12px;
   }
   .btn:hover { border-color: var(--accent); }
   .btn-primary {
@@ -103,6 +106,9 @@
   }
   .chat-head h2 { margin: 0; font-size: 15px; }
   .chat-head .sub { color: var(--muted); font-size: 11px; margin-top: 3px; }
+  .chat-tools { display: none; gap: 6px; align-items: center; justify-content: flex-end; }
+  .chat-tools select, .chat-tools input { width: auto; padding: 6px 8px; font-size: 12px; }
+  .chat-tools input { width: 96px; }
   .pill { border: 1px solid var(--line); border-radius: 999px; padding: 5px 10px; font-size: 11px; color: var(--muted); }
   #messages { flex: 1; overflow-y: auto; padding: 24px 24px 12px; display: flex; flex-direction: column; gap: 14px; scroll-behavior: smooth; }
   .bubble-row { display: flex; gap: 10px; align-items: flex-end; max-width: 86%; }
@@ -147,12 +153,10 @@
   }
   .tab[aria-selected="true"] { background: rgba(143,123,255,0.18); color: var(--text); }
   .tab-panel { flex: 1; overflow-y: auto; min-height: 0; display: flex; flex-direction: column; gap: 12px; padding-right: 2px; }
-  .tab-panel.hidden { display: none; }
   .card { border: 1px solid var(--line); background: rgba(21,24,36,0.7); border-radius: 14px; padding: 12px; }
   .card h3 { margin: 0 0 8px; font-size: 12px; letter-spacing: 0.04em; }
   .field { display: flex; flex-direction: column; gap: 5px; margin-bottom: 9px; }
-  .field label { font-size: 10px; color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; }
-  .kv { display: grid; grid-template-columns: 92px minmax(0, 1fr); gap: 6px 10px; font-size: 12px; }
+  .kv { display: grid; grid-template-columns: 116px minmax(0, 1fr); gap: 6px 10px; font-size: 12px; }
   .kv span { color: var(--muted); }
   .kv b { font-weight: 600; overflow-wrap: anywhere; }
   pre {
@@ -160,17 +164,22 @@
     border: 1px solid var(--line); font-family: var(--mono); font-size: 10.5px;
     line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow: auto;
   }
-  .event-item { border-left: 2px solid var(--accent); padding: 7px 9px; margin-bottom: 7px; background: rgba(143,123,255,0.06); border-radius: 0 9px 9px 0; }
-  .event-item.failed { border-color: var(--danger); background: rgba(255,107,129,0.07); }
-  .event-item .meta { font-size: 10px; color: var(--muted); margin-top: 3px; }
+  .event-item { border-left: 3px solid var(--muted); padding: 8px 10px; margin-bottom: 8px; background: rgba(255,255,255,0.03); border-radius: 0 9px 9px 0; }
+  .event-item.speak { border-color: var(--ok); background: rgba(84,224,160,0.07); }
+  .event-item.note { border-color: var(--warn); background: rgba(245,185,113,0.07); }
+  .event-item.failed { border-color: var(--danger); background: rgba(255,107,129,0.08); }
+  .event-item .head { display: flex; justify-content: space-between; gap: 6px; font-size: 11px; margin-bottom: 4px; }
+  .event-item .badge { font-family: var(--mono); font-size: 10px; padding: 2px 6px; border-radius: 999px; border: 1px solid var(--line); }
+  .event-item .meta { font-size: 10px; color: var(--muted); margin-top: 4px; overflow-wrap: anywhere; }
   .muted { color: var(--muted); font-size: 11px; }
   .inline { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+  .mt { margin-top: 8px; }
   .hidden { display: none !important; }
   @media (max-width: 1120px) {
     #app { grid-template-columns: 210px minmax(0, 1fr); }
     #inspector {
       position: fixed; z-index: 20; top: 12px; right: 12px; bottom: 12px;
-      width: min(420px, calc(100vw - 24px));
+      width: min(430px, calc(100vw - 24px));
       transform: translateX(calc(100% + 24px)); transition: transform 0.22s ease;
       background: #0d0f15;
     }
@@ -181,6 +190,8 @@
     #rail { display: none; }
     #inspector { width: calc(100vw - 20px); }
     .bubble-row { max-width: 94%; }
+    .chat-head { flex-wrap: wrap; gap: 8px; }
+    .chat-tools { display: flex; flex: 1 1 100%; flex-wrap: wrap; }
   }
 </style>
 </head>
@@ -196,8 +207,11 @@
     </div>
     <div>
       <p class="section-label">Conversation</p>
-      <select id="conversation-select" aria-label="Conversation"></select>
-      <form id="conversation-form" class="row" style="margin-top:8px">
+      <select id="conversation-select" aria-label="Conversation">
+        <option value="default">default</option>
+        <option value="line:demo">line:demo</option>
+      </select>
+      <form id="conversation-form" class="row mt">
         <input id="conversation-input" placeholder="custom id" aria-label="Custom conversation id">
         <button class="btn" type="submit">Switch</button>
       </form>
@@ -209,7 +223,7 @@
       <button class="btn btn-primary" id="inspector-toggle" type="button">Inspector</button>
     </div>
     <p class="muted" style="margin-top:auto">
-      Events stay in the ledger. Ambient context waits for the next turn.
+      Events are judged in one LLM pass: speak now, note for next chat, or ignore.
     </p>
   </aside>
 
@@ -218,6 +232,15 @@
       <div>
         <h2>Sora</h2>
         <div class="sub" id="conversation-label">default</div>
+      </div>
+      <div class="chat-tools">
+        <select id="conversation-select-mobile" aria-label="Conversation (mobile)">
+          <option value="default">default</option>
+          <option value="line:demo">line:demo</option>
+        </select>
+        <input id="conversation-input-mobile" placeholder="custom id" aria-label="Custom conversation id (mobile)">
+        <button class="btn" id="conversation-switch-mobile" type="button">Switch</button>
+        <button class="btn" id="inspector-toggle-mobile" type="button" aria-controls="inspector" aria-expanded="false">Inspector</button>
       </div>
       <span class="pill" id="epoch-pill">epoch 0</span>
     </header>
@@ -243,22 +266,27 @@
     <section class="tab-panel" id="tab-events" role="tabpanel">
       <div class="card">
         <h3>Simulate external event</h3>
+        <div class="row" style="margin-bottom:10px">
+          <button class="btn" id="preset-urgent" type="button">緊急警報</button>
+          <button class="btn" id="preset-normal" type="button">通常通知</button>
+          <button class="btn" id="preset-noise" type="button">ノイズ</button>
+        </div>
         <form id="event-form">
           <div class="field">
-            <label for="event-name">kind</label>
+            <label for="event-name">name</label>
             <input id="event-name" value="email.received">
           </div>
           <div class="field">
             <label for="event-source">source</label>
-            <input id="event-source" value="simulator">
+            <input id="event-source" value="mail-bridge">
           </div>
           <div class="field">
             <label for="event-summary">summary</label>
-            <input id="event-summary" value="定例のお知らせ">
+            <input id="event-summary" value="鈴木さんから金曜14時の定例変更メール">
           </div>
           <div class="field">
-            <label for="event-urgency">urgency</label>
-            <input id="event-urgency" type="number" min="0" max="10" value="6">
+            <label for="event-details">details</label>
+            <textarea id="event-details" rows="2">場所が会議室Bに変更されました。返信は不要です。</textarea>
           </div>
           <div class="field">
             <label for="event-key">idempotency_key</label>
@@ -266,12 +294,11 @@
           </div>
           <button class="btn btn-primary" type="submit">POST /events</button>
         </form>
-        <div id="event-result" class="muted" style="margin-top:8px"></div>
+        <div id="event-result" class="muted mt"></div>
       </div>
       <div class="card">
         <h3>Event ledger</h3>
-        <div id="event-list"><p class="muted">No events yet.</p></div>
-        <div id="event-omissions" class="muted" style="margin-top:8px"></div>
+        <div id="event-list"></div>
       </div>
     </section>
 
@@ -279,24 +306,15 @@
       <div class="card">
         <h3>Core Memory</h3>
         <div class="kv" id="memory-kv"></div>
-        <pre id="memory-user"></pre>
-        <pre id="memory-relationship"></pre>
-        <pre id="memory-arc"></pre>
+        <pre id="memory-user" class="mt"></pre>
+        <pre id="memory-relationship" class="mt"></pre>
+        <pre id="memory-arc" class="mt"></pre>
       </div>
       <div class="card">
-        <h3>Episode summaries</h3>
-        <pre id="memory-episodes"></pre>
-      </div>
-      <div class="card">
-        <div class="inline">
-          <h3 style="margin:0">Sleep-time curation</h3>
-          <span class="muted" id="candidate-counts"></span>
-        </div>
-        <div class="row" style="margin-top:10px">
-          <button class="btn" id="curate-button" type="button">POST /curate</button>
+        <div class="row">
           <button class="btn btn-danger" id="reset-button" type="button">POST /reset</button>
         </div>
-        <div id="memory-result" class="muted" style="margin-top:8px"></div>
+        <div id="memory-result" class="muted mt"></div>
       </div>
     </section>
 
@@ -306,14 +324,15 @@
           <h3 style="margin:0">Cache inspector</h3>
           <button class="btn" id="context-refresh" type="button">Refresh</button>
         </div>
-        <div class="kv" id="context-kv"></div>
+        <div class="kv mt" id="context-kv"></div>
+        <div id="context-result" class="muted mt"></div>
       </div>
       <div class="card">
-        <h3>L0–L2 stable prefix</h3>
+        <h3>L0–L1 stable prefix</h3>
         <pre id="context-stable"></pre>
       </div>
       <div class="card">
-        <h3>L3 event section</h3>
+        <h3>L2 event section</h3>
         <pre id="context-events"></pre>
       </div>
     </section>
@@ -323,6 +342,27 @@
 <script>
 (() => {
   "use strict";
+
+  const PRESETS = {
+    urgent: {
+      name: "alert.triggered",
+      source: "infra-monitor",
+      summary: "本番APIのSSL証明書が2時間後に失効します",
+      details: "本日13:00までに更新作業の承認が必要です。対応しないと全通信が停止します。"
+    },
+    normal: {
+      name: "email.received",
+      source: "mail-bridge",
+      summary: "鈴木さんから金曜14時の定例変更メール",
+      details: "場所が会議室Bに変更されました。返信は不要です。"
+    },
+    noise: {
+      name: "telemetry.heartbeat",
+      source: "sensor-node",
+      summary: "periodic keepalive ok",
+      details: "status=nominal uptime=14231s"
+    }
+  };
 
   const state = {
     conversationId: "default",
@@ -353,6 +393,15 @@
     target.classList.toggle("error-chip", Boolean(failed));
   };
 
+  const renderKv = (id, pairs) => {
+    const target = byId(id);
+    target.replaceChildren();
+    for (const [key, value] of pairs) {
+      target.appendChild(node("span", "", key));
+      target.appendChild(node("b", "", value));
+    }
+  };
+
   const fetchJson = async (path, options) => {
     const response = await fetch(path, options);
     let payload = {};
@@ -365,6 +414,18 @@
       const message = payload.message || payload.error || String(response.status);
       throw new Error(message);
     }
+    return payload;
+  };
+
+  const fetchForConversation = async (pathSuffix) => {
+    const generation = state.convGen;
+    const conversationId = state.conversationId;
+    let query = "?conversation_id=" + encodeURIComponent(conversationId);
+    if (pathSuffix === "/timeline") query += "&limit=60";
+    const payload = await fetchJson(pathSuffix + query, {
+      signal: state.abort ? state.abort.signal : undefined
+    });
+    if (generation !== state.convGen || conversationId !== state.conversationId) return null;
     return payload;
   };
 
@@ -394,12 +455,8 @@
     scrollDown();
   };
 
-  const clearMessages = () => {
-    byId("messages").replaceChildren();
-  };
-
   const renderTimeline = (items) => {
-    clearMessages();
+    byId("messages").replaceChildren();
     for (const item of items) {
       const kind = String(item.kind || "");
       const text = String(item.content || "");
@@ -410,116 +467,83 @@
         if (role === "assistant") state.lastReply = text;
       } else if (kind === "event_failed") {
         appendSystem("event failed: " + text, true);
-      } else {
-        appendSystem("event: " + text, false);
       }
     }
   };
 
   const renderEvents = (items) => {
     const list = byId("event-list");
-    const events = items.filter((item) => String(item.kind).startsWith("event"));
+    const events = items.filter((item) => String(item.kind).startsWith("event") || item.origin === "proactive");
     if (events.length === 0) {
       list.replaceChildren(node("p", "muted", "No events yet."));
       return;
     }
     list.replaceChildren();
-    for (const item of events) {
-      const row = node("div", "event-item" + (item.kind === "event_failed" ? " failed" : ""));
+    for (const item of events.slice().reverse()) {
+      const isFailed = item.kind === "event_failed" || item.status === "failed";
+      const action = String(item.action || (item.origin === "proactive" ? "speak" : ""));
+      const cls = isFailed ? " failed" : action === "speak" ? " speak" : action === "note" ? " note" : "";
+      const row = node("div", "event-item" + cls);
+      const head = node("div", "head");
+      head.appendChild(node("span", "badge", isFailed ? "failed" : action || String(item.status || "")));
+      head.appendChild(node("span", "muted", String(item.reason || "")));
+      row.appendChild(head);
       row.appendChild(node("div", "", String(item.content || "")));
       const meta = node("div", "meta");
       meta.textContent = [
-        String(item.kind || ""),
-        String(item.event_id || ""),
-        String(item.delivery || ""),
+        String(item.event_id || item.source_event_id || ""),
+        String(item.status || ""),
         String(item.created_at || "")
-      ].join(" · ");
+      ].filter(Boolean).join(" · ");
       row.appendChild(meta);
       list.appendChild(row);
     }
   };
 
   const refreshTimeline = async () => {
-    const generation = state.convGen;
-    const conversationId = state.conversationId;
-    const query = "?conversation_id=" + encodeURIComponent(conversationId) + "&limit=60";
-    const payload = await fetchJson("/timeline" + query, {
-      signal: state.abort ? state.abort.signal : undefined
-    });
-    if (generation !== state.convGen || conversationId !== state.conversationId) return;
+    const payload = await fetchForConversation("/timeline");
+    if (!payload) return;
     const items = Array.isArray(payload.items) ? payload.items : [];
     renderTimeline(items);
     renderEvents(items);
   };
 
   const refreshMemory = async () => {
-    const generation = state.convGen;
-    const conversationId = state.conversationId;
-    const query = "?conversation_id=" + encodeURIComponent(conversationId);
-    const payload = await fetchJson("/memory" + query, {
-      signal: state.abort ? state.abort.signal : undefined
-    });
-    if (generation !== state.convGen || conversationId !== state.conversationId) return;
-    byId("memory-kv").replaceChildren();
-    const pairs = [
+    const payload = await fetchForConversation("/memory");
+    if (!payload) return;
+    renderKv("memory-kv", [
       ["chars", String(payload.chars ?? 0)],
-      ["pending", String(payload.counts?.pending_candidates ?? 0)],
-      ["promoted", String(payload.counts?.promoted_candidates ?? 0)],
-      ["rejected", String(payload.counts?.rejected_candidates ?? 0)]
-    ];
-    for (const [key, value] of pairs) {
-      byId("memory-kv").appendChild(node("span", "", key));
-      byId("memory-kv").appendChild(node("b", "", value));
-    }
+      ["messages", String(payload.counts?.messages ?? 0)],
+      ["events", String(payload.counts?.events ?? 0)]
+    ]);
     byId("memory-user").textContent = String(payload.user || "(empty)");
     byId("memory-relationship").textContent = String(payload.relationship || "(empty)");
     byId("memory-arc").textContent = String(payload.arc || "(empty)");
-    const episodes = Array.isArray(payload.episodes) ? payload.episodes : [];
-    const lines = episodes.map((episode) => {
-      const title = String(episode.title || "");
-      const overview = String(episode.overview || "");
-      const summary = String(episode.summary || "");
-      const body = summary || overview;
-      return "- " + title + (body ? ": " + body : "");
-    });
-    byId("memory-episodes").textContent = lines.length ? lines.join("\n") : "(no episodes)";
-    byId("candidate-counts").textContent =
-      String(payload.counts?.pending_candidates ?? 0) + " pending";
   };
 
   const refreshContext = async () => {
-    const generation = state.convGen;
-    const conversationId = state.conversationId;
-    const query = "?conversation_id=" + encodeURIComponent(conversationId);
-    const payload = await fetchJson("/context" + query, {
-      signal: state.abort ? state.abort.signal : undefined
-    });
-    if (generation !== state.convGen || conversationId !== state.conversationId) return;
-    byId("context-kv").replaceChildren();
-    const pairs = [
+    const payload = await fetchForConversation("/context");
+    if (!payload) return;
+    renderKv("context-kv", [
       ["epoch", String(payload.epoch ?? 0)],
       ["sha256", String(payload.stable_prefix_sha256 || "")],
+      ["messages", String(payload.counts?.messages ?? 0)],
       ["events", String(payload.counts?.events ?? 0)],
-      ["episodes", String(payload.counts?.episodes ?? 0)],
-      ["turns", String(payload.counts?.turns ?? 0)],
-      ["omitted e", String(payload.omitted_events ?? 0)],
-      ["omitted p", String(payload.omitted_episodes ?? 0)],
+      ["omitted events", String(payload.omitted_events ?? 0)],
       ["memory", String(payload.memory_chars ?? 0)]
-    ];
-    for (const [key, value] of pairs) {
-      byId("context-kv").appendChild(node("span", "", key));
-      byId("context-kv").appendChild(node("b", "", value));
-    }
+    ]);
     byId("context-stable").textContent = String(payload.stable_prefix || "");
     byId("context-events").textContent = String(payload.event_section || "(none)");
     byId("epoch-pill").textContent = "epoch " + String(payload.epoch ?? 0);
-    byId("event-omissions").textContent =
-      "omitted events: " + String(payload.omitted_events ?? 0) +
-      " / omitted episodes: " + String(payload.omitted_episodes ?? 0);
   };
 
   const refreshInspector = async () => {
     await Promise.all([refreshMemory(), refreshContext()]);
+  };
+
+  const refreshAll = async () => {
+    await refreshTimeline();
+    await refreshInspector();
   };
 
   const connectStream = () => {
@@ -529,9 +553,16 @@
       "/stream?conversation_id=" + encodeURIComponent(state.conversationId)
     );
     state.source = source;
-    source.onopen = () => setStatus("live", true);
-    source.onerror = () => setStatus("reconnecting", false);
+    source.onopen = () => {
+      if (state.source !== source) return;
+      setStatus("live", true);
+    };
+    source.onerror = () => {
+      if (state.source !== source) return;
+      setStatus("reconnecting", false);
+    };
     source.onmessage = (message) => {
+      if (state.source !== source) return;
       let item = null;
       try {
         item = JSON.parse(message.data);
@@ -557,6 +588,13 @@
     };
   };
 
+  const syncConversationSelect = (id, value) => {
+    const select = byId(id);
+    const known = Array.from(select.options).some((option) => option.value === value);
+    if (!known) select.appendChild(new Option(value, value));
+    select.value = value;
+  };
+
   const switchConversation = async (conversationId) => {
     const value = String(conversationId || "").trim();
     if (!value) return;
@@ -570,16 +608,13 @@
     byId("send-button").disabled = false;
     byId("conversation-label").textContent = value;
     byId("conversation-input").value = "";
-    const select = byId("conversation-select");
-    const known = Array.from(select.options).some((option) => option.value === value);
-    if (!known) select.appendChild(new Option(value, value));
-    select.value = value;
+    byId("conversation-input-mobile").value = "";
+    syncConversationSelect("conversation-select", value);
+    syncConversationSelect("conversation-select-mobile", value);
     connectStream();
     try {
-      await refreshTimeline();
-      await refreshInspector();
+      await refreshAll();
       if (generation !== state.convGen) return;
-      setStatus("live", true);
     } catch (error) {
       if (generation !== state.convGen) return;
       appendSystem("load failed: " + error.message, true);
@@ -628,6 +663,15 @@
     }
   };
 
+  const applyPreset = (key) => {
+    const preset = PRESETS[key];
+    if (!preset) return;
+    byId("event-name").value = preset.name;
+    byId("event-source").value = preset.source;
+    byId("event-summary").value = preset.summary;
+    byId("event-details").value = preset.details;
+  };
+
   const submitEvent = async (event) => {
     event.preventDefault();
     const name = byId("event-name").value.trim() || "email.received";
@@ -638,7 +682,7 @@
       source: byId("event-source").value.trim() || "simulator",
       data: {
         summary: byId("event-summary").value.trim(),
-        urgency: Number(byId("event-urgency").value || 0)
+        details: byId("event-details").value.trim()
       }
     };
     if (key) body.idempotency_key = key;
@@ -660,31 +704,11 @@
     }
   };
 
-  const curate = async () => {
-    try {
-      const payload = await fetchJson("/curate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ conversation_id: state.conversationId })
-      });
-      setResult(
-        "memory-result",
-        "summarized=" + String(payload.summarized) + " promoted=" + String(payload.promoted),
-        false
-      );
-      await refreshMemory();
-      await refreshContext();
-      await refreshTimeline();
-    } catch (error) {
-      setResult("memory-result", "curate failed: " + error.message, true);
-    }
-  };
-
   const resetConversation = async () => {
     try {
       const query = "?conversation_id=" + encodeURIComponent(state.conversationId);
       const payload = await fetchJson("/reset" + query, { method: "POST" });
-      setResult("memory-result", "deleted turns=" + String(payload.deleted_turns), false);
+      setResult("memory-result", "deleted messages=" + String(payload.deleted_messages), false);
       await refreshTimeline();
       await refreshInspector();
     } catch (error) {
@@ -701,25 +725,37 @@
     }
   };
 
+  const setInspectorOpen = (open) => {
+    byId("inspector").classList.toggle("open", open);
+    byId("inspector-toggle").setAttribute("aria-expanded", String(open));
+    byId("inspector-toggle-mobile").setAttribute("aria-expanded", String(open));
+  };
+
+  const toggleInspector = () => {
+    setInspectorOpen(!byId("inspector").classList.contains("open"));
+  };
+
   const bind = () => {
     byId("composer").addEventListener("submit", sendMessage);
     byId("message-input").addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey) {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
         byId("composer").requestSubmit();
       }
     });
+    byId("preset-urgent").addEventListener("click", () => applyPreset("urgent"));
+    byId("preset-normal").addEventListener("click", () => applyPreset("normal"));
+    byId("preset-noise").addEventListener("click", () => applyPreset("noise"));
     byId("event-form").addEventListener("submit", submitEvent);
-    byId("curate-button").addEventListener("click", curate);
     byId("reset-button").addEventListener("click", resetConversation);
     byId("context-refresh").addEventListener("click", () => {
-      refreshInspector().catch((error) => setResult("memory-result", error.message, true));
+      setResult("context-result", "", false);
+      refreshContext().catch((error) => setResult("context-result", error.message, true));
     });
-    byId("inspector-toggle").addEventListener("click", () => {
-      byId("inspector").classList.toggle("open");
-    });
+    byId("inspector-toggle").addEventListener("click", toggleInspector);
+    byId("inspector-toggle-mobile").addEventListener("click", toggleInspector);
     byId("inspector-close").addEventListener("click", () => {
-      byId("inspector").classList.remove("open");
+      setInspectorOpen(false);
     });
     byId("conversation-form").addEventListener("submit", (event) => {
       event.preventDefault();
@@ -728,16 +764,19 @@
     byId("conversation-select").addEventListener("change", (event) => {
       switchConversation(event.target.value).catch(() => {});
     });
+    byId("conversation-switch-mobile").addEventListener("click", () => {
+      switchConversation(byId("conversation-input-mobile").value).catch(() => {});
+    });
+    byId("conversation-select-mobile").addEventListener("change", (event) => {
+      switchConversation(event.target.value).catch(() => {});
+    });
     for (const tab of document.querySelectorAll(".tab")) {
       tab.addEventListener("click", () => selectTab(String(tab.dataset.tab)));
     }
   };
 
   const start = async () => {
-    const select = byId("conversation-select");
-    select.appendChild(new Option("default", "default"));
-    select.appendChild(new Option("line:demo", "line:demo"));
-    select.value = "default";
+    byId("conversation-select").value = "default";
     bind();
     await switchConversation("default");
   };

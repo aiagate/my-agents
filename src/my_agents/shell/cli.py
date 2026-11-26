@@ -72,7 +72,7 @@ def _repl(
         if is_err(started):
             write_error(f"Error: {started.error.message}")
             return 1
-        write_output("my-agents local chat. exit / quit で終了します。")
+        write_output("my-agents chat. exit / quit で終了します。")
         while True:
             try:
                 text = read_input("You > ")
@@ -102,11 +102,9 @@ def main(
         arguments = _parser().parse_args(argv)
     except SystemExit as exc:
         return 0 if exc.code is None else int(exc.code)
-    logger: IAppLogger = NOOP_LOGGER
-    explicit_logger = _try_logger(arguments.log_file, write_error, explicit=True)
-    if explicit_logger is None:
+    logger = _try_logger(arguments.log_file, write_error, explicit=True)
+    if logger is None:
         return 1
-    logger = explicit_logger
     try:
         loaded = load_settings(env=env, env_path=Path.cwd() / ".env")
         if is_err(loaded):
@@ -120,18 +118,15 @@ def main(
             write_error(f"Error: {loaded.error.message}")
             return 1
         settings = loaded.value
-        if arguments.log_file is None and settings.log_file is not None:
+        if arguments.log_file is None and settings.log_path is not None:
             logger.close()
             logger = (
-                _try_logger(settings.log_file, write_error, explicit=False)
+                _try_logger(settings.log_path, write_error, explicit=False)
                 or NOOP_LOGGER
             )
         if arguments.debug:
-            resolved_path = arguments.log_file or settings.log_file
-            write_error(
-                "Debug: log file = "
-                f"{resolved_path if resolved_path is not None else '<none>'}"
-            )
+            resolved_path = arguments.log_file or settings.log_path
+            write_error(f"Debug: log file = {resolved_path or '<none>'}")
         persona = load_persona(settings.persona_path)
         if is_err(persona):
             write_error(f"Error: {persona.error.message}")

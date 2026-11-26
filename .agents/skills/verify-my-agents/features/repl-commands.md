@@ -2,7 +2,7 @@
 
 ## Sub-features
 
-- 起動すると `my-agents local chat. exit / quit で終了します。` を表示する。
+- 起動すると `my-agents chat. exit / quit で終了します。` を表示する。
 - 入力を 1 行受けるごとに `You > ` で読み、`AI > <応答>` を表示する。
 - `exit` / `quit`（前後空白・大文字小文字を無視）で exit 0。
 - EOF（Ctrl-D）でも exit 0。
@@ -20,12 +20,12 @@
     hello
     exit
 
-`sh .agents/skills/verify-my-agents/helpers/drive.sh <run-id> repl-commands
-<commands-file>` を実行する。`You > ` と `AI > ...`、`exit=0` を証跡にする。
+`sh .agents/skills/verify-my-agents/helpers/drive.sh <run-id> repl-commands <commands-file>`
+を実行する。`You > ` と `AI > ...`、`exit=0` を証跡にする。
 
 ## Gotchas
 
-- `.env` は必須ではない。`CHAT_BACKEND` の既定は `local` で外部 API を呼ばない。
+- `LLM_MODEL` と `LLM_API_KEY` が未設定だと起動時エラー（exit 1）になる。
 - 空入力のエラーは REPL を止めない。終了コードだけでなく出力行も確認する。
-- `CHATS_DB_PATH` に検証用ディレクトリ内の未作成ファイルを指定すると空の状態で
+- `DB_PATH` に検証用ディレクトリ内の未作成ファイルを指定すると空の状態で
   検証できる。drive.sh は自動で tmp 側を向ける。

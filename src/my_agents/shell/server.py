@@ -2,6 +2,8 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from datetime import datetime
+from enum import StrEnum
 from http import HTTPStatus
 from importlib.resources import files
 from typing import assert_never
@@ -13,6 +15,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from my_agents.core.memory import memory_char_count
 from my_agents.core.types import (
     AppError,
     AppErrorKind,
@@ -28,6 +31,36 @@ MAX_BODY_BYTES = 64 * 1024
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
 _UI_HTML = files("my_agents.shell").joinpath("ui.html").read_text(encoding="utf-8")
 
+_EVENT_KEYS = (
+    "event_id",
+    "conversation_id",
+    "name",
+    "source",
+    "occurred_at",
+    "received_at",
+    "status",
+    "action",
+    "reason",
+    "note",
+    "failure_reason",
+    "surfaced_at",
+    "linked_message_id",
+)
+
+_TIMELINE_KEYS = (
+    "kind",
+    "conversation_id",
+    "content",
+    "created_at",
+    "event_id",
+    "source_event_id",
+    "origin",
+    "delivery",
+    "status",
+    "action",
+    "reason",
+)
+
 
 def _status_for(kind: AppErrorKind) -> int:
     match kind:
@@ -39,12 +72,10 @@ def _status_for(kind: AppErrorKind) -> int:
             return HTTPStatus.CONFLICT
         case AppErrorKind.DENIED:
             return HTTPStatus.FORBIDDEN
-        case AppErrorKind.STORAGE:
+        case AppErrorKind.STORAGE | AppErrorKind.UNEXPECTED:
             return HTTPStatus.INTERNAL_SERVER_ERROR
         case AppErrorKind.LLM:
             return HTTPStatus.BAD_GATEWAY
-        case AppErrorKind.UNEXPECTED:
-            return HTTPStatus.INTERNAL_SERVER_ERROR
         case _:
             assert_never(kind)
 
@@ -57,55 +88,39 @@ def _error(error: AppError) -> JSONResponse:
 
 
 def _ok[T](
-    result: Result[T, AppError], render: Callable[[T], dict[str, object]]
+    result: Result[T, AppError],
+    render: Callable[[T], dict[str, object]],
+    status_code: int = HTTPStatus.OK,
 ) -> Response:
     if is_err(result):
         return _error(result.error)
-    return JSONResponse(render(result.value))
+    return JSONResponse(render(result.value), status_code=status_code)
+
+
+def _json_value(value: object) -> object:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, StrEnum):
+        return value.value
+    return value
+
+
+def _pick(item: object, keys: tuple[str, ...]) -> dict[str, object]:
+    return {key: _json_value(getattr(item, key)) for key in keys}
 
 
 def _event_json(event: EventRecord) -> dict[str, object]:
-    return {
-        "event_id": event.event_id,
-        "conversation_id": event.conversation_id,
-        "name": event.name,
-        "source": event.source,
-        "occurred_at": event.occurred_at.isoformat(),
-        "received_at": event.received_at.isoformat(),
-        "status": event.status.value,
-        "delivery": event.delivery.value,
-        "merge_reason": event.merge_reason,
-        "failure_reason": event.failure_reason,
-        "surfaced_at": None
-        if event.surfaced_at is None
-        else event.surfaced_at.isoformat(),
-        "linked_turn_id": event.linked_turn_id,
-        "brief": None if event.brief is None else event.brief.model_dump(),
-    }
+    return _pick(event, _EVENT_KEYS)
 
 
 def _timeline_json(item: TimelineItem) -> dict[str, object]:
-    return {
-        "kind": item.kind.value,
-        "conversation_id": item.conversation_id,
-        "content": item.content,
-        "created_at": item.created_at.isoformat(),
-        "event_id": item.event_id,
-        "source_event_id": item.source_event_id,
-        "origin": None if item.origin is None else item.origin.value,
-        "delivery": item.delivery.value,
-    }
+    return _pick(item, _TIMELINE_KEYS)
 
 
 def _counts_json(snapshot: ContextSnapshot | MemorySnapshot) -> dict[str, int]:
-    counts = snapshot.counts
     return {
-        "turns": counts.turns,
-        "episodes": counts.episodes,
-        "events": counts.events,
-        "pending_candidates": counts.pending_candidates,
-        "promoted_candidates": counts.promoted_candidates,
-        "rejected_candidates": counts.rejected_candidates,
+        "messages": snapshot.counts.messages,
+        "events": snapshot.counts.events,
     }
 
 
@@ -115,10 +130,9 @@ def _context_json(snapshot: ContextSnapshot) -> dict[str, object]:
         "epoch": snapshot.epoch,
         "stable_prefix": snapshot.stable_prefix,
         "stable_prefix_sha256": snapshot.stable_prefix_sha256,
+        "dynamic_section": snapshot.dynamic_section,
         "event_section": snapshot.event_section,
         "omitted_events": snapshot.omitted_events,
-        "omitted_episodes": snapshot.omitted_episodes,
-        "dynamic_section": snapshot.dynamic_section,
         "counts": _counts_json(snapshot),
         "memory_chars": snapshot.memory_chars,
     }
@@ -131,19 +145,8 @@ def _memory_json(snapshot: MemorySnapshot) -> dict[str, object]:
         "user": blocks.user,
         "relationship": blocks.relationship,
         "arc": blocks.arc,
-        "chars": len(blocks.user) + len(blocks.relationship) + len(blocks.arc),
+        "chars": memory_char_count(blocks),
         "counts": _counts_json(snapshot),
-        "episodes": [
-            {
-                "episode_id": episode.episode_id,
-                "title": episode.title,
-                "overview": episode.overview,
-                "summary": episode.summary,
-                "turn_count": episode.turn_count,
-                "updated_at": episode.updated_at.isoformat(),
-            }
-            for episode in snapshot.episodes
-        ],
     }
 
 
@@ -205,11 +208,9 @@ def create_app(engine: CharacterEngine) -> Starlette:
         conversation_id = _conversation(body)
         body.pop("conversation_id", None)
         result = await engine.ingest_event(conversation_id, body)
-        if is_err(result):
-            return _error(result.error)
-        receipt = result.value
-        return JSONResponse(
-            {
+        return _ok(
+            result,
+            lambda receipt: {
                 "event_id": receipt.event_id,
                 "status": receipt.status.value,
                 "duplicate": receipt.duplicate,
@@ -230,8 +231,8 @@ def create_app(engine: CharacterEngine) -> Starlette:
             lambda outcome: {
                 "conversation_id": outcome.conversation_id,
                 "reply": outcome.reply,
-                "turn_index": outcome.turn_index,
-                "source_event_ids": list(outcome.source_event_ids),
+                "message_id": outcome.message_id,
+                "surfaced_event_ids": list(outcome.surfaced_event_ids),
                 "memory_updates": list(outcome.memory_updates),
             },
         )
@@ -286,21 +287,7 @@ def create_app(engine: CharacterEngine) -> Starlette:
             return guarded
         conversation_id = request.query_params.get("conversation_id", "default")
         result = await asyncio.to_thread(engine.reset_conversation, conversation_id)
-        return _ok(result, lambda deleted: {"deleted_turns": deleted})
-
-    async def curate(request: Request) -> Response:
-        raw = await _body(request)
-        if isinstance(raw, JSONResponse):
-            return raw
-        result = await engine.curate_memory(_conversation(raw))
-        return _ok(
-            result,
-            lambda outcome: {
-                "summarized": outcome.summarized,
-                "promoted": outcome.promoted,
-                "rejected": outcome.rejected,
-            },
-        )
+        return _ok(result, lambda deleted: {"deleted_messages": deleted})
 
     async def index(_request: Request) -> HTMLResponse:
         return HTMLResponse(_UI_HTML)
@@ -333,7 +320,6 @@ def create_app(engine: CharacterEngine) -> Starlette:
             Route("/events/{event_id}", event_detail, methods=["GET"]),
             Route("/memory", memory, methods=["GET"]),
             Route("/reset", reset, methods=["POST"]),
-            Route("/curate", curate, methods=["POST"]),
         ],
     )
 

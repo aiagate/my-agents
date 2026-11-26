@@ -1,9 +1,9 @@
 # event-webhook
 
-loopback Webhook からイベントを受理し、独立ワーカーがイベント台帳
-（`events`）へ記録し、`proactive` だけをメインチャットへ通知することを、実プロセスで
-証明する。`ambient` は割り込み通知せず、次回チャットの背景文脈として合流する。
-外部 API は使わない（`CHAT_BACKEND=local`）。
+loopback Webhook からイベントを受理し、独立ワーカーが 1-shot `EventDecision` 判定で
+`events` 台帳へ記録し、`speak` をメインチャットへ push 通知、全イベント結果
+（`speak` / `note` / `ignore` / `failed`）を SSE へ配信することを実プロセスで証明する。
+スクリプト内に `MockOpenAIServer` を起動するため外部 API キーは不要。
 
 ## 手順
 
@@ -12,69 +12,47 @@ uv run --locked python tools/e2e_event_chat.py
 ```
 
 スクリプトは空きポートを選び、`my-agents serve` を起動して次を順に実測する。
-`web-server.md` と同じ 14 シナリオを共有する。
+`web-server.md` と同じ 13 シナリオを共有する。
 
-1. `EVENT_ANALYSIS_DELAY_MS=1500` と `MCP_SERVERS_JSON` でサーバを起動し、
-   `/health`、`/`（`EventSource(` / `textContent` / `line:demo` / `/context`、
-   `innerHTML` 等の不使用）、`/context` を確認する。
-2. loopback の `POST /events` に温度イベント（33.2 > 30.0）を送り、202 と
-   `event_id` が遅延ワーカー完了前（250ms 未満）に返ることを確認する。
-3. ワーカー進行中に通常チャットを送り、受理時 epoch の変化で proactive が
-   `ambient` / `epoch_conflict` へ降格することを確認する。
-4. `[event:<id>]` の生文字列や `evt_` を含まない自然な `proactive` SSE
-   （`source_event_id` 付き）を確認する。
+1. `EVENT_EVAL_DELAY_MS=1500` と `MCP_SERVERS_JSON` でサーバを起動し、
+   `/health`、`/`（`EventSource(` / `textContent` / `line:demo` / `/context` /
+   3 プリセット、XSS 禁止要素の不含有）、`/context` 初期状態を確認する。
+2. 通常チャットと実外部 FastMCP（`diverge_associations`）呼び出し・SHA 不変を確認する。
+3. ワーカー遅延中に通常チャットを送り、epoch 変化で `speak` が `note` /
+   `epoch_conflict` へ降格して SSE `kind="event"` で届くことを確認する。
+4. 温度異常イベントからの自然な `speak` SSE push 通知（`source_event_id` 付き）と
+   台帳の `linked_message_id` 保存を確認する。
 5. 同一 `idempotency_key` の再送が `duplicate=true` で、追加の push を出さない
    ことを確認する。
-6. 通常の `email.received` を送り、202 受理後に割り込み通知が出ないこと、
-   `events` 台帳に `ambient` として保存され `surfaced_at` が空であることを確認する。
-   次回通常チャットでそのイベント ID が参照され、`surfaced_at` が更新されることも
-   確認する。
-7. `GET /context` の `stable_prefix_sha256` がイベント前・後・チャット後で
-   不変であることを確認する。
-8. `line:demo` と `default` の履歴・イベント・記憶候補・SSE・`/reset` が
-   分離することを確認する。clean turn 後の記憶候補分離も確認する。
-9. `remember` → `POST /curate` → `GET /memory` / `core.md` の永続化を確認する。
-10. 不正 JSON 400、サイズ超過 413、スキーマ違反 422 を確認する。
-11. 注入イベントの sender / body / 役割偽装文字列が `dialogue_turns` に 0 件で、
-    注入後 `/curate` が L2 と `stable_prefix_sha256` を変えないことを確認する。
-    attacker から victim の検索・recall が拒否されることも確認する。
-12. 別プロセスの mock OpenAI が 500 を返す構成で `event_failed` と台帳の `failed`
-    記録を確認し、プロセスが生存したままであることを確認する。
-13. 旧 `d06697f` DB の移行を確認する。
-14. `MCP_SERVERS_JSON` で `tools/mcp_divergence_server.py` を接続したまま
-    SIGINT を送り、MCP 子プロセス teardown と clean exit を確認する。
+6. 通常の `email.received` を送り、SSE `kind="event"`（`action="note"`）と台帳確認後、
+   次回 `/chat` で `read_event` 経由参照と `surfaced_event_ids` 合流を確認する。
+7. `noise.heartbeat` の `action="ignore"` SSE 配信と `stable_prefix_sha256` 不変を確認する。
+8. `line:demo` と `default` の履歴・`idempotency_key`・`/reset` 分離を確認する。
+9. `update_core_memory` による `core.md` への即時保存と `GET /memory` を確認する。
+10. 境界偽装・bidi・制御文字の無害化と、イベント文脈ありターンで
+    `update_core_memory` がツール一覧から除外されることを確認する。
+11. 別会話イベントの `read_event` が `Event not found` で拒否されることを確認する。
+12. 400 / 404 / 413（chunked 含む）/ 422 の入力ガードを確認する。
+13. `MockOpenAIServer` の 500 障害時に `event_failed` SSE・`status="failed"`・`/chat`
+    502・API キー秘匿・SIGINT 後の MCP 子プロセス teardown と clean exit を確認する。
 
 ## 期待する証跡
 
-標準出力は次の順で出る。イベント ID・ポート・時刻は実行ごとに変わる。
-`scenario_8b` はシナリオ 8 の直後、`process_exit_code` と
-`mcp_children_teardown` は SIGINT 後、`scenario_11` はその後に出る。
-
 ```text
-health=ok port=... delay_ms=1500
+health=ok port=... openai_mock_port=...
 scenario_1=ok index_bytes=... sha=...
-scenario_3=ok ... delivery=ambient reason=epoch_conflict
-scenario_7a=ok stable_prefix_sha256=invariant
-scenario_2=ok ... accept_elapsed_ms=...
-scenario_5=ok message='...' source_event_id=evt_...
-scenario_4=ok duplicate=True ... emissions=0
-scenario_7b=ok stable_prefix_sha256=invariant
-scenario_7=ok stable_prefix_sha256 byte-invariant across ...
-scenario_6=ok ... delivery=ambient
-scenario_8=ok line_turns=2 shared_keys_isolated=True ...
-scenario_8b=ok memory_candidates_isolated_after_clean_turn=True
-scenario_9=ok promoted=1 ...
-scenario_10=ok injection_defanged=True stable_prefix_sha256=invariant
-scenario_12=ok chunked_413=True ... cross_conversation_denied=True
-scenario_13=ok mock_model_failure=typed_failed_process_alive=True
-scenario_14=ok legacy_d06697f_migrated=True
-process_exit_code=...
-mcp_children_teardown=ok|skipped_no_children
-scenario_11=ok status_400=400 status_413=413 status_422=422 ... mcp_sha_invariant=True
+scenario_2=ok baseline_and_fastmcp_ok=True
+scenario_3=ok event_id=evt_... reason=epoch_conflict
+scenario_4=ok proactive_push=True event_id=evt_...
+scenario_5=ok idempotent=True event_id=evt_...
+scenario_6=ok note_surfaced=True event_id=evt_...
+scenario_7=ok ignore_sse=True stable_sha_invariant=True
+scenario_8=ok multi_conversation_and_reset_isolated=True
+scenario_9=ok memory_chars=...
+scenario_10=ok injection_defanged_and_memory_tool_hidden=True
+scenario_11=ok cross_conversation_read_event_denied=True
+scenario_12=ok input_guards_400_404_413_422=True
+scenario_13=ok failure_resilience_redaction_and_sigint_teardown=0
 ```
 
-`process_exit_code` は SIGINT 後の graceful shutdown では `0`、SIGINT で終了した
-場合は `-2`、外部から終了させた場合は `-15` を許す。MCP 子プロセスは stdio の
-切断で終了する。`pgrep` が使えない環境では
-`mcp_children_teardown=skipped_no_children` と記録する。終了後に SQLite を直接
-検査し、`db_raw_event_content=0` を確認する。
+終了コードは SIGINT 後の graceful shutdown で `0`（環境により `-2` / `-15`）を許す。

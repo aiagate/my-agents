@@ -217,7 +217,8 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# Agent memory
+# Agent data & memory
+data/
 memory/
 
 # Verification evidence (verify-my-agents skill)
