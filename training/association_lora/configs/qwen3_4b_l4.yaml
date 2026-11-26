@@ -1,0 +1,29 @@
+model_id: "Qwen/Qwen3-4B"
+trust_remote_code: false
+chat_template_kwargs:
+  enable_thinking: false
+quantization: "none"
+max_seq_length: 1024
+
+lora:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: "all-linear"
+
+train:
+  num_train_epochs: 3
+  learning_rate: 8.0e-5
+  warmup_ratio: 0.1
+  lr_scheduler_type: "cosine"
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 2
+  gradient_accumulation_steps: 4
+  weight_decay: 0.01
+  eval_steps: 20
+  save_steps: 20
+  logging_steps: 5
+  seed: 42
+  gradient_checkpointing: true
+
+merge_on_finish: true
