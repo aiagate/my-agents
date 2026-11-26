@@ -5,11 +5,10 @@
 
 | 機能 | レシピ | 実 API | 証明対象 |
 | --- | --- | --- | --- |
-| チャット 1 往復 | chat.md | OpenAI互換 | エラーなしで応答が返り exit 0 |
+| チャット 1 往復 | chat.md | OpenAI互換 | `POST /chat` がエラーなしで応答を返す |
 | Core Memory 更新 | core-memory.md | OpenAI互換 | 「覚えて」→`update_core_memory`→`/memory` と `core.md` 変化 |
 | 会話履歴 | chat-history.md | OpenAI互換 | 会話ごと履歴分離、`/timeline` / `/memory` / `/context` / `/reset` |
-| REPL コマンド | repl-commands.md | OpenAI互換 | `You > `、`AI > `、空入力エラー、`exit` / EOF |
-| CLI フラグ | cli-flags.md | なし | `--help` / `--debug` / `--log-file` / exit code |
+| サーバフラグ | server-flags.md | なし | `--help` / `--debug` / `--log-file` / `LOG_PATH` / exit code |
 | エラー証跡 | error-evidence.md | なし | 不正設定→`Error:`+JSONL 1 行+Debug 行+exit 1 |
 | イベント Webhook | event-webhook.md | なし（内部 MockOpenAIServer） | 202→即時 `event_id`→`speak`/`note`/`ignore`/`failed` SSE と `surfaced_at`→400/404/413/422 |
 | Web サーバ / キャッシュ検査 / MCP | web-server.md | なし（内部 MockOpenAIServer） | `/` UI の XSS 安全 DOM、`/context` の SHA 不変、会話分離、注入無害化、外部 FastMCP 呼び出し |
@@ -20,6 +19,8 @@
 - 実 API のレシピは `.env` の OpenAI 互換 LLM 設定（`LLM_MODEL` / `LLM_API_KEY` /
   必要に応じて `LLM_BASE_URL`）が有効であること。応答内容の品質は判定対象外で、
   非決定性を許す。
+- サーバは `uv run my-agents` で起動し、停止は `SIGTERM` / `SIGINT` で行う。
+  stdin の `exit` では終了しない。
 
 ## 証明規範
 

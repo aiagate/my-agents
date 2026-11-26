@@ -9,7 +9,7 @@
 uv run --locked python tools/e2e_event_chat.py
 ```
 
-スクリプトは空きポートで `my-agents serve` を起動し、`MCP_SERVERS_JSON` で
+スクリプトは空きポートで `my-agents` を起動し、`MCP_SERVERS_JSON` で
 `tools/mcp_divergence_server.py` を実接続して 13 シナリオを順に実測する。
 
 1. `/health`、`/`（`EventSource(` / `textContent` / `line:demo` / `/context` /

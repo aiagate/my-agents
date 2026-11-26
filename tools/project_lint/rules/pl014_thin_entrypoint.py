@@ -71,7 +71,7 @@ def check_thin_entrypoint(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding]:
                         stmt.lineno,
                         stmt.col_offset + 1,
                         f"Entrypoint function '{stmt.name}' must delegate in one statement.",
-                        "Move startup wiring and control flow into 'my_agents.shell.cli'.",
+                        "Move startup wiring and control flow into 'my_agents.shell.server'.",
                     )
                 )
         elif isinstance(stmt, Assign | AnnAssign):

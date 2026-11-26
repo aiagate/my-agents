@@ -13,18 +13,23 @@
 イベントのない会話で「覚えて: 私は緑茶が好き」と送ると `core.md` と `GET /memory` の
 `user` ブロックへ即時に反映される。
 
-## Driving it with drive.sh
+## 駆動手順
 
-    今後ずっと覚えておいてください: 検証ランでは私は緑茶が好きです。
-    exit
+```sh
+DATA_DIR=<tmp> uv run my-agents &
+curl -s -X POST localhost:8080/chat \
+  -H 'content-type: application/json' \
+  -d '{"conversation_id":"memory-check","message":"今後ずっと覚えておいてください: 検証ランでは私は緑茶が好きです。"}'
+curl -s 'localhost:8080/memory?conversation_id=memory-check'
+kill -TERM %1
+```
 
-その後 `GET /memory?conversation_id=<id>` を確認し、drive.sh が保存した `<name>-core.md`
-を証跡にする。
+`GET /memory` の `user` と `<tmp>/core.md` の両方を証跡にする。
 
 ## Gotchas
 
-- REPL に `/core` はない。確認は `GET /memory` または `core.md` で行う。
+- 確認は `GET /memory` または `core.md` で行う。CLI の `/core` は存在しない。
 - 決定的テストは `tools/e2e_event_chat.py` の `scenario_9`（`append user` で即時更新）と
   `scenario_10`（イベントありターンで `update_core_memory` 非公開）で確認する。
-- `DATA_DIR` を指定しないと `./data/core.md`（gitignore 済み）を書く。
-  drive.sh は常に tmp 側を向ける。
+- `DATA_DIR` を指定しないと `./data/core.md`（gitignore 済み）を書く。検証では
+  必ず tmp 側を向ける。

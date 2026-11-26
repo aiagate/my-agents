@@ -524,7 +524,6 @@ def launch(
             sys.executable,
             "-c",
             "from my_agents import main; raise SystemExit(main())",
-            "serve",
         ],
         cwd=REPO,
         env=env,

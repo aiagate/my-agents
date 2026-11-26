@@ -5,18 +5,19 @@
 - 不正な設定値での起動は `settings_load_failed` で exit 1（必須値不足でも exit 1）。
 - stderr に `Error: <理由>` が出る。
 - `--log-file` を指定していれば JSONL に `settings_load_failed` の 1 行が残る。
-- `--debug` 併用で `Debug: log file = <path>` も stderr に出る。
+- `--debug` の `Debug: log file = <path>` は設定ロード成功後に解決されるため、
+  設定ロード失敗の経路では出ない。ログパス解決の証跡は server-flags.md で取る。
 
 ## How to get to it (user POV)
 
-`SERVER_PORT=bad` など不正な設定で起動すると、REPL に入る前に即座に
+`SERVER_PORT=bad` など不正な設定で起動すると、サーバが listen する前に即座に
 エラーで終了する。
 
 ## Driving it manually
 
     tmpd=$(mktemp -d)
     cd "$tmpd"
-    printf 'exit\n' | SERVER_PORT=bad <リポジトリ>/.venv/bin/my-agents --debug --log-file ./err.jsonl
+    SERVER_PORT=bad <リポジトリ>/.venv/bin/my-agents --log-file ./err.jsonl
     cat ./err.jsonl
 
 stdout/stderr・exit code（1 を期待）・JSONL 1 行を

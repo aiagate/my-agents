@@ -1,3 +1,3 @@
-from my_agents.shell.cli import main
+from my_agents.shell.server import main
 
 __all__ = ["main"]

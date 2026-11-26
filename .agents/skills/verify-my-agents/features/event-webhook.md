@@ -11,7 +11,7 @@ loopback Webhook からイベントを受理し、独立ワーカーが 1-shot `
 uv run --locked python tools/e2e_event_chat.py
 ```
 
-スクリプトは空きポートを選び、`my-agents serve` を起動して次を順に実測する。
+スクリプトは空きポートを選び、`my-agents` を起動して次を順に実測する。
 `web-server.md` と同じ 13 シナリオを共有する。
 
 1. `EVENT_EVAL_DELAY_MS=1500` と `MCP_SERVERS_JSON` でサーバを起動し、

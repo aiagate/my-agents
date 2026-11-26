@@ -265,7 +265,7 @@ def test_pl004_enforces_two_layer_boundaries(tmp_path: Path) -> None:
         src / "shell" / "ok.py",
         "import sqlite3\nfrom my_agents.core.types import AppError\n",
     )
-    _write(src / "__init__.py", "from my_agents.shell.cli import main\n")
+    _write(src / "__init__.py", "from my_agents.shell.server import main\n")
 
     findings = check_layer_boundaries(src)
 
@@ -646,7 +646,7 @@ def test_pl014_enforces_thin_entrypoint(tmp_path: Path) -> None:
         bad_src / "__init__.py",
         """
         import os
-        from .shell.cli import main as _main
+        from .shell.server import main as _main
         def main() -> int:
             if os.environ.get('DEBUG'):
                 return 1
@@ -657,7 +657,7 @@ def test_pl014_enforces_thin_entrypoint(tmp_path: Path) -> None:
     _write(
         good_src / "__init__.py",
         """
-        from my_agents.shell.cli import main as _main
+        from my_agents.shell.server import main as _main
         def main() -> int:
             return _main()
         """,

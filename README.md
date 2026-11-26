@@ -13,13 +13,12 @@ src/my_agents/
     events.py        # 厳格な envelope 検証・無害化/nonce 防御・3 ゲート policy
     memory.py        # core.md の append/replace/rewrite と文字数上限
     context.py       # キャッシュ安定 3 セクションコンテキストと SHA-256
-  shell/             # 命令的シェル（SQLite / pydantic-ai / ASGI / CLI）
+  shell/             # 命令的シェル（SQLite / pydantic-ai / ASGI）
     store.py         # 単一 SQLite v2（conversations/messages/events）と flock 保護 core.md
     mcp.py           # MCP_SERVERS_JSON の検証と MCPToolset 構築（環境変数ホワイトリスト）
     llm.py           # OpenAI 互換 Agent / EventDecision 1-shot 判定 / ChatToolbox
     engine.py        # submit_message, ingest_event, SSE 全結果配信, snapshots
-    server.py        # Starlette ASGI + SSE + 管理 UI + /context
-    cli.py           # `my-agents` と `my-agents serve`
+    server.py        # Starlette ASGI + SSE + 管理 UI + /context + 起動エントリポイント
     ui.html          # LINE / Dots / Muse 風ダーク Web UI（DOM 安全構築）
 tools/
   mcp_divergence_server.py  # 外部 FastMCP 連想サーバ
@@ -33,12 +32,16 @@ tools/
 `LLM_BASE_URL` を上書き）。
 
 ```sh
-# 対話 CLI
+# ヘッドレスサーバ + Web UI（既定 http://127.0.0.1:8080）
 DATA_DIR=./data uv run my-agents
 
-# ヘッドレスサーバ（既定 http://127.0.0.1:8080）
-DATA_DIR=./data uv run my-agents serve
+# 起動オプション
+uv run my-agents --help
+uv run my-agents --log-file ./logs/app.jsonl --debug
 ```
+
+`my-agents` は対話 CLI を持たないヘッドレスサーバ専用のエントリポイントで、起動すると
+そのまま ASGI サーバが待ち受ける。操作は HTTP API または `GET /` の Web UI から行う。
 
 > スキーマは v2（`conversations`, `messages`, `events` の 3 テーブル）のみ対応する。
 > 旧 v1 DB が残っている場合は削除するか新しい `DATA_DIR` を指定する。
@@ -109,7 +112,7 @@ DATA_DIR=./data uv run my-agents serve
 
 ```sh
 MCP_SERVERS_JSON='{"divergence":{"command":"'$PWD'/.venv/bin/python","args":["'$PWD'/tools/mcp_divergence_server.py"],"cwd":"'$PWD'"}}' \
-DATA_DIR=./data uv run my-agents serve
+DATA_DIR=./data uv run my-agents
 ```
 
 `tools/mcp_divergence_server.py` は外部 FastMCP サーバで、`diverge_associations`
@@ -146,7 +149,7 @@ LINE / ChatGPT Dots / Meta Muse 風ダークテーマの単一画面で、次を
 | `DATA_DIR` | `./data` | `core.md` と `state.db` の置き場 |
 | `DB_PATH` | `<DATA_DIR>/state.db` | SQLite の上書き |
 | `PERSONA_PATH` | なし | 人格 JSON |
-| `LOG_PATH` | なし | JSONL ログの出力先 |
+| `LOG_PATH` | なし | JSONL ログの出力先（`--log-file` 未指定時のフォールバック） |
 | `SERVER_HOST` / `SERVER_PORT` | `127.0.0.1` / `8080` | ASGI 待受 |
 | `MCP_SERVERS_JSON` | なし | 外部 FastMCP サーバ定義（stdio / HTTP） |
 | `EVENT_EVAL_DELAY_MS` | `0` | イベント評価ワーカーの開始遅延（ms） |
@@ -167,7 +170,7 @@ uv run --locked python tools/e2e_event_chat.py
 ```
 
 `tools/e2e_event_chat.py` はプロセス内の `MockOpenAIServer`（`/v1/chat/completions`）と
-実外部 FastMCP `tools/mcp_divergence_server.py` を接続した `my-agents serve` を起動し、
+実外部 FastMCP `tools/mcp_divergence_server.py` を接続した `my-agents` を起動し、
 次の 13 シナリオを実測する。
 
 1. `/health`、`/`（UI DOM / プリセット / XSS 安全 DOM）、`/context` 初期状態
