@@ -1,4 +1,4 @@
-from ast import Attribute, Call, Import, ImportFrom, Name, walk
+from ast import AST, Attribute, Call, Import, ImportFrom, Load, Name, walk
 from pathlib import Path
 
 from tools.project_lint.common import (
@@ -47,6 +47,63 @@ def _is_super_call(expr: object) -> bool:
     )
 
 
+_STANDARD_STREAM_NAMES = frozenset(
+    {"__stderr__", "__stdout__", "stderr", "stdin", "stdout"}
+)
+
+
+def _sys_aliases(tree: AST) -> set[str]:
+    aliases: set[str] = set()
+    for node in walk(tree):
+        if isinstance(node, Import):
+            for alias in node.names:
+                if alias.name == "sys":
+                    aliases.add(alias.asname or "sys")
+    return aliases
+
+
+def _stdio_findings(path: Path, tree: AST) -> list[LintFinding]:
+    findings: list[LintFinding] = []
+    sys_aliases = _sys_aliases(tree)
+    for node in walk(tree):
+        if isinstance(node, Name) and node.id == "print" and isinstance(node.ctx, Load):
+            findings.append(
+                LintFinding(
+                    rule="PL020",
+                    path=path,
+                    line=node.lineno,
+                    col=node.col_offset + 1,
+                    message="Use 'IAppLogger' instead of the builtin 'print'.",
+                    hint=(
+                        "Inject and call 'IAppLogger' from 'my_agents.shell.logger' "
+                        "instead of writing to stdout/stderr directly."
+                    ),
+                )
+            )
+        elif (
+            isinstance(node, Attribute)
+            and node.attr in _STANDARD_STREAM_NAMES
+            and isinstance(node.value, Name)
+            and node.value.id in sys_aliases
+        ):
+            findings.append(
+                LintFinding(
+                    rule="PL020",
+                    path=path,
+                    line=node.lineno,
+                    col=node.col_offset + 1,
+                    message=(
+                        f"Use 'IAppLogger' instead of accessing 'sys.{node.attr}'."
+                    ),
+                    hint=(
+                        "Inject and call 'IAppLogger' from 'my_agents.shell.logger' "
+                        "instead of writing to process streams directly."
+                    ),
+                )
+            )
+    return findings
+
+
 def check_no_direct_logging(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding]:
     findings: list[LintFinding] = []
     for path in iter_python_files(src_dir):
@@ -74,6 +131,7 @@ def check_no_direct_logging(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding
                                 ),
                             )
                         )
+            findings.extend(_stdio_findings(path, tree))
             continue
 
         uses_logging = False
@@ -212,8 +270,7 @@ def check_no_direct_logging(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding
                         line=node.lineno,
                         col=node.col_offset + 1,
                         message=(
-                            "Infrastructure logging module must not call '.emit()' "
-                            "directly."
+                            "Shell logging module must not call '.emit()' directly."
                         ),
                         hint=(
                             "Call 'handler.handle(record)' instead of "

@@ -23,6 +23,7 @@ src/my_agents/
     server.py        # Starlette ASGI + SSE + 管理 UI + /context + 起動エントリポイント
     ui.html          # LINE / Dots / Muse 風ダーク Web UI（DOM 安全構築）
 tools/
+  __init__.py               # ツール群のパッケージマーカー
   mcp_divergence_server.py  # 外部 FastMCP 連想サーバ
   e2e_event_chat.py         # ローカル mock OpenAI + 実 FastMCP 13 シナリオ E2E
   project_lint/             # リポジトリ規約の静的検査（PL ルール）

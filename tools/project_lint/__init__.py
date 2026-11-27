@@ -1,3 +1,4 @@
+import sys
 from pathlib import Path
 
 from tools.project_lint.common import (
@@ -21,12 +22,12 @@ def run_all_checks(root: Path = PROJECT_ROOT) -> list[LintFinding]:
 def main() -> int:
     findings = run_all_checks()
     for finding in findings:
-        print(finding.format())
-        print()
+        sys.stdout.write(finding.format() + "\n")
+        sys.stdout.write("\n")
     if findings:
-        print(f"Found {len(findings)} project lint error(s).")
+        sys.stdout.write(f"Found {len(findings)} project lint error(s).\n")
         return 1
-    print("All project lint checks passed!")
+    sys.stdout.write("All project lint checks passed!\n")
     return 0
 
 

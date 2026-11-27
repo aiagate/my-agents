@@ -10,8 +10,10 @@ from ast import (
     Name,
     Subscript,
     Tuple,
+    expr,
     walk,
 )
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TypeIs
 
@@ -19,6 +21,8 @@ from tools.project_lint.common import (
     SRC_PACKAGE_DIR,
     LintFinding,
     call_name,
+    decorator_target,
+    dotted_name,
     function_arguments,
     iter_python_files,
     node_name,
@@ -200,29 +204,112 @@ def _parameter_finding(
     return None
 
 
-def check_tool_descriptions(
-    src_dir: Path = SRC_PACKAGE_DIR,
+def _is_tool_decorator(decorator: AST) -> bool:
+    target = decorator_target(decorator)
+    dotted = dotted_name(target) or node_name(target)
+    if dotted is None:
+        return False
+    return dotted == "tool" or dotted.endswith(".tool")
+
+
+def _decorator_description_finding(
+    path: Path,
+    decorator: expr,
+    function: FunctionDef | AsyncFunctionDef,
+) -> LintFinding | None:
+    if not isinstance(decorator, Call):
+        return LintFinding(
+            rule="PL022",
+            path=path,
+            line=decorator.lineno,
+            col=decorator.col_offset + 1,
+            message=(
+                f"Tool decorator on '{function.name}' must pass a non-empty "
+                "description=."
+            ),
+            hint=(
+                "Call the tool decorator with description='...' explaining what "
+                "the tool does."
+            ),
+        )
+    description: AST | None = None
+    for keyword in decorator.keywords:
+        if keyword.arg == "description":
+            description = keyword.value
+            break
+    if description is None:
+        return LintFinding(
+            rule="PL022",
+            path=path,
+            line=decorator.lineno,
+            col=decorator.col_offset + 1,
+            message=(
+                f"Tool decorator on '{function.name}' must pass a non-empty "
+                "description=."
+            ),
+            hint="Pass description='...' to the tool decorator.",
+        )
+    if isinstance(description, Constant):
+        value = description.value
+        if not isinstance(value, str) or not value.strip():
+            return LintFinding(
+                rule="PL022",
+                path=path,
+                line=decorator.lineno,
+                col=decorator.col_offset + 1,
+                message=(
+                    f"Tool decorator on '{function.name}' description= must be a "
+                    "non-empty string."
+                ),
+                hint="Replace the empty description with an explanatory string.",
+            )
+    return None
+
+
+def _decorated_tool_findings(
+    path: Path,
+    function: FunctionDef | AsyncFunctionDef,
 ) -> list[LintFinding]:
     findings: list[LintFinding] = []
-    for path in iter_python_files(src_dir):
-        tree = parse_file(path)
-        names, module_prefixes = _collect_tool_names(tree)
-        if not names and not module_prefixes:
+    for decorator in function.decorator_list:
+        if not _is_tool_decorator(decorator):
             continue
-        functions = _collect_functions(tree)
-        for node in walk(tree):
-            if not _is_tool_call(node, names, module_prefixes):
-                continue
-            description_finding = _description_finding(path, node)
-            if description_finding is not None:
-                findings.append(description_finding)
-            function_name = _tool_function_name(node)
-            if function_name is None:
-                continue
-            function = functions.get(function_name)
-            if function is None:
-                continue
-            parameter_finding = _parameter_finding(path, function)
-            if parameter_finding is not None:
-                findings.append(parameter_finding)
+        description_finding = _decorator_description_finding(path, decorator, function)
+        if description_finding is not None:
+            findings.append(description_finding)
+        parameter_finding = _parameter_finding(path, function)
+        if parameter_finding is not None:
+            findings.append(parameter_finding)
+    return findings
+
+
+def check_tool_descriptions(
+    src_dirs: Sequence[Path] | Path = SRC_PACKAGE_DIR,
+) -> list[LintFinding]:
+    directories = [src_dirs] if isinstance(src_dirs, Path) else list(src_dirs)
+    findings: list[LintFinding] = []
+    for src_dir in directories:
+        for path in iter_python_files(src_dir):
+            tree = parse_file(path)
+            names, module_prefixes = _collect_tool_names(tree)
+            functions = _collect_functions(tree)
+            for node in walk(tree):
+                if isinstance(node, FunctionDef | AsyncFunctionDef):
+                    findings.extend(_decorated_tool_findings(path, node))
+                if not names and not module_prefixes:
+                    continue
+                if not _is_tool_call(node, names, module_prefixes):
+                    continue
+                description_finding = _description_finding(path, node)
+                if description_finding is not None:
+                    findings.append(description_finding)
+                function_name = _tool_function_name(node)
+                if function_name is None:
+                    continue
+                function = functions.get(function_name)
+                if function is None:
+                    continue
+                parameter_finding = _parameter_finding(path, function)
+                if parameter_finding is not None:
+                    findings.append(parameter_finding)
     return findings

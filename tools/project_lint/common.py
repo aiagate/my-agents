@@ -190,7 +190,7 @@ def resolve_import_targets(
     if node.level == 0:
         return [node.module] if node.module else []
     rel_parts = list(path.relative_to(src_dir).with_suffix("").parts)
-    # Package __init__.py maps to the directory package, matching module sibling level.
+    # Python resolves pkg/__init__.py relative imports against pkg itself, matching sibling module depth.
     package_parts = ["my_agents", *rel_parts[:-1]]
     depth = max(len(package_parts) - (node.level - 1), 0)
     prefix = package_parts[:depth]

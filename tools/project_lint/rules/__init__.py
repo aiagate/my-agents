@@ -36,6 +36,10 @@ from tools.project_lint.rules.pl022_tool_descriptions import check_tool_descript
 from tools.project_lint.rules.pl023_no_private_type_in_public_api import (
     check_no_private_type_in_public_api,
 )
+from tools.project_lint.rules.pl024_exception_governance import (
+    check_exception_governance,
+)
+from tools.project_lint.rules.pl025_repo_consistency import check_repo_consistency
 
 type _PathCheck = Callable[[Path], list[LintFinding]]
 type _DirsCheck = Callable[[Sequence[Path]], list[LintFinding]]
@@ -78,18 +82,20 @@ _PATH_RULES: tuple[tuple[str, str, tuple[str, ...], _PathCheck], ...] = (
     ),
     ("PL019", "no_exception_result_errors", _SRC, check_no_exception_result_errors),
     ("PL020", "no_direct_logging", _SRC, check_no_direct_logging),
-    ("PL022", "tool_descriptions", _SRC, check_tool_descriptions),
     (
         "PL023",
         "no_private_type_in_public_api",
         _SRC,
         check_no_private_type_in_public_api,
     ),
+    ("PL024", "exception_governance", (), check_exception_governance),
+    ("PL025", "repo_consistency", (), check_repo_consistency),
 )
 
-_DIRS_RULES: tuple[tuple[str, str, _DirsCheck], ...] = (
-    ("PL006", "no_docstrings", check_no_docstrings),
-    ("PL008", "no_inline_suppressions", check_no_inline_suppressions),
+_DIRS_RULES: tuple[tuple[str, str, tuple[tuple[str, ...], ...], _DirsCheck], ...] = (
+    ("PL006", "no_docstrings", _ALL_DIRS, check_no_docstrings),
+    ("PL008", "no_inline_suppressions", _ALL_DIRS, check_no_inline_suppressions),
+    ("PL022", "tool_descriptions", (_SRC, ("tools",)), check_tool_descriptions),
 )
 
 RULES: tuple[LintRule, ...] = tuple(
@@ -100,8 +106,8 @@ RULES: tuple[LintRule, ...] = tuple(
                 for code, name, parts, check in _PATH_RULES
             ),
             *(
-                dirs_rule(code, name, _ALL_DIRS, check)
-                for code, name, check in _DIRS_RULES
+                dirs_rule(code, name, parts, check)
+                for code, name, parts, check in _DIRS_RULES
             ),
         ),
         key=lambda rule: rule.code,

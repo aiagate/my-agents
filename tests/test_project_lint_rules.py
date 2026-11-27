@@ -24,6 +24,21 @@ from tools.project_lint.rules import (
     check_thin_entrypoint,
     check_tool_descriptions,
 )
+from tools.project_lint.rules.pl024_exception_governance import (
+    check_exception_governance,
+)
+from tools.project_lint.rules.pl025_repo_consistency import (
+    check_all_exports,
+    check_document_paths,
+    check_hook_sync,
+    check_library_table,
+    check_particle_typos,
+    check_range_notation,
+    check_readme_tree,
+    check_regression_provenance,
+    check_stale_references,
+    check_table_sync,
+)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -49,7 +64,8 @@ def _ruff_check(directory: Path) -> subprocess.CompletedProcess[str]:
     )
 
 
-def test_pl001_flags_plain_str_secret_and_allows_vo_and_non_secrets(
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl001_regression_plain_str_secret(
     tmp_path: Path,
 ) -> None:
     src = _package(tmp_path)
@@ -124,7 +140,8 @@ def test_pl001_flags_plain_str_secret_and_allows_vo_and_non_secrets(
     assert "SecretStr" not in messages
 
 
-def test_pl002_requires_error_message_check_with_error_type(tmp_path: Path) -> None:
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl002_regression_error_message_and_type(tmp_path: Path) -> None:
     tests_dir = tmp_path / "tests"
     _write(
         tests_dir / "test_sample.py",
@@ -202,8 +219,9 @@ def test_pl003_flags_non_exhaustive_if_else_on_literal_and_enum(
     assert {f.rule for f in findings} == {"PL003"}
 
 
+# 2026-11-21 | initial layered architecture | SHA 808441e
 def test_pl003_regression_ternary_ifexp_on_closed_literal(tmp_path: Path) -> None:
-    # 2026-11-22 | thread mcp:launch:1a4040d4c0a04b9a800ad4bbe24f3bfa7c6c26d232c6018cca491c9cb0b465e0 | SHA 83ff9e4
+    # 2026-11-21 | initial layered architecture | SHA 808441e
     sample = _write(
         tmp_path / "sample.py",
         """
@@ -250,7 +268,8 @@ def test_pl003_regression_ternary_ifexp_on_closed_literal(tmp_path: Path) -> Non
     ]
 
 
-def test_pl004_enforces_two_layer_boundaries(tmp_path: Path) -> None:
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl004_regression_layer_boundaries(tmp_path: Path) -> None:
     src = _package(tmp_path)
     _write(
         src / "core" / "bad.py",
@@ -277,7 +296,8 @@ def test_pl004_enforces_two_layer_boundaries(tmp_path: Path) -> None:
     assert "must not import from 'shell'" in messages
 
 
-def test_pl005_flags_weakened_ty_config(tmp_path: Path) -> None:
+# 2026-11-23 | initial layered architecture | SHA aaaade8
+def test_pl005_regression_ty_config(tmp_path: Path) -> None:
     bad_toml = _write(
         tmp_path / "bad.toml",
         """
@@ -303,7 +323,8 @@ def test_pl005_flags_weakened_ty_config(tmp_path: Path) -> None:
     assert good_findings == []
 
 
-def test_pl006_flags_docstrings_and_allows_runtime_decorator_exceptions(
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl006_regression_docstrings(
     tmp_path: Path,
 ) -> None:
     src = _package(tmp_path)
@@ -364,7 +385,8 @@ def test_pl006_flags_docstrings_and_allows_runtime_decorator_exceptions(
     assert any("regular_helper" in f.message for f in allowed_findings)
 
 
-def test_pl007_flags_weakened_coverage_config(tmp_path: Path) -> None:
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl007_regression_coverage_config(tmp_path: Path) -> None:
     bad_toml = _write(
         tmp_path / "bad.toml",
         """
@@ -384,19 +406,20 @@ def test_pl007_flags_weakened_coverage_config(tmp_path: Path) -> None:
         omit = ["src/my_agents/__init__.py"]
         [tool.coverage.report]
         fail_under = 100
-        exclude_also = ["if TYPE_CHECKING:", "assert_never\\\\("]
+        exclude_also = ["assert_never\\\\("]
         """,
     )
 
     bad_findings = check_strict_coverage_config(bad_toml)
     good_findings = check_strict_coverage_config(good_toml)
 
-    assert len(bad_findings) == 4
+    assert len(bad_findings) == 5
     assert {f.rule for f in bad_findings} == {"PL007"}
     assert good_findings == []
 
 
-def test_pl008_flags_inline_suppressions_and_ignores_strings(tmp_path: Path) -> None:
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl008_regression_inline_suppressions(tmp_path: Path) -> None:
     src = _package(tmp_path)
     _write(
         src / "bad.py",
@@ -489,7 +512,7 @@ def test_tid251_regression_cast_and_any_banned_repo_wide(tmp_path: Path) -> None
 
     result = _ruff_check(tmp_path)
 
-    violations = [line for line in result.stdout.splitlines() if "TID251" in line]
+    violations = [line for line in result.stdout.splitlines() if "banned-api" in line]
     cast_violations = [
         line
         for line in violations
@@ -519,7 +542,8 @@ def test_tid251_regression_cast_and_any_banned_repo_wide(tmp_path: Path) -> None
     }
 
 
-def test_pl010_flags_shallow_or_assertionless_tests(tmp_path: Path) -> None:
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl010_regression_shallow_tests(tmp_path: Path) -> None:
     tests_dir = tmp_path / "tests"
     _write(
         tests_dir / "test_sample.py",
@@ -554,7 +578,8 @@ def test_pl010_flags_shallow_or_assertionless_tests(tmp_path: Path) -> None:
     assert "test_no_assert" in messages
 
 
-def test_pl011_flags_private_dataclass_init_fields(tmp_path: Path) -> None:
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl011_regression_private_dataclass_fields(tmp_path: Path) -> None:
     src = _package(tmp_path)
     _write(
         src / "sample.py",
@@ -640,7 +665,8 @@ def test_pl002_requires_display_message_check_for_displayable_error(
     assert "test_bad_missing_display_check" in findings[0].message
 
 
-def test_pl014_enforces_thin_entrypoint(tmp_path: Path) -> None:
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl014_regression_thin_entrypoint(tmp_path: Path) -> None:
     bad_src = tmp_path / "bad" / "src" / "my_agents"
     _write(
         bad_src / "__init__.py",
@@ -675,7 +701,8 @@ def test_pl014_enforces_thin_entrypoint(tmp_path: Path) -> None:
     assert len(check_thin_entrypoint(wrong_import)) == 1
 
 
-def test_pl015_flags_global_environ_mutation_and_allows_reads(
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl015_regression_environ_mutation(
     tmp_path: Path,
 ) -> None:
     src = _package(tmp_path)
@@ -694,9 +721,9 @@ def test_pl015_flags_global_environ_mutation_and_allows_reads(
     _write(
         src / "good.py",
         """
-        from os import environ
-        def read_value(name: str) -> str | None:
-            return environ.get(name)
+        from collections.abc import Mapping
+        def read_value(mapping: Mapping[str, str], name: str) -> str | None:
+            return mapping.get(name)
         """,
     )
 
@@ -707,7 +734,8 @@ def test_pl015_flags_global_environ_mutation_and_allows_reads(
     assert all(f.path.name == "bad.py" for f in findings)
 
 
-def test_pl016_flags_mutable_or_abstract_collections_in_frozen_dataclass(
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl016_regression_mutable_collections(
     tmp_path: Path,
 ) -> None:
     src = _package(tmp_path)
@@ -743,7 +771,8 @@ def test_pl016_flags_mutable_or_abstract_collections_in_frozen_dataclass(
     assert "cache" not in messages
 
 
-def test_pl018_flags_cross_layer_monkeypatch_and_allows_own_module(
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl018_regression_cross_layer_monkeypatch(
     tmp_path: Path,
 ) -> None:
     tests_dir = tmp_path / "tests"
@@ -772,7 +801,8 @@ def test_pl018_flags_cross_layer_monkeypatch_and_allows_own_module(
     assert "my_agents.infrastructure.runner" in messages
 
 
-def test_pl019_flags_exception_subclasses_in_src(tmp_path: Path) -> None:
+# 2026-11-21 | initial layered architecture | SHA 808441e
+def test_pl019_regression_exception_subclasses(tmp_path: Path) -> None:
     src = _package(tmp_path)
     _write(
         src / "errors.py",
@@ -798,7 +828,8 @@ def test_pl019_flags_exception_subclasses_in_src(tmp_path: Path) -> None:
     assert "GoodDomainError" not in messages
 
 
-def test_pl020_restricts_logging_to_the_shell_logger_module(
+# 2026-11-22 | shell logging extraction | SHA 56de693
+def test_pl020_regression_direct_logging(
     tmp_path: Path,
 ) -> None:
     src = _package(tmp_path)
@@ -868,7 +899,8 @@ def test_pl002_requires_expected_type_for_typed_error(tmp_path: Path) -> None:
     assert "expected_type" in findings[0].hint
 
 
-def test_pl022_requires_tool_and_parameter_descriptions(tmp_path: Path) -> None:
+# 2026-11-22 | tool registration | SHA 5d2d012
+def test_pl022_regression_tool_descriptions(tmp_path: Path) -> None:
     src = _package(tmp_path)
     _write(
         src / "infrastructure" / "tools.py",
@@ -915,7 +947,7 @@ def test_pl022_requires_tool_and_parameter_descriptions(tmp_path: Path) -> None:
 
 
 def test_pl023_regression_private_type_in_public_api(tmp_path: Path) -> None:
-    # 2026-11-22 | thread mcp:launch:1a4040d4c0a04b9a800ad4bbe24f3bfa7c6c26d232c6018cca491c9cb0b465e0 | SHAs 56de693, 83ff9e4
+    # 2026-11-23 | mcp launch review | SHA ed31aa4
     sample = _write(
         tmp_path / "sample.py",
         """
@@ -1031,3 +1063,597 @@ def test_pl002_requires_kind_for_app_error(tmp_path: Path) -> None:
     assert len(findings) == 1
     assert findings[0].rule == "PL002"
     assert "test_bad_missing_kind" in findings[0].message
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl001_regression_secret_taint_propagation(tmp_path: Path) -> None:
+    src = _package(tmp_path)
+    _write(
+        src / "leak.py",
+        """
+        class Source:
+            def get_secret_value(self) -> str:
+                return "raw"
+        def consume(values: list[str]) -> None:
+            return None
+        class Holder:
+            def __init__(self, source: Source) -> None:
+                self.api_key = source.get_secret_value()
+        secrets: tuple[str, ...] = ()
+        raw = Source().get_secret_value()
+        values = [raw]
+        consume(values)
+        external = ExternalProvider(api_key=Source().get_secret_value())
+        """,
+    )
+
+    findings = check_no_plain_str_secrets(src)
+
+    assert len(findings) == 3
+    messages = " ".join(finding.message for finding in findings)
+    assert "self.api_key" in messages
+    assert "consume" in messages
+    assert "secrets" in messages
+    assert "ExternalProvider" not in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl002_regression_http_status_only(tmp_path: Path) -> None:
+    tests_dir = tmp_path / "tests"
+    _write(
+        tests_dir / "test_http.py",
+        """
+        def test_missing_body() -> None:
+            response = object()
+            assert response.status_code == 404
+        def test_missing_body_500() -> None:
+            response = object()
+            assert response.status_code >= 500
+        def test_with_body() -> None:
+            response = object()
+            assert response.status_code == 404
+            assert response.json()["error"] == "not_found"
+        """,
+    )
+
+    findings = check_assert_error_message(tests_dir)
+
+    assert len(findings) == 2
+    assert {finding.rule for finding in findings} == {"PL002"}
+    assert all("HTTP error status" in finding.message for finding in findings)
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl004_regression_pure_module_allowlist(tmp_path: Path) -> None:
+    src = _package(tmp_path)
+    _write(
+        src / "core" / "bad.py",
+        """
+        import pathlib
+        import httpx
+        import flow_res
+        import pydantic
+        from my_agents.core.types import AppError
+        """,
+    )
+
+    findings = check_layer_boundaries(src)
+
+    assert len(findings) == 2
+    messages = " ".join(finding.message for finding in findings)
+    assert "'pathlib'" in messages
+    assert "'httpx'" in messages
+    assert "'flow_res'" not in messages
+    assert "'pydantic'" not in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl007_regression_dead_exclude_pattern(tmp_path: Path) -> None:
+    src = tmp_path / "src" / "my_agents"
+    _write(
+        src / "sample.py",
+        """
+        def label(value: object) -> str:
+            return assert_never(value)
+        """,
+    )
+    _write(
+        tmp_path / "pyproject.toml",
+        """
+        [tool.coverage.run]
+        branch = true
+        omit = ["src/my_agents/__init__.py"]
+        [tool.coverage.report]
+        fail_under = 100
+        exclude_also = [
+            "assert_never\\\\(",
+            "case _:\\\\s*\\\\n\\\\s*assert_never\\\\(",
+        ]
+        """,
+    )
+
+    findings = check_strict_coverage_config(tmp_path / "pyproject.toml")
+
+    assert len(findings) == 1
+    assert findings[0].rule == "PL007"
+    assert "matches no file" in findings[0].message
+    assert "case _:" in findings[0].message
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl010_regression_test_only_public_api(tmp_path: Path) -> None:
+    src = _package(tmp_path)
+    tests_dir = tmp_path / "tests"
+    _write(
+        src / "api.py",
+        """
+        class Service:
+            def used(self) -> int:
+                return 1
+            def test_only(self) -> int:
+                return 2
+            def _hidden(self) -> int:
+                return 3
+            @property
+            def prop(self) -> int:
+                return 4
+        def production() -> int:
+            return 1
+        def helper_only() -> int:
+            return 2
+        """,
+    )
+    _write(
+        src / "use.py",
+        """
+        from my_agents.api import Service, production
+        def run() -> int:
+            return Service().used() + production()
+        """,
+    )
+    _write(
+        tests_dir / "test_api.py",
+        """
+        from my_agents.api import Service, helper_only
+        def test_values() -> None:
+            assert Service().test_only() == 2
+            assert helper_only() == 2
+        """,
+    )
+
+    findings = check_no_shallow_tests(tests_dir, src_dir=src)
+
+    assert len(findings) == 2
+    messages = " ".join(finding.message for finding in findings)
+    assert "test_only" in messages
+    assert "helper_only" in messages
+    assert "'used'" not in messages
+    assert "'prop'" not in messages
+    assert "'_hidden'" not in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl014_regression_script_subpackage_and_import_io(tmp_path: Path) -> None:
+    src = _package(tmp_path)
+    _write(
+        tmp_path / "pyproject.toml",
+        """
+        [project.scripts]
+        sample = "my_agents:main"
+        """,
+    )
+    _write(
+        src / "__init__.py",
+        """
+        from my_agents.shell.server import main
+        __all__ = ["main"]
+        """,
+    )
+    _write(
+        src / "shell" / "server.py",
+        "def main() -> int:\n" + "    value = 1\n" * 26 + "    return 0\n",
+    )
+    _write(src / "core" / "__init__.py", "if True:\n    value = 1\n")
+    _write(src / "io.py", "TEXT = open('x').read()\n")
+    _write(src / "safe.py", "def load() -> str:\n    return open('x').read()\n")
+
+    findings = check_thin_entrypoint(src)
+
+    assert len(findings) == 3
+    messages = " ".join(finding.message for finding in findings)
+    assert "too large" in messages
+    assert "must not contain 'If'" in messages
+    assert "Module-level I/O" in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl015_regression_environ_reads(tmp_path: Path) -> None:
+    src = _package(tmp_path)
+    _write(
+        src / "reader.py",
+        """
+        import os
+        from os import environ, getenv
+        def read() -> tuple[object, object, object, object]:
+            return (
+                os.environ.get("A"),
+                environ.get("B"),
+                os.getenv("C"),
+                getenv("D"),
+            )
+        """,
+    )
+    _write(
+        src / "shell" / "server.py",
+        """
+        from os import environ
+        def main() -> str:
+            return environ.get("X", "")
+        """,
+    )
+
+    findings = check_no_global_environ_mutation(src)
+
+    assert len(findings) == 4
+    assert {finding.rule for finding in findings} == {"PL015"}
+    assert all(finding.path.name == "reader.py" for finding in findings)
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl016_regression_constructor_mutable_values(tmp_path: Path) -> None:
+    src = _package(tmp_path)
+    _write(
+        src / "dtos.py",
+        """
+        from collections.abc import Mapping, Sequence
+        from dataclasses import dataclass
+        from types import MappingProxyType
+        @dataclass(frozen=True, slots=True)
+        class Payload:
+            items: Sequence[str]
+            mapping: Mapping[str, int]
+        items: list[str] = []
+        mapping: dict[str, int] = {}
+        def build() -> None:
+            Payload(items)
+            Payload(items=["a"])
+            Payload(mapping={"a": 1})
+            Payload(items=tuple(items))
+            Payload(mapping=MappingProxyType({"a": 1}))
+        """,
+    )
+
+    findings = check_immutable_frozen_dataclass_fields(src)
+
+    assert len(findings) == 3
+    assert {finding.rule for finding in findings} == {"PL016"}
+    messages = " ".join(finding.message for finding in findings)
+    assert "'items'" in messages
+    assert "'mapping'" in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl018_regression_subject_alias_patch_and_private(tmp_path: Path) -> None:
+    src = _package(tmp_path)
+    tests_dir = tmp_path / "tests"
+    _write(
+        src / "shell" / "store.py",
+        """
+        class Store:
+            secret: str = ""
+            _cache: str = ""
+        """,
+    )
+    _write(
+        src / "shell" / "server.py",
+        "def main() -> int:\n    return 0\n",
+    )
+    _write(
+        tests_dir / "test_shell_store.py",
+        """
+        from unittest.mock import patch
+        import pytest
+        from my_agents.shell.store import Store
+        def test_patches(monkeypatch: pytest.MonkeyPatch) -> None:
+            monkeypatch.setattr("my_agents.shell.server.main", object())
+            monkeypatch.setattr(Store, "_cache", "x")
+            with monkeypatch.context() as mp:
+                mp.setattr("my_agents.shell.store._cache", "x")
+            with patch("my_agents.shell.server.main"):
+                pass
+            with patch.object(Store, "secret", "x"):
+                pass
+            with patch.object(Store, "_cache", "x"):
+                pass
+        """,
+    )
+
+    findings = check_no_cross_layer_internal_monkeypatch(tests_dir)
+
+    assert len(findings) == 5
+    assert {finding.rule for finding in findings} == {"PL018"}
+    messages = " ".join(finding.message for finding in findings)
+    assert "my_agents.shell.server.main" in messages
+    assert "'_cache'" in messages
+    assert "'secret'" not in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl019_regression_result_boundary_exceptions(tmp_path: Path) -> None:
+    src = _package(tmp_path)
+    _write(
+        src / "boundaries.py",
+        """
+        from pathlib import Path
+        from flow_res import Err, Ok, Result
+        from my_agents.core.types import AppError, AppErrorKind
+        def helper(path: Path) -> str:
+            return path.read_text(encoding="utf-8")
+        def boundary(path: Path) -> Result[str, AppError]:
+            return helper(path)
+        def guarded(path: Path) -> Result[str, AppError]:
+            try:
+                return path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
+                return Err(AppError(AppErrorKind.STORAGE, str(exc)))
+        def expand(path: Path) -> Result[Path, AppError]:
+            return Ok(path.expanduser())
+        """,
+    )
+
+    findings = check_no_exception_result_errors(src)
+
+    assert len(findings) == 2
+    assert {finding.rule for finding in findings} == {"PL019"}
+    messages = " ".join(finding.message for finding in findings)
+    assert "boundary" in messages
+    assert "OSError" in messages
+    assert "expand" in messages
+    assert "RuntimeError" in messages
+    assert "guarded" not in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl020_regression_print_and_stderr(tmp_path: Path) -> None:
+    src = _package(tmp_path)
+    _write(
+        src / "bad.py",
+        """
+        import sys
+        value = print
+        def write() -> None:
+            sys.stderr.write("x")
+        """,
+    )
+
+    findings = check_no_direct_logging(src)
+
+    assert len(findings) == 2
+    assert {finding.rule for finding in findings} == {"PL020"}
+    messages = " ".join(finding.message for finding in findings)
+    assert "'print'" in messages
+    assert "'sys.stderr'" in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl022_regression_tool_decorators(tmp_path: Path) -> None:
+    tools_dir = tmp_path / "tools"
+    _write(
+        tools_dir / "plugin.py",
+        """
+        from typing import Annotated
+        from pydantic import Field
+        from pydantic_ai import RunContext
+        @agent.tool
+        def missing(seed: str) -> str:
+            return seed
+        @mcp.tool(description="")
+        def empty(seed: Annotated[str, Field(description="ok")]) -> str:
+            return seed
+        @tool
+        def bare(seed: Annotated[str, Field(description="ok")]) -> str:
+            return seed
+        @mcp.tool(description="ok")
+        def good(
+            seed: Annotated[str, Field(description="ok")],
+            ctx: RunContext[None],
+        ) -> str:
+            return seed
+        """,
+    )
+
+    findings = check_tool_descriptions((tools_dir,))
+
+    assert len(findings) == 4
+    assert {finding.rule for finding in findings} == {"PL022"}
+    messages = " ".join(finding.message for finding in findings)
+    assert "missing" in messages
+    assert "empty" in messages
+    assert "bare" in messages
+    assert "good" not in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl024_regression_governance_metadata(tmp_path: Path) -> None:
+    rules_dir = tmp_path / "tools" / "project_lint" / "rules"
+    _write(
+        rules_dir / "pl999_sample.py",
+        """
+        _ALLOWED_MISSING = frozenset({"a"})
+        # reason=expired exception; expires=2000-01-01; approved-by=human
+        _NON_SECRET_EXPIRED = frozenset({"b"})
+        # reason=valid exception; expires=2099-01-01; approved-by=human
+        _RUNTIME_VALID = frozenset({"c"})
+        """,
+    )
+    _write(
+        tmp_path / "pyproject.toml",
+        """
+        [tool.ruff.lint]
+        ignore = ["E501"]
+        [tool.coverage.run]
+        omit = ["src/my_agents/__init__.py"]
+        [tool.coverage.report]
+        exclude_also = ["assert_never\\\\("]
+        """,
+    )
+
+    findings = check_exception_governance(tmp_path)
+
+    assert len(findings) == 5
+    assert {finding.rule for finding in findings} == {"PL024"}
+    messages = " ".join(finding.message for finding in findings)
+    assert "_ALLOWED_MISSING" in messages
+    assert "_NON_SECRET_EXPIRED" in messages
+    assert "E501" in messages
+    assert "src/my_agents/__init__.py" in messages
+    assert "assert_never" in messages
+    assert "_RUNTIME_VALID" not in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl024_regression_per_file_ignores(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "pyproject.toml",
+        """
+        [tool.ruff.lint.per-file-ignores]
+        "tests/x.py" = ["T201"]
+        """,
+    )
+
+    findings = check_exception_governance(tmp_path)
+
+    assert len(findings) == 1
+    assert findings[0].rule == "PL024"
+    assert "per-file-ignores" in findings[0].message
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl025_regression_missing_provenance(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "tests" / "test_project_lint_rules.py",
+        """
+        def test_pl001_regression_plain() -> None:
+            assert True
+        """,
+    )
+
+    findings = check_regression_provenance(tmp_path, codes={"PL001", "PL002"})
+
+    assert len(findings) == 2
+    messages = " ".join(finding.message for finding in findings)
+    assert "Missing regression test" in messages
+    assert "lacks provenance" in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl025_regression_stale_references(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "tools" / "project_lint" / "rules" / "pl999_sample.py",
+        """
+        OLD = "TypedError"
+        PATH = "my_agents.missing.module"
+        """,
+    )
+
+    findings = check_stale_references(tmp_path)
+
+    assert len(findings) == 2
+    messages = " ".join(finding.message for finding in findings)
+    assert "TypedError" in messages
+    assert "my_agents.missing.module" in messages
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl025_regression_table_range_path_hook_and_typo(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "AGENTS.md",
+        """
+        | 規約 | 強制手段 |
+        | --- | --- |
+        | a | PL001 |
+        | b | PL002 |
+        `src/missing.py`
+        これはの重複
+        PL001〜PL003
+        """,
+    )
+    _write(
+        tmp_path / ".githooks" / "pre-commit",
+        "#!/usr/bin/env sh\n",
+    )
+    (tmp_path / ".githooks" / "pre-commit").chmod(0o755)
+    _write(tmp_path / ".github" / "workflows" / "validate.yml", "name: ci\n")
+
+    table_findings = check_table_sync(tmp_path, codes={"PL001", "PL003"})
+    range_findings = check_range_notation(tmp_path, codes={"PL001", "PL003"})
+    path_findings = check_document_paths(tmp_path)
+    hook_findings = check_hook_sync(tmp_path)
+    typo_findings = check_particle_typos(tmp_path)
+
+    assert any("PL003" in finding.message for finding in table_findings)
+    assert len(range_findings) == 1
+    assert any("src/missing.py" in finding.message for finding in path_findings)
+    assert len(hook_findings) == 2
+    assert len(typo_findings) == 1
+
+
+# 2026-11-27 | thread chore/review-agents-alignment | base SHA 0d198cb
+def test_pl025_regression_all_readme_and_library(tmp_path: Path) -> None:
+    _write(
+        tmp_path / "src" / "my_agents" / "pkg.py",
+        """
+        __all__ = ["public"]
+        def public() -> int:
+            return 1
+        def hidden() -> int:
+            return 2
+        """,
+    )
+    _write(
+        tmp_path / "tests" / "test_pkg.py",
+        """
+        from my_agents.pkg import hidden
+        """,
+    )
+    _write(
+        tmp_path / "src" / "my_agents" / "core" / "missing.py",
+        "VALUE = 1\n",
+    )
+    _write(
+        tmp_path / "README.md",
+        """
+        ```text
+        src/my_agents/
+          pkg.py
+        tools/
+        ```
+        """,
+    )
+    _write(
+        tmp_path / "AGENTS.md",
+        """
+        # 主要ライブラリ
+        | ライブラリ | 役割 |
+        | --- | --- |
+        | `not-a-dependency` | x |
+        """,
+    )
+    _write(
+        tmp_path / "pyproject.toml",
+        """
+        [project]
+        name = "sample"
+        dependencies = ["flow-res>=0.2.0"]
+        """,
+    )
+
+    export_findings = check_all_exports(tmp_path)
+    readme_findings = check_readme_tree(tmp_path)
+    library_findings = check_library_table(tmp_path)
+
+    assert len(export_findings) == 1
+    assert "hidden" in export_findings[0].message
+    assert any("missing.py" in finding.message for finding in readme_findings)
+    assert len(library_findings) == 1
+    assert "not-a-dependency" in library_findings[0].message

@@ -9,21 +9,25 @@ from tools.project_lint.common import (
     resolve_import_targets,
 )
 
-_CORE_FORBIDDEN_EXTERNAL = frozenset(
+_CORE_PURE_MODULES = frozenset(
     {
-        "asyncio",
-        "dotenv",
-        "fastmcp",
-        "http",
-        "mcp",
-        "os",
-        "pydantic_ai",
-        "pydantic_settings",
-        "socket",
-        "sqlite3",
-        "starlette",
-        "subprocess",
-        "uvicorn",
+        "abc",
+        "collections",
+        "dataclasses",
+        "datetime",
+        "enum",
+        "functools",
+        "hashlib",
+        "itertools",
+        "json",
+        "math",
+        "operator",
+        "re",
+        "types",
+        "typing",
+        "unicodedata",
+        "flow_res",
+        "pydantic",
     }
 )
 
@@ -56,22 +60,26 @@ def check_layer_boundaries(src_dir: Path = SRC_PACKAGE_DIR) -> list[LintFinding]
             for target in resolve_import_targets(node, path, src_dir):
                 parts = target.split(".")
                 if layer == "core":
-                    if parts[0] in _CORE_FORBIDDEN_EXTERNAL:
-                        findings.append(
-                            _finding(
-                                path,
-                                node,
-                                f"'core' must not import external I/O library '{parts[0]}'.",
-                                "Move the effect into 'shell' and pass a value into core.",
-                            )
-                        )
-                    elif len(parts) >= 2 and parts[:2] == ["my_agents", "shell"]:
+                    if len(parts) >= 2 and parts[:2] == ["my_agents", "shell"]:
                         findings.append(
                             _finding(
                                 path,
                                 node,
                                 "'core' must not import from 'shell'.",
                                 "Invert the dependency: shell imports core, never the reverse.",
+                            )
+                        )
+                    elif (
+                        target != "my_agents"
+                        and not (len(parts) >= 2 and parts[:2] == ["my_agents", "core"])
+                        and parts[0] not in _CORE_PURE_MODULES
+                    ):
+                        findings.append(
+                            _finding(
+                                path,
+                                node,
+                                f"'core' must not import external I/O library '{parts[0]}'.",
+                                "Keep core pure: move I/O into shell and pass a value into core.",
                             )
                         )
                 elif (

@@ -1,3 +1,4 @@
+import re
 import tomllib
 from pathlib import Path
 
@@ -6,12 +7,14 @@ from tools.project_lint.common import (
     LintFinding,
     as_table,
     find_line_number,
+    iter_python_files,
 )
 
+# reason=entrypoint is exercised indirectly; keeping it out of branch coverage is intentional; expires=2027-11-27; approved-by=human
 _ALLOWED_COVERAGE_OMITS = frozenset({"src/my_agents/__init__.py"})
+# reason=only exhaustive type-guard branches may be excluded from coverage; expires=2027-11-27; approved-by=human
 _ALLOWED_COVERAGE_EXCLUDE_PATTERNS = frozenset(
     {
-        "if TYPE_CHECKING:",
         r"case _:\s*\n\s*assert_never\(",
         r"assert_never\(",
     }
@@ -139,4 +142,54 @@ def check_strict_coverage_config(
                             ),
                         )
                     )
+            findings.extend(_dead_exclude_findings(pyproject_path, excludes))
+    return findings
+
+
+def _dead_exclude_findings(
+    pyproject_path: Path,
+    excludes: list[str],
+) -> list[LintFinding]:
+    src_dir = pyproject_path.parent / "src" / "my_agents"
+    if not src_dir.exists():
+        return []
+    sources = [path.read_text(encoding="utf-8") for path in iter_python_files(src_dir)]
+    findings: list[LintFinding] = []
+    for pattern in excludes:
+        try:
+            matcher = re.compile(pattern, re.MULTILINE)
+        except re.error:
+            findings.append(
+                LintFinding(
+                    rule="PL007",
+                    path=pyproject_path,
+                    line=find_line_number(
+                        pyproject_path.read_text(encoding="utf-8"), pattern
+                    ),
+                    col=1,
+                    message=f"Invalid exclude_also regex '{pattern}'.",
+                    hint="Use a valid Python regular expression.",
+                )
+            )
+            continue
+        if any(matcher.search(source) for source in sources):
+            continue
+        findings.append(
+            LintFinding(
+                rule="PL007",
+                path=pyproject_path,
+                line=find_line_number(
+                    pyproject_path.read_text(encoding="utf-8"), pattern
+                ),
+                col=1,
+                message=(
+                    f"[tool.coverage.report] exclude_also pattern '{pattern}' "
+                    "matches no file under 'src/my_agents'."
+                ),
+                hint=(
+                    "Remove dead exclude_also patterns so coverage cannot be "
+                    "silently widened by stale exclusions."
+                ),
+            )
+        )
     return findings

@@ -38,6 +38,8 @@ pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`�
 | logging/print を直接使わず IAppLogger を通す（許可は shell/logger.py のみ） | PL020 + Ruff T201 |
 | LLM 向けツール定義に Field description を付ける | PL022 |
 | 公開 API の型注釈に非公開型を露出しない | PL023 |
+| 設定例外は理由・期限・人間承認コメントを持ち、per-file-ignores を使わない | PL024 |
+| 回帰テスト・文書・フック・公開 API の整合を保つ | PL025 |
 | Python 3.14+ 前提・__future__ annotations と typing.Any を使わない | pyproject（requires-python / Ruff TID251）+ ty python-version |
 | コミット前に Ruff / ty / project_lint を通過させる | .githooks/pre-commit + CI |
 | コミットメッセージは Conventional Commits 形式（英語） | .githooks/commit-msg（type・形式・ASCII。字数・命令形は判断） |
