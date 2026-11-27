@@ -20,6 +20,29 @@ from typing import BinaryIO
 REPO = Path(__file__).resolve().parents[1]
 DELAY_MS = 1500
 EVENT_ID_PATTERN = re.compile(r"\[event:(evt_[a-f0-9]+)\]")
+_MANAGED_ENV = frozenset(
+    {
+        "DATA_DIR",
+        "DB_PATH",
+        "LOG_PATH",
+        "PERSONA_PATH",
+        "MCP_SERVERS_JSON",
+        "SERVER_HOST",
+        "SERVER_PORT",
+        "LLM_MODEL",
+        "LLM_BASE_URL",
+        "LLM_API_KEY",
+        "EVENT_EVAL_DELAY_MS",
+        "PROACTIVE_DAILY_CAP",
+        "PROACTIVE_QUIET_HOURS_START_UTC",
+        "PROACTIVE_QUIET_HOURS_END_UTC",
+        "PROACTIVE_USER_ACTIVE_MINUTES",
+        "RECENT_MESSAGES_LIMIT",
+        "HOME",
+        "XDG_STATE_HOME",
+        "PYTHONUNBUFFERED",
+    }
+)
 
 
 def emit(message: str) -> None:
@@ -379,6 +402,9 @@ def wait_health(port: int, process: subprocess.Popen[bytes], log_path: Path) -> 
         try:
             status, payload, _ = json_request(port, "GET", "/health")
             if status == 200 and payload.get("status") == "ok":
+                announced = log_path.read_text(encoding="utf-8", errors="replace")
+                expected = f"my-agents listening on http://127.0.0.1:{port}"
+                assert expected in announced, announced[-4000:]
                 return
         except OSError:
             pass
@@ -495,16 +521,26 @@ class Database:
         )
 
 
-def launch(
-    root: Path, port: int, llm_port: int, extra: dict[str, str]
-) -> tuple[subprocess.Popen[bytes], BinaryIO, Path]:
-    env = {
-        **os.environ,
+def server_env(
+    root: Path,
+    port: int,
+    llm_port: int,
+    extra: Mapping[str, str],
+    ambient: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    source = os.environ if ambient is None else ambient
+    env = {key: value for key, value in source.items() if key not in _MANAGED_ENV} | {
         "PYTHONUNBUFFERED": "1",
         "LLM_MODEL": "mock-model",
         "LLM_BASE_URL": f"http://127.0.0.1:{llm_port}/v1",
         "LLM_API_KEY": "mock-secret-key",
         "DATA_DIR": str(root),
+        # DB_PATH wins over DATA_DIR; an inherited DB_PATH would silently
+        # point the run at another database.
+        "DB_PATH": str(root / "state.db"),
+        "LOG_PATH": "",
+        "PERSONA_PATH": "",
+        "MCP_SERVERS_JSON": "",
         "HOME": str(root / "home"),
         "XDG_STATE_HOME": str(root / "state"),
         "SERVER_HOST": "127.0.0.1",
@@ -517,6 +553,13 @@ def launch(
         "RECENT_MESSAGES_LIMIT": "30",
         **extra,
     }
+    return env
+
+
+def launch(
+    root: Path, port: int, llm_port: int, extra: dict[str, str]
+) -> tuple[subprocess.Popen[bytes], BinaryIO, Path]:
+    env = server_env(root, port, llm_port, extra)
     log_path = root / "server.log"
     handle = log_path.open("ab")
     process = subprocess.Popen(
@@ -531,6 +574,22 @@ def launch(
         stderr=subprocess.STDOUT,
     )
     return process, handle, log_path
+
+
+def check_sigterm(root: Path, llm_port: int) -> int:
+    port = free_port()
+    process, handle, log_path = launch(root, port, llm_port, {})
+    try:
+        wait_health(port, process, log_path)
+        process.send_signal(signal.SIGTERM)
+        exit_code = process.wait(timeout=25)
+        assert exit_code == -signal.SIGTERM, exit_code
+        return exit_code
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=10)
+        handle.close()
 
 
 def mcp_config() -> str:
@@ -904,7 +963,7 @@ def main() -> int:
                 children = child_pids(process.pid)
                 process.send_signal(signal.SIGINT)
                 exit_code = process.wait(timeout=25)
-                assert exit_code in (0, -2, -15)
+                assert exit_code == 0, exit_code
                 if children:
                     for _ in range(100):
                         if not any(_alive(pid) for pid in children):
@@ -913,8 +972,11 @@ def main() -> int:
                     assert [pid for pid in children if _alive(pid)] == []
                 log_text = log_path.read_text(encoding="utf-8", errors="replace")
                 assert "mock-secret-key" not in log_text
+                sigterm_exit = check_sigterm(root, mock_openai.port)
                 emit(
-                    f"scenario_13=ok failure_resilience_redaction_and_sigint_teardown={exit_code}"
+                    "scenario_13=ok "
+                    "failure_resilience_redaction_and_sigint_teardown="
+                    f"{exit_code} sigterm_exit={sigterm_exit}"
                 )
             finally:
                 for reader in readers:

@@ -185,4 +185,4 @@ uv run --locked python tools/e2e_event_chat.py
 10. 境界偽装・bidi・制御文字の無害化とイベント文脈ありターンでの記憶更新ツール非公開
 11. 別会話のイベントに対する `read_event` 拒否
 12. 400 / 404 / 413（chunked 含む）/ 422 入力ガード
-13. mock OpenAI 500 障害時の `event_failed` SSE・502 応答・秘密文字列秘匿・SIGINT 終了と MCP 子プロセス teardown
+13. mock OpenAI 500 障害時の `event_failed` SSE・502 応答・秘密文字列秘匿・SIGINT 終了（exit 0）と MCP 子プロセス teardown、および 2 台目の SIGTERM 終了（`-15` / shell は 143）

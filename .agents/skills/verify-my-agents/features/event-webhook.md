@@ -11,8 +11,9 @@ loopback Webhook からイベントを受理し、独立ワーカーが 1-shot `
 uv run --locked python tools/e2e_event_chat.py
 ```
 
-スクリプトは空きポートを選び、`my-agents` を起動して次を順に実測する。
-`web-server.md` と同じ 13 シナリオを共有する。
+スクリプトは `SERVER_HOST=127.0.0.1` と空きポートを選び、`DATA_DIR` / `DB_PATH` /
+`LOG_PATH` / `PERSONA_PATH` などを検証用 tmp に固定して継承値を捨てる。起動後に `/health` が返り、起動ログの listening 行がそのポートを
+指すことまで確認してから次を順に実測する（`web-server.md` と同じ 13 シナリオ）。
 
 1. `EVENT_EVAL_DELAY_MS=1500` と `MCP_SERVERS_JSON` でサーバを起動し、
    `/health`、`/`（`EventSource(` / `textContent` / `line:demo` / `/context` /
@@ -52,7 +53,9 @@ scenario_9=ok memory_chars=...
 scenario_10=ok injection_defanged_and_memory_tool_hidden=True
 scenario_11=ok cross_conversation_read_event_denied=True
 scenario_12=ok input_guards_400_404_413_422=True
-scenario_13=ok failure_resilience_redaction_and_sigint_teardown=0
+scenario_13=ok failure_resilience_redaction_and_sigint_teardown=0 sigterm_exit=-15
 ```
 
-終了コードは SIGINT 後の graceful shutdown で `0`（環境により `-2` / `-15`）を許す。
+シナリオ 13 は `SIGINT` 後の graceful shutdown で exit `0`、続けて起動した 2 台目は
+`SIGTERM` で `-15`（shell では `143`。`finally: logger.close()` は走らない）になる
+ことを確認する。

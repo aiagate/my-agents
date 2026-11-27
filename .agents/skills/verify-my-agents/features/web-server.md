@@ -9,8 +9,11 @@
 uv run --locked python tools/e2e_event_chat.py
 ```
 
-スクリプトは空きポートで `my-agents` を起動し、`MCP_SERVERS_JSON` で
-`tools/mcp_divergence_server.py` を実接続して 13 シナリオを順に実測する。
+スクリプトは `SERVER_HOST=127.0.0.1` と空きポートで `my-agents` を起動し、
+`DATA_DIR` / `DB_PATH` / `LOG_PATH` / `PERSONA_PATH` を検証用 tmp に固定して
+`MCP_SERVERS_JSON` で `tools/mcp_divergence_server.py` を実接続し、13 シナリオを
+順に実測する。`/health` の成功と起動ログの listening 行（同じポート）を確認して
+から駆動する。
 
 1. `/health`、`/`（`EventSource(` / `textContent` / `line:demo` / `/context` /
    3 プリセット、XSS 禁止要素の不含有）、`/context`。
@@ -25,7 +28,8 @@ uv run --locked python tools/e2e_event_chat.py
 10. 境界偽装・bidi・制御文字の無害化と、イベント文脈ありターンでの記憶更新ツール非公開。
 11. 別会話イベントに対する `read_event` 拒否。
 12. 400 / 404 / 413（chunked 含む）/ 422 入力ガード。
-13. mock OpenAI 500 障害時の `event_failed`・502・秘密秘匿・SIGINT 後の MCP 子プロセス teardown。
+13. mock OpenAI 500 障害時の `event_failed`・502・秘密秘匿・SIGINT 後の MCP 子プロセス
+    teardown と exit 0、および 2 台目の SIGTERM 終了 `-15`。
 
 ## 期待する証跡
 
@@ -43,5 +47,5 @@ scenario_9=ok memory_chars=...
 scenario_10=ok injection_defanged_and_memory_tool_hidden=True
 scenario_11=ok cross_conversation_read_event_denied=True
 scenario_12=ok input_guards_400_404_413_422=True
-scenario_13=ok failure_resilience_redaction_and_sigint_teardown=0
+scenario_13=ok failure_resilience_redaction_and_sigint_teardown=0 sigterm_exit=-15
 ```
