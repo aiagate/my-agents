@@ -1,7 +1,8 @@
 from datetime import UTC, datetime
+from types import MappingProxyType
 
 import pytest
-from pydantic import ValidationError
+from pydantic import SecretStr, ValidationError
 
 from my_agents.core.types import (
     DEFAULT_PERSONA,
@@ -28,6 +29,9 @@ from my_agents.core.types import (
     TurnOutcome,
     redact_secrets,
 )
+from my_agents.core.types import (
+    __all__ as exported,
+)
 
 
 def test_memory_blocks_value_and_with_value_for_all_blocks() -> None:
@@ -46,7 +50,10 @@ def test_memory_blocks_value_and_with_value_for_all_blocks() -> None:
 
 def test_redact_secrets_masks_tokens_and_url_credentials() -> None:
     raw = "key=sk-12345 url=https://alice:topsecret@example.com/v1 empty="
-    redacted = redact_secrets(raw, ("", "sk-12345", "topsecret"))
+    redacted = redact_secrets(
+        raw,
+        (SecretStr(""), SecretStr("sk-12345"), SecretStr("topsecret")),
+    )
     assert "sk-12345" not in redacted
     assert "topsecret" not in redacted
     assert "https://***@example.com/v1" in redacted
@@ -62,16 +69,18 @@ def test_event_decision_validation_and_immutability() -> None:
     )
     assert decision.action is EventAction.SPEAK
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(
+        ValidationError, match="String should have at least 1 character"
+    ):
         EventDecision(action=EventAction.IGNORE, reason="")
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         EventDecision.model_validate(
             {"action": "ignore", "reason": "ok", "unexpected": True}
         )
 
     field_name = "reason"
-    with pytest.raises(ValidationError):
+    with pytest.raises(ValidationError, match="Instance is frozen"):
         setattr(decision, field_name, "mutated")
 
 
@@ -84,7 +93,15 @@ def test_snapshot_and_record_models_construct_cleanly() -> None:
     msg = ChatMessage(
         1, "default", "assistant", MessageOrigin.PROACTIVE, "hi", "evt_1", now
     )
-    env = EventEnvelope("evt_1", "default", "alarm", "sensor", now, "k1", {"temp": 33})
+    env = EventEnvelope(
+        "evt_1",
+        "default",
+        "alarm",
+        "sensor",
+        now,
+        "k1",
+        MappingProxyType({"temp": 33}),
+    )
     rec = EventRecord(
         "evt_1",
         "default",
@@ -135,6 +152,8 @@ def test_snapshot_and_record_models_construct_cleanly() -> None:
 
     assert state.epoch == 2
     assert env.data["temp"] == 33
+    with pytest.raises(TypeError, match="does not support item assignment"):
+        exec('env.data["temp"] = 34', {"env": env})
     assert rec.linked_message_id == 1
     assert (outcome.action, policy.daily_cap) == (EventAction.NOTE, 5)
     assert (timeline.delivery, turn.message_id, receipt.duplicate) == (
@@ -148,3 +167,12 @@ def test_snapshot_and_record_models_construct_cleanly() -> None:
     assert sparse.instructions == "p\n\ne"
     assert only_prefix.instructions == "p"
     assert (assembled.omitted_events, ctx.memory_chars, mem.blocks.user) == (0, 10, "u")
+
+
+def test_all_exports_only_public_symbols() -> None:
+    module = __import__("my_agents.core.types", fromlist=["__all__"])
+    assert exported == sorted(exported)
+    assert "SecretStr" in exported
+    assert all(not name.startswith("_") for name in exported)
+    for name in exported:
+        assert hasattr(module, name), name

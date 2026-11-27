@@ -190,9 +190,16 @@ def _require_supported_version(connection: sqlite3.Connection) -> None:
 
 
 class Store:
-    def __init__(self, db_path: Path, memory_path: Path) -> None:
+    def __init__(
+        self,
+        db_path: Path,
+        memory_path: Path,
+        *,
+        schema_statements: Sequence[str] = _SCHEMA_STATEMENTS,
+    ) -> None:
         self._db = db_path
         self._memory = memory_path
+        self._schema_statements = tuple(schema_statements)
         self._init_error: AppError | None = None
         if db_path.exists():
             self._init_error = self._prepare()
@@ -240,7 +247,7 @@ class Store:
                     f"{CURRENT_SCHEMA_VERSION}). Remove the old database or choose "
                     "a fresh DATA_DIR."
                 )
-            for statement in _SCHEMA_STATEMENTS:
+            for statement in self._schema_statements:
                 connection.execute(statement)
             connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
         except BaseException:
@@ -600,14 +607,6 @@ class Store:
 
         return self._write(run)
 
-    def write_memory(self, blocks: MemoryBlocks) -> Result[None, AppError]:
-        try:
-            with self._memory_lock():
-                self._write_memory_unlocked(blocks)
-        except OSError as exc:
-            return Err(_storage(str(exc)))
-        return Ok(None)
-
     def update_memory(
         self, transform: Callable[[MemoryBlocks], Result[MemoryBlocks, AppError]]
     ) -> Result[None, AppError]:
@@ -620,7 +619,7 @@ class Store:
                 if isinstance(updated, Err):
                     return updated
                 self._write_memory_unlocked(updated.value)
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             return Err(_storage(str(exc)))
         return Ok(None)
 
@@ -654,7 +653,7 @@ class Store:
                 handle.flush()
                 os.fsync(handle.fileno())
             temporary.replace(self._memory)
-        except OSError:
+        except OSError, UnicodeError:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
             raise
@@ -664,7 +663,7 @@ class Store:
             text = self._memory.read_text(encoding="utf-8")
         except FileNotFoundError:
             return Ok(MemoryBlocks())
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             return Err(_storage(str(exc)))
         return Ok(_parse_memory(text))
 

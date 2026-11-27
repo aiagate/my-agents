@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import asdict, dataclass
 from typing import Annotated, Literal
@@ -32,6 +32,7 @@ from my_agents.core.types import (
     EventEnvelope,
     MemoryBlock,
     MemoryBlocks,
+    SecretStr,
     redact_secrets,
 )
 from my_agents.shell.logger import IAppLogger, LogEntry, LogLevel
@@ -127,12 +128,12 @@ class Llm:
         store: Store,
         logger: IAppLogger,
         external_toolsets: Sequence[AbstractToolset[None]] = (),
-        redactions: tuple[str, ...] = (),
+        redactions: Sequence[SecretStr] = (),
     ) -> None:
         self._store = store
         self._external_toolsets = tuple(external_toolsets)
         self._logger = logger
-        self._redactions = redactions
+        self._redactions: tuple[SecretStr, ...] = tuple(redactions)
         self._stack: AsyncExitStack | None = None
         self._chat: Agent[None, str] = Agent(model)
         self._evaluator: Agent[None, EventDecision] = Agent(
@@ -141,28 +142,29 @@ class Llm:
 
     @classmethod
     def from_settings(
-        cls, settings: Settings, *, store: Store, logger: IAppLogger
+        cls,
+        settings: Settings,
+        *,
+        store: Store,
+        logger: IAppLogger,
+        base_env: Mapping[str, str],
     ) -> Result[Llm, AppError]:
         servers = settings.mcp_servers
         if isinstance(servers, Err):
             return servers
-        toolsets = build_toolsets(servers.value)
+        toolsets = build_toolsets(servers.value, base_env=base_env)
         redactions = tuple(
-            value.get_secret_value()
+            value
             for spec in servers.value
             for _name, value in (*spec.env, *spec.headers)
-        ) + tuple(
-            spec.url.get_secret_value()
-            for spec in servers.value
-            if spec.url is not None
-        )
+        ) + tuple(spec.url for spec in servers.value if spec.url is not None)
         api_key = settings.llm_api_key
         if api_key is None:
             return Err(AppError(AppErrorKind.VALIDATION, "LLM_API_KEY is required."))
         model_name = settings.llm_model
         if model_name is None:
             return Err(AppError(AppErrorKind.VALIDATION, "LLM_MODEL is required."))
-        redactions += (api_key.get_secret_value(),)
+        redactions += (api_key,)
         model = OpenAIChatModel(
             model_name,
             provider=OpenAIProvider(

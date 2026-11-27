@@ -1,6 +1,5 @@
 import json
 from collections.abc import Mapping
-from os import environ
 from pathlib import Path
 from typing import Annotated
 
@@ -27,7 +26,12 @@ def _optional_path(value: object) -> Path | None:
     if isinstance(value, Path):
         return value
     text = str(value).strip()
-    return Path(text).expanduser() if text else None
+    if not text:
+        return None
+    try:
+        return Path(text).expanduser()
+    except RuntimeError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def _data_dir(value: object) -> Path:
@@ -104,14 +108,21 @@ class Settings(BaseModel):
 
 def load_settings(
     *,
-    env: Mapping[str, str] | None = None,
+    env: Mapping[str, str],
     env_path: Path | None = None,
 ) -> Result[Settings, AppError]:
-    source: Mapping[str, str | None] = environ if env is None else env
     merged: dict[str, object] = {}
     if env_path is not None:
-        merged.update(dotenv_values(env_path))
-    merged.update({key: value for key, value in source.items() if value is not None})
+        try:
+            merged.update(dotenv_values(env_path))
+        except (OSError, UnicodeError) as exc:
+            return Err(
+                AppError(
+                    AppErrorKind.VALIDATION,
+                    f"Cannot read .env file: {exc}",
+                )
+            )
+    merged.update({key: value for key, value in env.items() if value is not None})
     try:
         return Ok(Settings.model_validate(merged))
     except ValidationError as exc:
@@ -130,7 +141,7 @@ def load_persona(path: Path | None) -> Result[CharacterPersona, AppError]:
         return Ok(DEFAULT_PERSONA)
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return Err(AppError(AppErrorKind.VALIDATION, f"Cannot read persona: {exc}"))
     if not isinstance(data, dict):
         return Err(AppError(AppErrorKind.VALIDATION, "Persona must be a JSON object."))

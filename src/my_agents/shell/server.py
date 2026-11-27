@@ -1,13 +1,14 @@
 import argparse
 import asyncio
 import json
-import sys
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import datetime
 from enum import StrEnum
+from functools import cache
 from http import HTTPStatus
 from importlib.resources import files
+from os import environ
 from pathlib import Path
 from typing import assert_never
 
@@ -36,13 +37,20 @@ from my_agents.shell.logger import (
     JsonlLogger,
     LogEntry,
     LogLevel,
+    write_stderr,
+    write_stdout,
 )
 from my_agents.shell.settings import Settings, load_persona, load_settings
 from my_agents.shell.store import Store
 
 MAX_BODY_BYTES = 64 * 1024
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-_UI_HTML = files("my_agents.shell").joinpath("ui.html").read_text(encoding="utf-8")
+
+
+@cache
+def _ui_html() -> str:
+    return files("my_agents.shell").joinpath("ui.html").read_text(encoding="utf-8")
+
 
 _EVENT_KEYS = (
     "event_id",
@@ -303,7 +311,7 @@ def create_app(engine: CharacterEngine) -> Starlette:
         return _ok(result, lambda deleted: {"deleted_messages": deleted})
 
     async def index(_request: Request) -> HTMLResponse:
-        return HTMLResponse(_UI_HTML)
+        return HTMLResponse(_ui_html())
 
     @asynccontextmanager
     async def lifespan(_app: Starlette) -> AsyncGenerator[None]:
@@ -341,10 +349,6 @@ def serve(engine: CharacterEngine, host: str, port: int) -> None:
     uvicorn.run(create_app(engine), host=host, port=port, log_level="warning")
 
 
-def _write_error(message: str) -> None:
-    sys.stderr.write(f"{message}\n")
-
-
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="my-agents")
     parser.add_argument("--log-file", type=Path, default=None)
@@ -371,20 +375,22 @@ def _engine(
     settings: Settings,
     persona: CharacterPersona,
     logger: IAppLogger,
+    *,
+    base_env: Mapping[str, str],
 ) -> CharacterEngine:
     store = Store(settings.db_path, settings.core_memory_path)
-    llm = Llm.from_settings(settings, store=store, logger=logger)
+    llm = Llm.from_settings(settings, store=store, logger=logger, base_env=base_env)
     if is_err(llm):
         raise RuntimeError(llm.error.message)
     return CharacterEngine(store, llm.value, settings, persona, logger)
 
 
-def main(
-    argv: Sequence[str] | None = None,
+def run_server(
+    argv: Sequence[str] | None,
     *,
-    env: Mapping[str, str] | None = None,
-    write_output: Callable[[str], None] = print,
-    write_error: Callable[[str], None] = _write_error,
+    env: Mapping[str, str] | None,
+    write_output: Callable[[str], None],
+    write_error: Callable[[str], None],
 ) -> int:
     try:
         arguments = _parser().parse_args(argv)
@@ -393,8 +399,9 @@ def main(
     logger = _try_logger(arguments.log_file, write_error, explicit=True)
     if logger is None:
         return 1
+    resolved_env: Mapping[str, str] = environ if env is None else env
     try:
-        loaded = load_settings(env=env, env_path=Path.cwd() / ".env")
+        loaded = load_settings(env=resolved_env, env_path=Path.cwd() / ".env")
         if is_err(loaded):
             logger.log(
                 LogEntry(
@@ -420,7 +427,7 @@ def main(
             write_error(f"Error: {persona.error.message}")
             return 1
         try:
-            engine = _engine(settings, persona.value, logger)
+            engine = _engine(settings, persona.value, logger, base_env=resolved_env)
         except RuntimeError as exc:
             write_error(f"Error: {exc}")
             return 1
@@ -431,3 +438,13 @@ def main(
         return 0
     finally:
         logger.close()
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    env: Mapping[str, str] | None = None,
+    write_output: Callable[[str], None] = write_stdout,
+    write_error: Callable[[str], None] = write_stderr,
+) -> int:
+    return run_server(argv, env=env, write_output=write_output, write_error=write_error)

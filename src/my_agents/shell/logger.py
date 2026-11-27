@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -38,6 +39,16 @@ class _NoopLogger:
 
 
 NOOP_LOGGER: IAppLogger = _NoopLogger()
+
+
+def write_stdout(message: str) -> None:
+    sys.stdout.write(f"{message}\n")
+    sys.stdout.flush()
+
+
+def write_stderr(message: str) -> None:
+    sys.stderr.write(f"{message}\n")
+    sys.stderr.flush()
 
 
 class JsonlLogger:

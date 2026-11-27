@@ -1,4 +1,6 @@
-from collections.abc import AsyncIterator, Sequence
+import json
+import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from http import HTTPStatus
@@ -18,22 +20,14 @@ from my_agents.core.types import (
     EventAction,
     EventDecision,
     EventEnvelope,
+    EventRecord,
     MemoryBlocks,
-    TimelineItem,
-    TimelineKind,
 )
 from my_agents.shell.engine import CharacterEngine
 from my_agents.shell.llm import ChatReply
-from my_agents.shell.logger import NOOP_LOGGER, IAppLogger, JsonlLogger, LogEntry
+from my_agents.shell.logger import IAppLogger, LogEntry
 from my_agents.shell.server import (
     MAX_BODY_BYTES,
-    _engine,
-    _parser,
-    _sse,
-    _status_for,
-    _stream,
-    _try_logger,
-    _write_error,
     create_app,
     main,
     serve,
@@ -148,12 +142,30 @@ class _FakeLlm:
         return self.eval_result
 
 
+class _FaultStore(Store):
+    def __init__(
+        self,
+        db_path: Path,
+        memory_path: Path,
+        *,
+        failures: dict[str, AppError] | None = None,
+    ) -> None:
+        super().__init__(db_path, memory_path)
+        self.failures: dict[str, AppError] = dict(failures or {})
+
+    def get_event(self, event_id: str) -> Result[EventRecord | None, AppError]:
+        failure = self.failures.get("get_event")
+        if failure is not None:
+            return Err(failure)
+        return super().get_event(event_id)
+
+
 def _build_engine(tmp_path: Path):
     settings = load_settings(
         env={"DATA_DIR": str(tmp_path), "EVENT_EVAL_DELAY_MS": "0"}
     )
     assert isinstance(settings, Ok)
-    store = Store(settings.value.db_path, settings.value.core_memory_path)
+    store = _FaultStore(settings.value.db_path, settings.value.core_memory_path)
     llm = _FakeLlm()
     logger = _SpyLogger()
     engine = CharacterEngine(
@@ -167,41 +179,64 @@ def _build_engine(tmp_path: Path):
     return engine, store, llm, logger
 
 
-def test_status_mapping_covers_every_error_kind() -> None:
-    expected = {
-        AppErrorKind.VALIDATION: HTTPStatus.UNPROCESSABLE_ENTITY,
-        AppErrorKind.NOT_FOUND: HTTPStatus.NOT_FOUND,
-        AppErrorKind.CONFLICT: HTTPStatus.CONFLICT,
-        AppErrorKind.DENIED: HTTPStatus.FORBIDDEN,
-        AppErrorKind.STORAGE: HTTPStatus.INTERNAL_SERVER_ERROR,
-        AppErrorKind.LLM: HTTPStatus.BAD_GATEWAY,
-        AppErrorKind.UNEXPECTED: HTTPStatus.INTERNAL_SERVER_ERROR,
-    }
-    for kind, status in expected.items():
-        assert _status_for(kind) == status
+def _assert_error(
+    response,
+    *,
+    status: int,
+    error: str,
+    message_contains: str | None = None,
+) -> None:
+    assert response.status_code == status
+    body = response.json()
+    assert body["error"] == error
+    if message_contains is None:
+        assert "message" not in body
+    else:
+        assert message_contains in body["message"]
 
 
-def test_server_routes_guards_sse_and_reset(tmp_path: Path) -> None:
-    engine, store, llm, _logger = _build_engine(tmp_path)
-    assert isinstance(store.write_memory(MemoryBlocks(user="green tea")), Ok)
+def test_health_index_events_chat_timeline_context_memory_and_reset(
+    tmp_path: Path,
+) -> None:
+    engine, store, _llm, _logger = _build_engine(tmp_path)
+    assert isinstance(
+        store.update_memory(lambda _blocks: Ok(MemoryBlocks(user="green tea"))),
+        Ok,
+    )
 
     with TestClient(create_app(engine)) as client:
         assert client.get("/health").json() == {"status": "ok", "service": "my-agents"}
-        assert "EventSource(" in client.get("/").text
+        index = client.get("/")
+        assert index.status_code == 200
+        assert "EventSource(" in index.text
 
         accepted = client.post(
             "/events",
             json={"name": "email.received", "conversation_id": ""},
         )
-        assert accepted.status_code == 202
+        assert accepted.status_code == HTTPStatus.ACCEPTED
         event_id = accepted.json()["event_id"]
+        assert accepted.json()["duplicate"] is False
+
+        accepted_default = client.post(
+            "/events",
+            json={"name": "email.received", "conversation_id": 123},
+        )
+        assert accepted_default.status_code == HTTPStatus.ACCEPTED
+        assert accepted_default.json()["duplicate"] is False
 
         chat_res = client.post("/chat", json={"message": "hello"})
-        assert chat_res.status_code == 200
+        assert chat_res.status_code == HTTPStatus.OK
         assert chat_res.json()["reply"] == "server reply"
+        assert chat_res.json()["conversation_id"] == "default"
+
+        default_chat = client.post(
+            "/chat", json={"message": "hello", "conversation_id": 123}
+        )
+        assert default_chat.json()["conversation_id"] == "default"
 
         timeline_response = client.get("/timeline")
-        assert timeline_response.status_code == 200
+        assert timeline_response.status_code == HTTPStatus.OK
         timeline_items = timeline_response.json()["items"]
         assert timeline_items
         for item in timeline_items:
@@ -211,113 +246,164 @@ def test_server_routes_guards_sse_and_reset(tmp_path: Path) -> None:
         ctx = client.get("/context").json()
         assert set(ctx) == _CONTEXT_KEYS
         assert set(ctx["counts"]) == _COUNT_KEYS
-        assert ctx["counts"] == {"messages": 2, "events": 1}
+        assert ctx["counts"]["events"] == 2
         mem = client.get("/memory").json()
         assert set(mem) == _MEMORY_KEYS
         assert set(mem["counts"]) == _COUNT_KEYS
         assert mem["user"] == "green tea"
 
         detail = client.get(f"/events/{event_id}")
-        assert detail.status_code == 200
+        assert detail.status_code == HTTPStatus.OK
         detail_body = detail.json()
         assert set(detail_body) == _EVENT_KEYS
         assert len(detail_body) == 13
         assert detail_body["event_id"] == event_id
         assert "idempotency_key" not in detail_body
         assert "payload_json" not in detail_body
-        assert client.get("/events/evt_missing").status_code == 404
-
-        with patch.object(
-            store,
-            "get_event",
-            return_value=Err(AppError(AppErrorKind.STORAGE, "db err")),
-        ):
-            assert client.get(f"/events/{event_id}").status_code == 500
-
-        assert (
-            client.post(
-                "/events", content=b"{", headers={"content-type": "application/json"}
-            ).status_code
-            == 400
+        _assert_error(
+            client.get("/events/evt_missing"),
+            status=HTTPStatus.NOT_FOUND,
+            error="not_found",
         )
-        assert (
-            client.post(
-                "/events",
-                content=b"[]",
-                headers={"content-type": "application/json"},
-            ).status_code
-            == 400
+
+        store.failures["get_event"] = AppError(AppErrorKind.STORAGE, "db err")
+        _assert_error(
+            client.get(f"/events/{event_id}"),
+            status=HTTPStatus.INTERNAL_SERVER_ERROR,
+            error="storage",
+            message_contains="db err",
         )
-        assert (
+        store.failures.clear()
+
+        reset = client.post("/reset")
+        assert reset.status_code == HTTPStatus.OK
+        assert reset.json()["deleted_messages"] == 4
+
+
+def test_http_guards_and_validation_errors_include_json_bodies(tmp_path: Path) -> None:
+    engine, _store, _llm, _logger = _build_engine(tmp_path)
+    with TestClient(create_app(engine)) as client:
+        _assert_error(
+            client.post("/events", content=b"{"),
+            status=HTTPStatus.BAD_REQUEST,
+            error="invalid_json",
+        )
+        _assert_error(
+            client.post("/events", content=b"\xff"),
+            status=HTTPStatus.BAD_REQUEST,
+            error="invalid_json",
+        )
+        _assert_error(
+            client.post("/events", content=b"[]"),
+            status=HTTPStatus.BAD_REQUEST,
+            error="body_must_be_object",
+        )
+        _assert_error(
             client.post(
                 "/events",
                 content=b"{}",
                 headers={"content-length": "not-an-int"},
-            ).status_code
-            == 400
+            ),
+            status=HTTPStatus.BAD_REQUEST,
+            error="invalid_content_length",
         )
-        assert (
-            client.post(
-                "/events",
-                content=b"x" * (MAX_BODY_BYTES + 1),
-            ).status_code
-            == 413
+        _assert_error(
+            client.post("/events", content=b"x" * (MAX_BODY_BYTES + 1)),
+            status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            error="payload_too_large",
         )
 
         def chunked_big():
             yield b"a" * (MAX_BODY_BYTES + 1)
 
-        assert client.post("/events", content=chunked_big()).status_code == 413
-        assert (
-            client.post("/reset", content=b"a" * (MAX_BODY_BYTES + 1)).status_code
-            == 413
+        _assert_error(
+            client.post("/events", content=chunked_big()),
+            status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            error="payload_too_large",
         )
-
-        assert client.post("/events", json={"name": "BAD"}).status_code == 422
-        assert (
+        _assert_error(
+            client.post("/reset", content=b"a" * (MAX_BODY_BYTES + 1)),
+            status=HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+            error="payload_too_large",
+        )
+        _assert_error(
             client.post(
-                "/chat", content=b"{", headers={"content-type": "application/json"}
-            ).status_code
-            == 400
+                "/reset",
+                content=b"",
+                headers={"content-length": "not-an-int"},
+            ),
+            status=HTTPStatus.BAD_REQUEST,
+            error="invalid_content_length",
         )
-        assert client.post("/chat", json={"message": 123}).status_code == 422
-        assert client.get("/timeline?limit=bad").status_code == 400
+        _assert_error(
+            client.post("/events", json={"name": "BAD"}),
+            status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            error="validation",
+            message_contains="Invalid event field",
+        )
+        _assert_error(
+            client.post("/chat", content=b"{"),
+            status=HTTPStatus.BAD_REQUEST,
+            error="invalid_json",
+        )
+        _assert_error(
+            client.post("/chat", json={"message": 123}),
+            status=HTTPStatus.UNPROCESSABLE_ENTITY,
+            error="message_required",
+        )
+        _assert_error(
+            client.get("/timeline?limit=bad"),
+            status=HTTPStatus.BAD_REQUEST,
+            error="invalid_limit",
+        )
 
-        llm.chat_result = Err(AppError(AppErrorKind.LLM, "upstream down"))
-        assert client.post("/chat", json={"message": "hi"}).status_code == 502
 
-        reset = client.post("/reset")
-        assert reset.status_code == 200
-        assert reset.json()["deleted_messages"] == 2
+@pytest.mark.parametrize(
+    ("kind", "status"),
+    [
+        (AppErrorKind.VALIDATION, HTTPStatus.UNPROCESSABLE_ENTITY),
+        (AppErrorKind.NOT_FOUND, HTTPStatus.NOT_FOUND),
+        (AppErrorKind.CONFLICT, HTTPStatus.CONFLICT),
+        (AppErrorKind.DENIED, HTTPStatus.FORBIDDEN),
+        (AppErrorKind.STORAGE, HTTPStatus.INTERNAL_SERVER_ERROR),
+        (AppErrorKind.LLM, HTTPStatus.BAD_GATEWAY),
+        (AppErrorKind.UNEXPECTED, HTTPStatus.INTERNAL_SERVER_ERROR),
+    ],
+)
+def test_every_app_error_kind_maps_to_status_and_body(
+    tmp_path: Path, kind: AppErrorKind, status: int
+) -> None:
+    engine, _store, llm, _logger = _build_engine(tmp_path)
+    llm.chat_result = Err(AppError(kind, f"{kind.value} boom"))
 
-        with client.stream("GET", "/stream?conversation_id=sse_test") as response:
-            assert response.status_code == 200
+    with TestClient(create_app(engine)) as client:
+        response = client.post("/chat", json={"message": "hello"})
 
-
-@pytest.mark.anyio
-async def test_sse_stream_helper_formats_items(tmp_path: Path) -> None:
-    engine, _store, _llm, _logger = _build_engine(tmp_path)
-    item = TimelineItem(
-        TimelineKind.EVENT,
-        "c1",
-        "alert",
-        datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
-        "evt_1",
-        "evt_1",
-        status=None,
-        action=EventAction.NOTE,
-        reason="info",
+    _assert_error(
+        response,
+        status=status,
+        error=kind.value,
+        message_contains=f"{kind.value} boom",
     )
-    assert _sse(item).startswith('data: {"kind": "event"')
 
-    async def fake_sub(conversation_id: str) -> AsyncIterator[TimelineItem]:
-        assert conversation_id == "c1"
-        yield item
 
-    with patch.object(engine, "subscribe", side_effect=fake_sub):
-        chunks = [chunk async for chunk in _stream(engine, "c1")]
-    assert len(chunks) == 1
-    assert '"evt_1"' in chunks[0]
+def test_stream_endpoint_emits_sse_frames(tmp_path: Path) -> None:
+    engine, _store, _llm, _logger = _build_engine(tmp_path)
+    with (
+        TestClient(create_app(engine)) as client,
+        client.stream("GET", "/stream?conversation_id=sse") as response,
+    ):
+        assert response.status_code == HTTPStatus.OK
+        assert response.headers["content-type"].startswith("text/event-stream")
+        time.sleep(0.1)
+        chat = client.post("/chat", json={"conversation_id": "sse", "message": "hello"})
+        assert chat.status_code == HTTPStatus.OK
+        line = next(item for item in response.iter_lines() if item.startswith("data: "))
+
+    payload = json.loads(line.removeprefix("data: "))
+    assert payload["kind"] == "turn"
+    assert payload["conversation_id"] == "sse"
+    assert payload["content"] == "server reply"
 
 
 def test_lifespan_start_failure_logs_and_serve_delegates_to_uvicorn(
@@ -340,59 +426,6 @@ def test_lifespan_start_failure_logs_and_serve_delegates_to_uvicorn(
     ):
         serve(engine, "127.0.0.1", 8123)
     assert calls[0][1:] == ("127.0.0.1", 8123, "warning")
-
-
-def test_write_error_writes_one_stderr_line(capsys) -> None:
-    _write_error("boom")
-
-    assert capsys.readouterr().err == "boom\n"
-
-
-def test_parser_exposes_server_flags_without_a_subcommand() -> None:
-    parser = _parser()
-    arguments = parser.parse_args(["--debug", "--log-file", "app.jsonl"])
-
-    assert parser.prog == "my-agents"
-    assert arguments.debug is True
-    assert arguments.log_file == Path("app.jsonl")
-    assert not hasattr(arguments, "command")
-
-
-def test_try_logger_handles_noop_success_and_failures(tmp_path: Path) -> None:
-    errors: list[str] = []
-
-    assert _try_logger(None, errors.append, explicit=True) is NOOP_LOGGER
-    opened = _try_logger(tmp_path / "log.jsonl", errors.append, explicit=True)
-    assert isinstance(opened, JsonlLogger)
-    opened.close()
-    assert errors == []
-
-    assert _try_logger(tmp_path, errors.append, explicit=True) is None
-    assert errors[0].startswith("Error: cannot open log file:")
-
-    errors.clear()
-    assert _try_logger(tmp_path, errors.append, explicit=False) is NOOP_LOGGER
-    assert errors[0].startswith("Warning: cannot open log file:")
-
-
-def test_engine_builds_a_character_engine_and_reports_llm_errors(
-    tmp_path: Path,
-) -> None:
-    loaded = load_settings(
-        env={"DATA_DIR": str(tmp_path), "LLM_MODEL": "m", "LLM_API_KEY": "k"}
-    )
-    assert isinstance(loaded, Ok)
-    logger = _SpyLogger()
-
-    engine = _engine(loaded.value, DEFAULT_PERSONA, logger)
-    assert engine.logger is logger
-
-    missing_key = load_settings(
-        env={"DATA_DIR": str(tmp_path), "LLM_MODEL": "m", "LLM_API_KEY": ""}
-    )
-    assert isinstance(missing_key, Ok)
-    with pytest.raises(RuntimeError, match="LLM_API_KEY is required."):
-        _engine(missing_key.value, DEFAULT_PERSONA, logger)
 
 
 def test_main_help_rejects_unknown_flags_and_the_serve_subcommand(capsys) -> None:
@@ -503,7 +536,10 @@ def test_main_writes_settings_failure_to_the_explicit_jsonl(
     assert "Error: Invalid setting" in capsys.readouterr().err
 
 
-def test_main_uses_log_path_fallback_and_debug_none(tmp_path: Path, capsys) -> None:
+def test_main_uses_log_path_fallback_and_debug_none(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
     env_log = tmp_path / "env.jsonl"
     with patch("my_agents.shell.server.serve"):
         assert (
@@ -550,21 +586,21 @@ def test_main_uses_log_path_fallback_and_debug_none(tmp_path: Path, capsys) -> N
     assert "Debug: log file = <none>" in capsys.readouterr().err
 
 
-def test_main_starts_the_server_and_closes_the_logger(tmp_path: Path) -> None:
+def test_main_starts_the_server_and_closes_the_logger(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
     outputs: list[str] = []
-    spy = _SpyLogger()
     calls: list[tuple[object, str, int]] = []
+    log_path = tmp_path / "run.jsonl"
 
     def fake_serve(engine: object, host: str, port: int) -> None:
         calls.append((engine, host, port))
 
-    with (
-        patch("my_agents.shell.server._try_logger", return_value=spy),
-        patch("my_agents.shell.server.serve", side_effect=fake_serve),
-    ):
+    with patch("my_agents.shell.server.serve", side_effect=fake_serve):
         assert (
             main(
-                [],
+                ["--log-file", str(log_path)],
                 env={
                     **_ENV,
                     "DATA_DIR": str(tmp_path),
@@ -578,5 +614,24 @@ def test_main_starts_the_server_and_closes_the_logger(tmp_path: Path) -> None:
 
     assert outputs == ["my-agents listening on http://0.0.0.0:9001"]
     assert calls[0][1:] == ("0.0.0.0", 9001)
-    assert spy.closed is True
-    assert spy.entries == []
+    assert log_path.read_text(encoding="utf-8") == ""
+
+
+def test_main_uses_process_environment_when_env_is_omitted(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    process_env = {
+        **_ENV,
+        "DATA_DIR": str(tmp_path),
+        "SERVER_HOST": "127.0.0.1",
+        "SERVER_PORT": "8124",
+    }
+    outputs: list[str] = []
+    with (
+        patch("my_agents.shell.server.environ", process_env),
+        patch("my_agents.shell.server.serve"),
+    ):
+        assert main([], write_output=outputs.append) == 0
+
+    assert outputs == ["my-agents listening on http://127.0.0.1:8124"]

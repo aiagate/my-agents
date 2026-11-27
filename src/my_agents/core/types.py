@@ -1,10 +1,40 @@
-__all__ = ["SecretStr"]
+__all__ = [
+    "AppError",
+    "AppErrorKind",
+    "AssembledContext",
+    "CharacterPersona",
+    "ChatMessage",
+    "ContextSnapshot",
+    "ConversationCounts",
+    "ConversationState",
+    "DEFAULT_PERSONA",
+    "DeliveryMode",
+    "EventAction",
+    "EventDecision",
+    "EventEnvelope",
+    "EventReceipt",
+    "EventRecord",
+    "EventStatus",
+    "MemoryBlock",
+    "MemoryBlocks",
+    "MemorySnapshot",
+    "MessageOrigin",
+    "PolicyOutcome",
+    "ProactivePolicy",
+    "Role",
+    "SecretStr",
+    "TimelineItem",
+    "TimelineKind",
+    "TurnOutcome",
+    "redact_secrets",
+]
 
 import re
-from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Literal, assert_never
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
@@ -149,14 +179,15 @@ class EventEnvelope:
     source: str
     occurred_at: datetime
     idempotency_key: str
-    data: Mapping[str, object]
+    data: MappingProxyType[str, object]
 
 
-def redact_secrets(text: str, secrets: tuple[str, ...]) -> str:
+def redact_secrets(text: str, secrets: Sequence[SecretStr]) -> str:
     redacted = text
     for secret in secrets:
-        if secret:
-            redacted = redacted.replace(secret, "***")
+        value = secret.get_secret_value()
+        if value:
+            redacted = redacted.replace(value, "***")
     return re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1***@", redacted)
 
 

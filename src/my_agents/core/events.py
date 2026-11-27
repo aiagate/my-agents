@@ -5,6 +5,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Annotated, assert_never
 
 from flow_res import Err, Ok, Result
@@ -91,7 +92,7 @@ def validate_envelope(
             source=sanitize_single_line(parsed.source),
             occurred_at=occurred_at.astimezone(UTC),
             idempotency_key=key,
-            data=parsed.data,
+            data=MappingProxyType(parsed.data),
         )
     )
 
@@ -139,7 +140,7 @@ def build_event_prompt(envelope: EventEnvelope, nonce: str) -> str:
         {
             "name": envelope.name,
             "source": envelope.source,
-            "data": envelope.data,
+            "data": dict(envelope.data),
         },
         ensure_ascii=False,
         sort_keys=True,

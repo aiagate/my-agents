@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta, timezone
+from types import MappingProxyType
 
 from flow_res import Ok
 
@@ -151,7 +152,7 @@ def test_build_event_prompt_isolates_colliding_nonce() -> None:
         source="mail",
         occurred_at=_now(),
         idempotency_key="k9",
-        data={"body": "contains secret_nonce inside"},
+        data=MappingProxyType({"body": "contains secret_nonce inside"}),
     )
     plain = build_event_prompt(env, "other_nonce")
     assert '<<UNTRUSTED_EVENT nonce="other_nonce">>' in plain

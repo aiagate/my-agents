@@ -2,10 +2,11 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from unittest.mock import patch
+from types import MappingProxyType
 
 import pytest
-from flow_res import Err, Ok
+from flow_res import Err, Ok, Result
+from pydantic import SecretStr
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -49,6 +50,26 @@ class _SpyLogger(IAppLogger):
         return None
 
 
+class _FaultStore(Store):
+    def __init__(
+        self,
+        db_path: Path,
+        memory_path: Path,
+        *,
+        failures: dict[str, AppError] | None = None,
+    ) -> None:
+        super().__init__(db_path, memory_path)
+        self._failures = failures or {}
+
+    def get_event_in(
+        self, conversation_id: str, event_id: str
+    ) -> Result[EventRecord | None, AppError]:
+        failure = self._failures.get("get_event_in")
+        if failure is not None:
+            return Err(failure)
+        return super().get_event_in(conversation_id, event_id)
+
+
 def _now() -> datetime:
     return datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
 
@@ -61,7 +82,7 @@ def _envelope() -> EventEnvelope:
         source="sensor",
         occurred_at=_now(),
         idempotency_key="k1",
-        data={"celsius": 33},
+        data=MappingProxyType({"celsius": 33}),
     )
 
 
@@ -74,7 +95,7 @@ def test_llm_from_settings_validation_and_secret_redaction(tmp_path: Path) -> No
     )
     assert isinstance(bad_mcp, Ok)
     assert_err(
-        Llm.from_settings(bad_mcp.value, store=store, logger=logger),
+        Llm.from_settings(bad_mcp.value, store=store, logger=logger, base_env={}),
         kind=AppErrorKind.VALIDATION,
         message_contains="MCP_SERVERS_JSON",
     )
@@ -82,7 +103,7 @@ def test_llm_from_settings_validation_and_secret_redaction(tmp_path: Path) -> No
     no_key = load_settings(env={"LLM_MODEL": "m"})
     assert isinstance(no_key, Ok)
     assert_err(
-        Llm.from_settings(no_key.value, store=store, logger=logger),
+        Llm.from_settings(no_key.value, store=store, logger=logger, base_env={}),
         kind=AppErrorKind.VALIDATION,
         message_contains="LLM_API_KEY",
     )
@@ -90,7 +111,7 @@ def test_llm_from_settings_validation_and_secret_redaction(tmp_path: Path) -> No
     no_model = load_settings(env={"LLM_API_KEY": "k"})
     assert isinstance(no_model, Ok)
     assert_err(
-        Llm.from_settings(no_model.value, store=store, logger=logger),
+        Llm.from_settings(no_model.value, store=store, logger=logger, base_env={}),
         kind=AppErrorKind.VALIDATION,
         message_contains="LLM_MODEL",
     )
@@ -115,7 +136,9 @@ def test_llm_from_settings_validation_and_secret_redaction(tmp_path: Path) -> No
         }
     )
     assert isinstance(good, Ok)
-    built = Llm.from_settings(good.value, store=store, logger=logger)
+    built = Llm.from_settings(
+        good.value, store=store, logger=logger, base_env={"PATH": "/usr/bin"}
+    )
     assert isinstance(built, Ok)
     cleaned = built.value.redact(
         "failed sk-api-secret and Bearer mcp-hdr-secret at "
@@ -166,15 +189,16 @@ async def test_chat_toolbox_read_event_and_update_core_memory(tmp_path: Path) ->
     other_box = ChatToolbox(store, "other", recorded)
     assert await other_box.read_event("evt_1") == "Event not found: evt_1"
 
-    with patch.object(
-        store,
-        "get_event_in",
-        return_value=Err(AppError(AppErrorKind.STORAGE, "db offline")),
-    ):
-        assert (
-            await box.read_event("evt_1")
-            == "Could not read the event ledger: db offline"
-        )
+    fault_store = _FaultStore(
+        tmp_path / "state.db",
+        tmp_path / "core.md",
+        failures={"get_event_in": AppError(AppErrorKind.STORAGE, "db offline")},
+    )
+    fault_box = ChatToolbox(fault_store, "default", recorded)
+    assert (
+        await fault_box.read_event("evt_1")
+        == "Could not read the event ledger: db offline"
+    )
 
     assert "Memory update rejected:" in await box.update_core_memory(
         "append", MemoryBlock.USER, "   "
@@ -244,7 +268,7 @@ async def test_llm_start_aclose_chat_and_evaluate_event(tmp_path: Path) -> None:
         store=store,
         logger=logger,
         external_toolsets=(ext_ts,),
-        redactions=("topsecret-key",),
+        redactions=(SecretStr("topsecret-key"),),
     )
 
     clean_ctx = assemble_context(DEFAULT_PERSONA, MemoryBlocks(), (), now=now)
@@ -324,7 +348,7 @@ async def test_llm_error_handling_for_startup_chat_and_evaluator(
         store=store,
         logger=logger,
         external_toolsets=(BrokenToolset(),),
-        redactions=("sk-leak",),
+        redactions=(SecretStr("sk-leak"),),
     )
     start_err = await bad_start_llm.start()
     assert_err(start_err, kind=AppErrorKind.LLM, message_contains="MCP startup failed")
@@ -347,7 +371,7 @@ async def test_llm_error_handling_for_startup_chat_and_evaluator(
         store=store,
         logger=logger,
         external_toolsets=(BrokenToolset(),),
-        redactions=("sk-leak",),
+        redactions=(SecretStr("sk-leak"),),
     )
     clean_ctx = assemble_context(DEFAULT_PERSONA, MemoryBlocks(), (), now=now)
     toolset_fail = await err_llm.chat("default", "hi", (), clean_ctx)
@@ -359,7 +383,7 @@ async def test_llm_error_handling_for_startup_chat_and_evaluator(
         FunctionModel(raise_model),
         store=store,
         logger=logger,
-        redactions=("sk-leak",),
+        redactions=(SecretStr("sk-leak"),),
     )
     chat_fail = await plain_err_llm.chat("default", "hi", (), clean_ctx)
     assert_err(chat_fail, kind=AppErrorKind.LLM, message_contains="Chat failed")

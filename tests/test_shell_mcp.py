@@ -62,6 +62,10 @@ def test_parse_mcp_servers_rejects_malformed_configs() -> None:
         ('{"bad": {"url": "ftp://x"}}', "http:// or https://"),
         ('{"bad": {"headers": {"X-A": "1"}}}', "headers require 'url'"),
         ('{"bad": {}}', "requires 'command' or 'url'"),
+        (
+            '{"bad": {"command": "py", "cwd": "~nonexistent_user_zzz"}}',
+            "field 'cwd': Could not determine home directory",
+        ),
     ]
     for raw, needle in cases:
         assert_err(

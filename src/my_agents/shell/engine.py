@@ -96,9 +96,6 @@ class CharacterEngine:
             else:
                 self._lock_users[conversation_id] = remaining
 
-    def active_lock_count(self) -> int:
-        return len(self._locks)
-
     @property
     def logger(self) -> IAppLogger:
         return self._logger
@@ -251,7 +248,7 @@ class CharacterEngine:
                     EventAction.IGNORE,
                     "",
                     "",
-                    json.dumps(envelope.data, ensure_ascii=False, sort_keys=True),
+                    json.dumps(dict(envelope.data), ensure_ascii=False, sort_keys=True),
                     "",
                     None,
                     None,

@@ -1,7 +1,6 @@
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from os import environ
 from pathlib import Path
 from typing import Self
 
@@ -103,6 +102,8 @@ def parse_mcp_servers(raw: str | None) -> Result[tuple[McpServerSpec, ...], AppE
             servers.append(_ServerInput.model_validate(entry).to_spec(name))
         except ValidationError as exc:
             return Err(_field_error(name, exc))
+        except (OSError, RuntimeError) as exc:
+            return Err(_invalid(f"Invalid MCP server '{name}' field 'cwd': {exc}"))
     return Ok(tuple(servers))
 
 
@@ -120,18 +121,13 @@ SAFE_ENV_KEYS = (
 )
 
 
-def _environment(
-    server: McpServerSpec, base: Mapping[str, str] | None = None
-) -> dict[str, str]:
-    source = environ if base is None else base
-    inherited = {key: source[key] for key in SAFE_ENV_KEYS if key in source}
+def _environment(server: McpServerSpec, base: Mapping[str, str]) -> dict[str, str]:
+    inherited = {key: base[key] for key in SAFE_ENV_KEYS if key in base}
     inherited.update({name: value.get_secret_value() for name, value in server.env})
     return inherited
 
 
-def _toolset(
-    server: McpServerSpec, base: Mapping[str, str] | None = None
-) -> MCPToolset[None]:
+def _toolset(server: McpServerSpec, base: Mapping[str, str]) -> MCPToolset[None]:
     transport = (
         StreamableHttpTransport(
             server.url.get_secret_value(),
@@ -151,6 +147,6 @@ def _toolset(
 def build_toolsets(
     servers: Sequence[McpServerSpec],
     *,
-    base_env: Mapping[str, str] | None = None,
+    base_env: Mapping[str, str],
 ) -> tuple[MCPToolset[None], ...]:
     return tuple(_toolset(server, base_env) for server in servers)

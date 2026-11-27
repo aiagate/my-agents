@@ -3,7 +3,6 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 from flow_res import Err, Ok, Result
@@ -14,13 +13,17 @@ from my_agents.core.types import (
     AppError,
     AppErrorKind,
     ChatMessage,
+    ConversationCounts,
+    ConversationState,
     DeliveryMode,
     EventAction,
     EventDecision,
     EventEnvelope,
+    EventRecord,
     EventStatus,
     MemoryBlocks,
     MessageOrigin,
+    ProactivePolicy,
     TimelineItem,
     TimelineKind,
 )
@@ -28,7 +31,7 @@ from my_agents.shell.engine import CharacterEngine
 from my_agents.shell.llm import ChatReply
 from my_agents.shell.logger import IAppLogger, LogEntry
 from my_agents.shell.settings import Settings, load_settings
-from my_agents.shell.store import Store
+from my_agents.shell.store import EventCommit, MessageEntry, Store
 from tests.helpers import assert_err
 
 
@@ -54,6 +57,7 @@ class _FakeLlm:
         )
         self.chat_gate: asyncio.Event | None = None
         self.chat_started: asyncio.Event | None = None
+        self.chat_calls = 0
         self.eval_error_raises: Exception | None = None
         self.closed = False
 
@@ -71,6 +75,7 @@ class _FakeLlm:
         context: AssembledContext,
     ) -> Result[ChatReply, AppError]:
         del conversation_id, user_text, history, context
+        self.chat_calls += 1
         if self.chat_started is not None:
             self.chat_started.set()
         if self.chat_gate is not None:
@@ -84,6 +89,115 @@ class _FakeLlm:
         if self.eval_error_raises is not None:
             raise self.eval_error_raises
         return self.eval_result
+
+
+class _FaultStore(Store):
+    def __init__(
+        self,
+        db_path: Path,
+        memory_path: Path,
+        *,
+        failures: dict[str, AppError] | None = None,
+    ) -> None:
+        super().__init__(db_path, memory_path)
+        self.failures: dict[str, AppError] = dict(failures or {})
+
+    def ensure_conversation(
+        self, conversation_id: str, now: datetime
+    ) -> Result[ConversationState, AppError]:
+        failure = self.failures.get("ensure_conversation")
+        if failure is not None:
+            return Err(failure)
+        return super().ensure_conversation(conversation_id, now)
+
+    def bump_epoch(
+        self, conversation_id: str, now: datetime
+    ) -> Result[ConversationState, AppError]:
+        failure = self.failures.get("bump_epoch")
+        if failure is not None:
+            return Err(failure)
+        return super().bump_epoch(conversation_id, now)
+
+    def read_memory(self) -> Result[MemoryBlocks, AppError]:
+        failure = self.failures.get("read_memory")
+        if failure is not None:
+            return Err(failure)
+        return super().read_memory()
+
+    def list_events(
+        self, conversation_id: str, *, limit: int = 20
+    ) -> Result[tuple[EventRecord, ...], AppError]:
+        failure = self.failures.get("list_events")
+        if failure is not None:
+            return Err(failure)
+        return super().list_events(conversation_id, limit=limit)
+
+    def recent_messages(
+        self, conversation_id: str, *, limit: int = 30
+    ) -> Result[tuple[ChatMessage, ...], AppError]:
+        failure = self.failures.get("recent_messages")
+        if failure is not None:
+            return Err(failure)
+        return super().recent_messages(conversation_id, limit=limit)
+
+    def append_messages(
+        self,
+        conversation_id: str,
+        entries: Sequence[MessageEntry],
+        now: datetime,
+    ) -> Result[tuple[ChatMessage, ...], AppError]:
+        failure = self.failures.get("append_messages")
+        if failure is not None:
+            return Err(failure)
+        return super().append_messages(conversation_id, entries, now)
+
+    def mark_surfaced(
+        self, event_ids: Sequence[str], now: datetime
+    ) -> Result[None, AppError]:
+        failure = self.failures.get("mark_surfaced")
+        if failure is not None:
+            return Err(failure)
+        return super().mark_surfaced(event_ids, now)
+
+    def insert_event(self, record: EventRecord) -> Result[EventRecord, AppError]:
+        failure = self.failures.get("insert_event")
+        if failure is not None:
+            return Err(failure)
+        return super().insert_event(record)
+
+    def finalize_event(
+        self,
+        conversation_id: str,
+        event_id: str,
+        decision: EventDecision,
+        *,
+        received_epoch: int,
+        now: datetime,
+        policy: ProactivePolicy,
+    ) -> Result[EventCommit, AppError]:
+        failure = self.failures.get("finalize_event")
+        if failure is not None:
+            return Err(failure)
+        return super().finalize_event(
+            conversation_id,
+            event_id,
+            decision,
+            received_epoch=received_epoch,
+            now=now,
+            policy=policy,
+        )
+
+    def get_state(self, conversation_id: str) -> Result[ConversationState, AppError]:
+        failure = self.failures.get("get_state")
+        if failure is not None:
+            return Err(failure)
+        return super().get_state(conversation_id)
+
+    def counts(self, conversation_id: str) -> Result[ConversationCounts, AppError]:
+        failure = self.failures.get("counts")
+        if failure is not None:
+            return Err(failure)
+        return super().counts(conversation_id)
 
 
 def _settings(tmp_path: Path, **overrides: str) -> Settings:
@@ -102,9 +216,9 @@ def _settings(tmp_path: Path, **overrides: str) -> Settings:
 
 def _make_engine(
     tmp_path: Path, **overrides: str
-) -> tuple[CharacterEngine, Store, _FakeLlm, _SpyLogger]:
+) -> tuple[CharacterEngine, _FaultStore, _FakeLlm, _SpyLogger]:
     settings = _settings(tmp_path, **overrides)
-    store = Store(settings.db_path, settings.core_memory_path)
+    store = _FaultStore(settings.db_path, settings.core_memory_path)
     llm = _FakeLlm()
     logger = _SpyLogger()
     clock_now = [datetime(2026, 5, 1, 10, 0, tzinfo=UTC)]
@@ -157,7 +271,6 @@ async def test_engine_chat_events_sse_snapshots_and_reset(tmp_path: Path) -> Non
     r1 = await engine.submit_message("default", "こんにちは")
     assert isinstance(r1, Ok)
     assert r1.value.reply == "reply text"
-    assert engine.active_lock_count() == 0
 
     llm.eval_result = Ok(
         EventDecision(
@@ -211,7 +324,9 @@ async def test_engine_chat_events_sse_snapshots_and_reset(tmp_path: Path) -> Non
     assert detail.value is not None
     assert detail.value.action is EventAction.SPEAK
 
-    assert isinstance(store.write_memory(MemoryBlocks(user="tea")), Ok)
+    assert isinstance(
+        store.update_memory(lambda _blocks: Ok(MemoryBlocks(user="tea"))), Ok
+    )
     mem_snap = engine.get_memory_snapshot("default")
     ctx_snap = await engine.context_snapshot("default")
     assert isinstance(mem_snap, Ok)
@@ -238,11 +353,12 @@ async def test_engine_concurrency_queue_overflow_and_task_cancellation(
     t1 = asyncio.create_task(engine.submit_message("default", "first"))
     await llm.chat_started.wait()
     t2 = asyncio.create_task(engine.submit_message("default", "second"))
-    await asyncio.sleep(0)
-    assert engine.active_lock_count() == 1
+    await asyncio.sleep(0.05)
+    assert llm.chat_calls == 1
+    assert not t2.done()
     llm.chat_gate.set()
     assert all(isinstance(res, Ok) for res in await asyncio.gather(t1, t2))
-    assert engine.active_lock_count() == 0
+    assert llm.chat_calls == 2
 
     stream = engine.subscribe("overflow")
     sub_task = asyncio.create_task(stream.__anext__())
@@ -277,6 +393,7 @@ async def test_engine_worker_failure_and_store_error_propagation(
     tmp_path: Path,
 ) -> None:
     engine, store, llm, logger = _make_engine(tmp_path, EVENT_EVAL_DELAY_MS="0")
+    err = AppError(AppErrorKind.STORAGE, "io fail")
 
     llm.eval_result = Err(AppError(AppErrorKind.LLM, "eval boom"))
     r_eval = await engine.ingest_event(
@@ -294,27 +411,21 @@ async def test_engine_worker_failure_and_store_error_propagation(
     await _wait_settled(store, r_exc.value.event_id)
     llm.eval_error_raises = None
 
-    with patch.object(
-        store,
-        "finalize_event",
-        return_value=Err(AppError(AppErrorKind.STORAGE, "fin err")),
-    ):
-        r_fin = await engine.ingest_event(
-            "default", {"name": "a.d", "idempotency_key": "e3"}
-        )
-        assert isinstance(r_fin, Ok)
-        await _wait_settled(store, r_fin.value.event_id)
+    store.failures["finalize_event"] = AppError(AppErrorKind.STORAGE, "fin err")
+    r_fin = await engine.ingest_event(
+        "default", {"name": "a.d", "idempotency_key": "e3"}
+    )
+    assert isinstance(r_fin, Ok)
+    await _wait_settled(store, r_fin.value.event_id)
+    store.failures.clear()
 
-    with patch.object(
-        store,
-        "read_memory",
-        return_value=Err(AppError(AppErrorKind.STORAGE, "mem err")),
-    ):
-        r_mem = await engine.ingest_event(
-            "default", {"name": "a.e", "idempotency_key": "e4"}
-        )
-        assert isinstance(r_mem, Ok)
-        await _wait_settled(store, r_mem.value.event_id)
+    store.failures["read_memory"] = AppError(AppErrorKind.STORAGE, "mem err")
+    r_mem = await engine.ingest_event(
+        "default", {"name": "a.e", "idempotency_key": "e4"}
+    )
+    assert isinstance(r_mem, Ok)
+    await _wait_settled(store, r_mem.value.event_id)
+    store.failures.clear()
 
     assert len([e for e in logger.entries if e.event == "event_worker_failed"]) == 4
     tl = engine.get_timeline("default", limit=20)
@@ -326,70 +437,83 @@ async def test_engine_worker_failure_and_store_error_propagation(
         kind=AppErrorKind.VALIDATION,
         message_contains="Invalid event field",
     )
-    err = AppError(AppErrorKind.STORAGE, "io fail")
 
-    with patch.object(store, "ensure_conversation", return_value=Err(err)):
-        assert_err(
-            await engine.ingest_event("default", {"name": "ok.name"}),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-    with patch.object(store, "insert_event", return_value=Err(err)):
-        assert_err(
-            await engine.ingest_event("default", {"name": "ok.name"}),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-    with patch.object(store, "bump_epoch", return_value=Err(err)):
-        assert_err(
-            await engine.submit_message("default", "hi"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-    with patch.object(store, "read_memory", return_value=Err(err)):
-        assert_err(
-            await engine.submit_message("default", "hi"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-        assert_err(
-            engine.get_memory_snapshot("default"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-        assert_err(
-            await engine.context_snapshot("default"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-    with patch.object(store, "list_events", return_value=Err(err)):
-        assert_err(
-            await engine.submit_message("default", "hi"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-        assert_err(
-            engine.get_timeline("default"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-    with patch.object(store, "recent_messages", return_value=Err(err)):
-        assert_err(
-            await engine.submit_message("default", "hi"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-        assert_err(
-            engine.get_timeline("default"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-    with patch.object(store, "append_messages", return_value=Err(err)):
-        assert_err(
-            await engine.submit_message("default", "hi"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
+    store.failures["ensure_conversation"] = err
+    assert_err(
+        await engine.ingest_event("default", {"name": "ok.name"}),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
+
+    store.failures["insert_event"] = err
+    assert_err(
+        await engine.ingest_event("default", {"name": "ok.name"}),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
+
+    store.failures["bump_epoch"] = err
+    assert_err(
+        await engine.submit_message("default", "hi"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
+
+    store.failures["read_memory"] = err
+    assert_err(
+        await engine.submit_message("default", "hi"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    assert_err(
+        engine.get_memory_snapshot("default"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    assert_err(
+        await engine.context_snapshot("default"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
+
+    store.failures["list_events"] = err
+    assert_err(
+        await engine.submit_message("default", "hi"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    assert_err(
+        engine.get_timeline("default"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
+
+    store.failures["recent_messages"] = err
+    assert_err(
+        await engine.submit_message("default", "hi"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    assert_err(
+        engine.get_timeline("default"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
+
+    store.failures["append_messages"] = err
+    assert_err(
+        await engine.submit_message("default", "hi"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
+
     llm.chat_result = Err(AppError(AppErrorKind.LLM, "chat err"))
     assert_err(
         await engine.submit_message("default", "hi"),
@@ -407,27 +531,33 @@ async def test_engine_worker_failure_and_store_error_propagation(
     )
     assert isinstance(r_note, Ok)
     await _wait_settled(store, r_note.value.event_id)
-    with patch.object(store, "mark_surfaced", return_value=Err(err)):
-        assert_err(
-            await engine.submit_message("default", "hi"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="ambient events",
-        )
-    with patch.object(store, "get_state", return_value=Err(err)):
-        assert_err(
-            await engine.context_snapshot("default"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-    with patch.object(store, "counts", return_value=Err(err)):
-        assert_err(
-            await engine.context_snapshot("default"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
-        assert_err(
-            engine.get_memory_snapshot("default"),
-            kind=AppErrorKind.STORAGE,
-            message_contains="io fail",
-        )
+
+    store.failures["mark_surfaced"] = err
+    assert_err(
+        await engine.submit_message("default", "hi"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="ambient events",
+    )
+    store.failures.clear()
+
+    store.failures["get_state"] = err
+    assert_err(
+        await engine.context_snapshot("default"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
+
+    store.failures["counts"] = err
+    assert_err(
+        await engine.context_snapshot("default"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    assert_err(
+        engine.get_memory_snapshot("default"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
     await engine.aclose()

@@ -7,7 +7,6 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-import pytest
 from flow_res import Err, Ok
 
 from my_agents.core.types import (
@@ -292,7 +291,11 @@ def test_store_memory_lock_atomic_writes_and_error_handling(tmp_path: Path) -> N
     store = Store(tmp_path / "state.db", mem_path)
 
     assert isinstance(
-        store.write_memory(MemoryBlocks(user="tea", relationship="warm", arc="active")),
+        store.update_memory(
+            lambda _blocks: Ok(
+                MemoryBlocks(user="tea", relationship="warm", arc="active")
+            )
+        ),
         Ok,
     )
     mem_path.write_text(
@@ -329,7 +332,7 @@ def test_store_memory_lock_atomic_writes_and_error_handling(tmp_path: Path) -> N
         side_effect=OSError(errno.EACCES, "no tmp"),
     ):
         assert_err(
-            store.write_memory(MemoryBlocks(user="x")),
+            store.update_memory(lambda _blocks: Ok(MemoryBlocks(user="x"))),
             kind=AppErrorKind.STORAGE,
             message_contains="no tmp",
         )
@@ -346,12 +349,7 @@ def test_store_memory_lock_atomic_writes_and_error_handling(tmp_path: Path) -> N
 
     with patch("os.fsync", side_effect=OSError(errno.EIO, "disk full")):
         assert_err(
-            store.write_memory(MemoryBlocks(user="x")),
-            kind=AppErrorKind.STORAGE,
-            message_contains="disk full",
-        )
-        assert_err(
-            store.update_memory(lambda b: Ok(b)),
+            store.update_memory(lambda _blocks: Ok(MemoryBlocks(user="x"))),
             kind=AppErrorKind.STORAGE,
             message_contains="disk full",
         )
@@ -359,10 +357,35 @@ def test_store_memory_lock_atomic_writes_and_error_handling(tmp_path: Path) -> N
 
     with patch("fcntl.flock", side_effect=OSError(errno.ENOLCK, "no locks")):
         assert_err(
-            store.write_memory(MemoryBlocks(user="x")),
+            store.update_memory(lambda _blocks: Ok(MemoryBlocks(user="x"))),
             kind=AppErrorKind.STORAGE,
             message_contains="no locks",
         )
+
+
+def test_store_memory_reports_unicode_failures_and_cleans_temporary_files(
+    tmp_path: Path,
+) -> None:
+    bad_memory = tmp_path / "bad.md"
+    bad_memory.write_bytes(b"\xca")
+    bad_store = Store(tmp_path / "bad.db", bad_memory)
+    assert_err(
+        bad_store.read_memory(),
+        kind=AppErrorKind.STORAGE,
+        message_contains="can't decode",
+    )
+
+    store = Store(tmp_path / "state.db", tmp_path / "core.md")
+    assert isinstance(
+        store.update_memory(lambda _blocks: Ok(MemoryBlocks(user="ok"))),
+        Ok,
+    )
+    assert_err(
+        store.update_memory(lambda _blocks: Ok(MemoryBlocks(user="\ud800"))),
+        kind=AppErrorKind.STORAGE,
+        message_contains="surrogates not allowed",
+    )
+    assert not any(path.name.startswith("tmp") for path in tmp_path.iterdir())
 
 
 def test_store_rejects_incompatible_schema_and_corrupt_rows(tmp_path: Path) -> None:
@@ -411,17 +434,13 @@ def test_store_rejects_incompatible_schema_and_corrupt_rows(tmp_path: Path) -> N
         message_contains="Expected ISO timestamp",
     )
 
-    with patch(
-        "my_agents.shell.store._storage",
-        wraps=lambda msg: AppError(AppErrorKind.STORAGE, msg),
-    ):
-        readonly_missing = Store(tmp_path / "unwritable" / "x.db", tmp_path / "c.md")
-        with patch("sqlite3.connect", side_effect=sqlite3.OperationalError("locked")):
-            assert_err(
-                readonly_missing.ensure_conversation("default", _t()),
-                kind=AppErrorKind.STORAGE,
-                message_contains="locked",
-            )
+    readonly_missing = Store(tmp_path / "unwritable" / "x.db", tmp_path / "c.md")
+    with patch("sqlite3.connect", side_effect=sqlite3.OperationalError("locked")):
+        assert_err(
+            readonly_missing.ensure_conversation("default", _t()),
+            kind=AppErrorKind.STORAGE,
+            message_contains="locked",
+        )
 
 
 def test_late_incompatible_schema_returns_storage_error(tmp_path: Path) -> None:
@@ -451,17 +470,14 @@ def test_late_incompatible_schema_returns_storage_error(tmp_path: Path) -> None:
     assert tables == ["legacy"]
 
 
-def test_mid_ddl_failure_rolls_back_atomically_and_recovers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_mid_ddl_failure_rolls_back_atomically_and_recovers(tmp_path: Path) -> None:
     db_path = tmp_path / "state.db"
-    store = Store(db_path, tmp_path / "core.md")
-    with monkeypatch.context() as injected:
-        injected.setattr(
-            "my_agents.shell.store._SCHEMA_STATEMENTS",
-            ("CREATE TABLE probe (id INTEGER)", "NOT_A_STATEMENT"),
-        )
-        failure = store.ensure_conversation("default", _t())
+    store = Store(
+        db_path,
+        tmp_path / "core.md",
+        schema_statements=("CREATE TABLE probe (id INTEGER)", "NOT_A_STATEMENT"),
+    )
+    failure = store.ensure_conversation("default", _t())
     assert_err(failure, kind=AppErrorKind.STORAGE, message_contains="syntax error")
 
     with closing(sqlite3.connect(db_path)) as conn:
@@ -473,7 +489,9 @@ def test_mid_ddl_failure_rolls_back_atomically_and_recovers(
     assert tables == []
     assert version == 0
 
-    recovered = store.ensure_conversation("default", _t(1))
+    recovered = Store(db_path, tmp_path / "core.md").ensure_conversation(
+        "default", _t(1)
+    )
     assert isinstance(recovered, Ok)
     assert recovered.value.conversation_id == "default"
     with closing(sqlite3.connect(db_path)) as conn:
@@ -516,21 +534,20 @@ def test_v2_database_missing_table_returns_storage_error_without_recreating(
     assert tables == {"conversations", "messages"}
 
 
-def test_initialized_v2_database_skips_ddl_on_normal_writes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_initialized_v2_database_skips_ddl_on_normal_writes(tmp_path: Path) -> None:
     db_path = tmp_path / "state.db"
     store = Store(db_path, tmp_path / "core.md")
     assert isinstance(store.ensure_conversation("default", _t()), Ok)
-    with monkeypatch.context() as injected:
-        injected.setattr(
-            "my_agents.shell.store._SCHEMA_STATEMENTS", ("NOT_A_STATEMENT",)
-        )
-        appended = store.append_messages(
-            "default",
-            (("user", MessageOrigin.USER, "hello", None),),
-            _t(1),
-        )
+    reopened = Store(
+        db_path,
+        tmp_path / "core.md",
+        schema_statements=("NOT_A_STATEMENT",),
+    )
+    appended = reopened.append_messages(
+        "default",
+        (("user", MessageOrigin.USER, "hello", None),),
+        _t(1),
+    )
     assert isinstance(appended, Ok)
     assert [message.content for message in appended.value] == ["hello"]
     persisted = store.recent_messages("default", limit=1)

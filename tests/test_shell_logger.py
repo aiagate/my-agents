@@ -6,6 +6,8 @@ from my_agents.shell.logger import (
     JsonlLogger,
     LogEntry,
     LogLevel,
+    write_stderr,
+    write_stdout,
 )
 
 
@@ -38,3 +40,12 @@ def test_jsonl_logger_stops_after_a_write_failure(tmp_path: Path) -> None:
     logger.log(LogEntry(LogLevel.INFO, "first"))
     logger.log(LogEntry(LogLevel.INFO, "second"))
     assert (tmp_path / "agent.jsonl").read_text(encoding="utf-8") == ""
+
+
+def test_write_stdout_and_stderr_flush_lines(capsys) -> None:
+    write_stdout("hello")
+    write_stderr("problem")
+
+    captured = capsys.readouterr()
+    assert captured.out == "hello\n"
+    assert captured.err == "problem\n"

@@ -173,13 +173,13 @@ def test_memory_lock_and_atomic_write_cleanup_on_errors(tmp_path: Path) -> None:
     store = Store(tmp_path / "state.db", tmp_path / "core.md")
     with patch("fcntl.flock", side_effect=OSError(errno.ENOLCK, "lock error")):
         assert_err(
-            store.write_memory(MemoryBlocks(user="x")),
+            store.update_memory(lambda _blocks: Ok(MemoryBlocks(user="x"))),
             kind=AppErrorKind.STORAGE,
             message_contains="lock error",
         )
     with patch("os.fsync", side_effect=OSError(errno.EIO, "write error")):
         assert_err(
-            store.write_memory(MemoryBlocks(user="x")),
+            store.update_memory(lambda _blocks: Ok(MemoryBlocks(user="x"))),
             kind=AppErrorKind.STORAGE,
             message_contains="write error",
         )

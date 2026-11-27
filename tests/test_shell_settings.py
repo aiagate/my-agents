@@ -85,6 +85,22 @@ def test_settings_validators_overrides_and_errors(tmp_path: Path) -> None:
     )
 
 
+def test_load_settings_rejects_unreadable_env_and_home_paths(tmp_path: Path) -> None:
+    bad_env = tmp_path / ".env"
+    bad_env.write_bytes(b"\xff")
+    assert_err(
+        load_settings(env={}, env_path=bad_env),
+        kind=AppErrorKind.VALIDATION,
+        message_contains="Cannot read .env file",
+    )
+
+    assert_err(
+        load_settings(env={"LOG_PATH": "~nonexistent_user_zzz/log.jsonl"}),
+        kind=AppErrorKind.VALIDATION,
+        message_contains="Could not determine home directory",
+    )
+
+
 def test_load_persona_handles_default_valid_and_invalid_files(tmp_path: Path) -> None:
     default = load_persona(None)
     assert isinstance(default, Ok)
@@ -112,4 +128,12 @@ def test_load_persona_handles_default_valid_and_invalid_files(tmp_path: Path) ->
         load_persona(array_path),
         kind=AppErrorKind.VALIDATION,
         message_contains="JSON object",
+    )
+
+    bad_utf8_path = tmp_path / "bad-utf8.json"
+    bad_utf8_path.write_bytes(b"\xca")
+    assert_err(
+        load_persona(bad_utf8_path),
+        kind=AppErrorKind.VALIDATION,
+        message_contains="Cannot read persona",
     )
