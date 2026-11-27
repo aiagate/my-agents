@@ -29,9 +29,9 @@ pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`�
 | インライン抑止（noqa / type: ignore）を使わない | PL008 + Ruff PGH003/PGH004/RUF100 |
 | cast による型のすり替えをしない（src 限定から全リポジトリへ拡大、PL009 は廃止） | pyproject.toml（Ruff TID251） |
 | テストは実挙動を検証し内部実装を写さない | PL010 |
-| dataclass は init 外フィールド・プライベートフィールドにしない | PL011 |
+| dataclass の生成 __init__ 引数にプライベートフィールドを露出させない | PL011 |
 | エントリポイントと __init__ は thin に保つ | PL014 |
-| os.environ をグローバルに読み書きしない（注入で渡す） | PL015 |
+| os.environ をグローバルに読み書きしない（注入で渡し、読み取り許可は起動入口 shell/server.py のみ） | PL015 |
 | frozen dataclass に実行時可変コレクションを置かない（Sequence/Mapping は可） | PL016 |
 | テストは他レイヤーの内部を monkeypatch しない | PL018 |
 | Result のエラー型は例外でなく AppError（kind + message） | PL019 + flow-res 型 |
@@ -39,7 +39,11 @@ pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`�
 | LLM 向けツール定義に Field description を付ける | PL022 |
 | 公開 API の型注釈に非公開型を露出しない | PL023 |
 | Python 3.14+ 前提・__future__ annotations と typing.Any を使わない | pyproject（requires-python / Ruff TID251）+ ty python-version |
+| コミット前に Ruff / ty / project_lint を通過させる | .githooks/pre-commit + CI |
 | コミットメッセージは Conventional Commits 形式（英語） | .githooks/commit-msg（type・形式・ASCII。字数・命令形は判断） |
+
+`PL009`, `PL012`, `PL013`, `PL017`, `PL021` は廃止・欠番である。有効なルール番号は
+上の表と tools/project_lint/rules/ の登録内容を参照する。
 
 # 判断のみの規約
 
@@ -47,7 +51,7 @@ pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`�
 - `#` コメントは外部制約や罠など、コードと型から読み取れない Why に限る
   （Ruff ERA001 はコメントアウトコードのみ検出。What コメントの排除は判断）。
 - ジェネリクスの型引数は定義の TypeVar と変性（入出力の向き）を確認して決める。
-- メインセッションはの子エージェントのオーケストレーションに専念し、実装・調査・テスト実行は サブエージェントdsh+Deepseek v4.1 Flashで回す。
+- メインセッションは子エージェントのオーケストレーションに専念し、実装・調査・テスト実行はサブエージェント（dsh + DeepSeek V4.1 Flash）で回す。
 - 子エージェント／別スレッドのキックオフ 1 行目は「Read the worker.md at the repository root before anything else.」で始める（AGENTS.md の子への自動注入は前提としない、上流 Issue #28704）。修正ラウンド・再試行・次タスクでは既存の子を延命せず、目的・直前の報告・ブランチを渡してフレッシュ起動する（Fresh subagents by default。延命は未コミット変更や実行中プロセスなど移動コストが高い状態のときだけ）。子への固有の指示はキックオフ本文に書き、この契約を子ごとに書き直さない。子の報告は「変更内容・検証方法（正確なコマンドと出力）・未カバー範囲」で受け取る。
 - ヘッドレスサーバの動作確認は `.agents/skills/verify-my-agents/SKILL.md` の手順に従う。
 - リポジトリやスレッド履歴の横断調査・棚卸し・改善探索は `.agents/skills/chunked-investigation/SKILL.md` の手順に従う。
@@ -56,5 +60,5 @@ pyproject.toml（Ruff / ty）と .githooks/ にある。レイヤーは `core/`�
 
 | ライブラリ | 役割 |
 | --- | --- |
-| `pydantic-ai` | LLM エージェント実行 |
+| `pydantic-ai-slim` | LLM エージェント実行 |
 | `flow-res` | `Result` 型によるエラーハンドリング |

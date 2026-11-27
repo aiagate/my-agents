@@ -1,7 +1,18 @@
 #!/usr/bin/env sh
 set -eu
 
-uv run --locked ruff check .
-uv run --locked ruff format --check .
-uv run --locked ty check
-uv run --locked python -m tools.project_lint
+if uv run --locked python --version >/dev/null 2>&1; then
+    run() { uv run --locked "$@"; }
+elif [ -x "$PWD/.venv/bin/ruff" ]; then
+    PATH="$PWD/.venv/bin:$PATH"
+    export PATH
+    run() { "$@"; }
+else
+    echo "Error: neither uv run --locked nor .venv/bin is usable" >&2
+    exit 1
+fi
+
+run ruff check .
+run ruff format --check .
+run ty check
+run python -m tools.project_lint

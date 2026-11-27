@@ -53,7 +53,7 @@ SIGINT 0）を `artifacts/verify/<run-id>/server-help.txt`、`server-bogus.txt`�
 - `serve` はもう存在しない。argparse が位置引数として拒否し exit 2 になる。
 - `SIGINT` は graceful shutdown で exit 0。`SIGTERM` も graceful shutdown するが
   信号を再 raise するため shell では 143、`Popen.returncode` は `-15`。`SIGTERM`
-  では `server.py` の `finally: logger.close()` と stdout の flush が走らない
+  では `src/my_agents/shell/server.py` の `finally: logger.close()` と stdout の flush が走らない
   （JSONL は毎行 flush されるので通常は残る）。
 - `--log-file` / `LOG_PATH` を指定しなければログファイルは作られない。検証で
   「ログが出ない」を失敗と誤認しないよう、必ずどちらかを明示する。

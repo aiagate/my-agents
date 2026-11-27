@@ -18,11 +18,14 @@ src/my_agents/
     mcp.py           # MCP_SERVERS_JSON の検証と MCPToolset 構築（環境変数ホワイトリスト）
     llm.py           # OpenAI 互換 Agent / EventDecision 1-shot 判定 / ChatToolbox
     engine.py        # submit_message, ingest_event, SSE 全結果配信, snapshots
+    logger.py        # IAppLogger / LogEntry と JSONL ファイル出力
+    settings.py      # 環境変数・.env の読み込みと Settings への注入
     server.py        # Starlette ASGI + SSE + 管理 UI + /context + 起動エントリポイント
     ui.html          # LINE / Dots / Muse 風ダーク Web UI（DOM 安全構築）
 tools/
   mcp_divergence_server.py  # 外部 FastMCP 連想サーバ
   e2e_event_chat.py         # ローカル mock OpenAI + 実 FastMCP 13 シナリオ E2E
+  project_lint/             # リポジトリ規約の静的検査（PL ルール）
 ```
 
 ## 起動
@@ -127,7 +130,7 @@ toolsets = build_toolsets(specs)
 
 ## Web UI
 
-`GET /` は `importlib.resources` で `my_agents/shell/ui.html` を配信する。
+`GET /` は `importlib.resources` で `src/my_agents/shell/ui.html` を配信する。
 LINE / ChatGPT Dots / Meta Muse 風ダークテーマの単一画面で、次を持つ。
 
 - `EventSource('/stream?conversation_id=…')` による `turn` / `event` / `event_failed`
@@ -160,7 +163,11 @@ LINE / ChatGPT Dots / Meta Muse 風ダークテーマの単一画面で、次を
 
 ## 検証
 
+コミット時に `.githooks/commit-msg` と `.githooks/pre-commit` を走らせるため、
+初回はフックパスを設定する。
+
 ```sh
+git config core.hooksPath .githooks
 uv run --locked ruff check .
 uv run --locked ruff format --check .
 uv run --locked ty check

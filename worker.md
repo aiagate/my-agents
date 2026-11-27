@@ -6,7 +6,8 @@
 すべてのタスクで有効である。
 
 - 何かを書く前にリポジトリルートの AGENTS.md を読むこと。規約と強制手段
-  （PL001〜PL023 / Ruff / ty / pre-commit）の対応表がある。
+  （tools/project_lint / Ruff / ty / pre-commit）の対応表があり、廃止番号を除く
+  登録ルール一覧もそこに載っている。
 - コミット前に実行: uv run --locked ruff check . && uv run --locked ruff format --check . &&
   uv run --locked ty check && uv run --locked python -m tools.project_lint
   （サンドボックス等で uv run が ~/.cache/uv へのはじかれで失敗するときは、

@@ -84,7 +84,7 @@ echo "exit=$?"
 `$transcript` に `my-agents listening on http://127.0.0.1:$SERVER_PORT` が出ている
 ことまで確認し、起動した PID がそのポートの持ち主だと確かめる。
 
-`SIGTERM` では graceful shutdown 後に信号が再 raise されるため、`server.py` の
+`SIGTERM` では graceful shutdown 後に信号が再 raise されるため、`src/my_agents/shell/server.py` の
 `finally: logger.close()` は走らず、バッファされた stdout も flush されない
 （`PYTHONUNBUFFERED=1` か `python -u` がなければ起動行が消えうる）。JSONL は 1 行
 ごとに flush されるため通常は残る。`set -e` の shell では `wait` の非ゼロ終了で

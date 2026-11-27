@@ -72,7 +72,7 @@ Read the worker.md at the repository root before anything else.
 
 調査観点:
 1. <目的・問い>
-2. AGENTS.md・tools/project_lint（PL001〜PL023）・分岐 100% カバレッジ等の不変条件との照合
+2. AGENTS.md・tools/project_lint（登録ルールは AGENTS.md の対応表を参照）・分岐 100% カバレッジ等の不変条件との照合
 3. 他モジュールや公開 API・JSON 契約への横断影響（必要時）
 4. 外部ライブラリ・設計比較を伴う場合はロック版（uv.lock）と一次資料（公式ドキュメント・上流ソース）を突き合わせ、必要なら /tmp に複製した非破壊プローブで実測
 

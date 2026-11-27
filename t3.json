@@ -3,7 +3,7 @@
   "scripts": [
     {
       "name": "Setup Worktree",
-      "command": "ROOT=\"${T3CODE_PROJECT_ROOT:-${T3_PROJECT_ROOT:-$(dirname \"$(git rev-parse --path-format=absolute --git-common-dir)\")}}\" && ROOT=\"$(cd \"$ROOT\" && pwd -P)\" && if [ \"$ROOT\" != \"$(pwd -P)\" ]; then if [ -f \"$ROOT/.env\" ]; then cp -p \"$ROOT/.env\" .env; fi && if [ -f \"$ROOT/data/core.md\" ]; then mkdir -p data && cp -p \"$ROOT/data/core.md\" data/core.md; fi; fi",
+      "command": "ROOT=\"${T3CODE_PROJECT_ROOT:-${T3_PROJECT_ROOT:-$(dirname \"$(git rev-parse --path-format=absolute --git-common-dir)\")}}\" && ROOT=\"$(cd \"$ROOT\" && pwd -P)\" && if [ \"$ROOT\" != \"$(pwd -P)\" ]; then if [ -f \"$ROOT/.env\" ]; then cp -p \"$ROOT/.env\" .env; fi && if [ -f \"$ROOT/data/core.md\" ]; then mkdir -p data && cp -p \"$ROOT/data/core.md\" data/core.md; fi; fi && git config core.hooksPath .githooks",
       "icon": "configure",
       "runOnWorktreeCreate": true,
       "async": false
