@@ -5,6 +5,7 @@ description = "Headless character AI engine with event-driven handoff and MCP to
 readme = "../README.md"
 requires-python = ">=3.14"
 dependencies = [
+    "cryptography>=50.0.2",
     "fastmcp-slim[client]>=4.2.6",
     "flow-res>=0.2.0",
     "httpx2>=2.16.2",

@@ -28,9 +28,13 @@ function summary(
 ): ConversationSummary {
   return {
     conversation_id: conversationId,
+    epoch: 1,
+    created_at: "2025-01-01T00:00:00+00:00",
+    updated_at: "2025-01-02T00:00:00+00:00",
     message_count: 2,
     event_count: 1,
     last_message_preview: preview,
+    last_message_origin: "reply",
     ...overrides,
   };
 }

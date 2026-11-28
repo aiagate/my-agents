@@ -820,6 +820,7 @@ name = "my-agents"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "cryptography" },
     { name = "fastmcp-slim", extra = ["client"] },
     { name = "flow-res" },
     { name = "httpx2" },
@@ -842,6 +843,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", specifier = ">=50.0.2" },
     { name = "fastmcp-slim", extras = ["client"], specifier = ">=4.2.6" },
     { name = "flow-res", specifier = ">=0.2.0" },
     { name = "httpx2", specifier = ">=2.16.2" },

@@ -11,9 +11,13 @@ export interface TimelineItem {
 }
 export interface ConversationSummary {
   conversation_id: string;
+  epoch: number;
+  created_at: string;
+  updated_at: string;
   message_count: number;
   event_count: number;
   last_message_preview: string;
+  last_message_origin: MessageOrigin | null;
 }
 export interface VapidPublicKeyResponse {
   public_key: string | null;
