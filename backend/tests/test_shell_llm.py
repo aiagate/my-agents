@@ -1,11 +1,21 @@
+import asyncio
 import json
+import threading
+import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import httpx2
 import pytest
 from flow_res import Err, Ok, Result
 from pydantic import SecretStr
+from pydantic_ai.exceptions import (
+    ModelConnectionError,
+    ModelHTTPError,
+    ModelRateLimitError,
+)
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -263,8 +273,9 @@ async def test_llm_start_aclose_chat_and_evaluate_event(tmp_path: Path) -> None:
         )
 
     ext_ts = FunctionToolset(tools=[])
+    model = FunctionModel(respond)
     llm = Llm(
-        FunctionModel(respond),
+        model,
         store=store,
         logger=logger,
         external_toolsets=(ext_ts,),
@@ -341,6 +352,16 @@ async def test_llm_start_aclose_chat_and_evaluate_event(tmp_path: Path) -> None:
         "event_evaluated",
     ]
     assert logger.entries[0].detail == "cache_read_tokens=7"
+    assert logger.entries[0].conversation_id == "default"
+    assert logger.entries[0].model == model.model_name
+    assert logger.entries[0].duration_ms is not None
+    assert logger.entries[0].duration_ms >= 0
+    assert logger.entries[0].cache_read_tokens == 7
+    assert isinstance(logger.entries[0].input_tokens, int)
+    assert isinstance(logger.entries[0].output_tokens, int)
+    assert logger.entries[-1].conversation_id == "default"
+    assert logger.entries[-1].model == model.model_name
+    assert logger.entries[-1].cache_read_tokens == 12
 
     await llm.aclose()
     await llm.aclose()
@@ -484,3 +505,224 @@ def test_static_secrets_skips_unparsable_mcp_config() -> None:
     settings = load_settings(env={"LLM_API_KEY": "api-secret", "MCP_SERVERS_JSON": "{"})
     assert isinstance(settings, Ok)
     assert static_secrets(settings.value) == (SecretStr("api-secret"),)
+
+
+@pytest.mark.anyio
+async def test_llm_retries_transient_errors_with_exponential_backoff(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db", tmp_path / "core.md")
+    logger = _SpyLogger()
+    now = _now()
+    clean_ctx = assemble_context(DEFAULT_PERSONA, MemoryBlocks(), (), now=now)
+    delays: list[float] = []
+    attempts = 0
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    def flaky(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ModelRateLimitError("mock-model", "rate limited sk-leak")
+        if attempts == 2:
+            raise ModelHTTPError(503, "mock-model", "unavailable sk-leak")
+        return ModelResponse(
+            parts=[TextPart("recovered")],
+            usage=RequestUsage(input_tokens=11, output_tokens=5, cache_read_tokens=3),
+        )
+
+    model = FunctionModel(flaky)
+    llm = Llm(
+        model,
+        store=store,
+        logger=logger,
+        redactions=(SecretStr("sk-leak"),),
+        max_retries=2,
+        retry_base_delay=0.25,
+        sleep=fake_sleep,
+    )
+    reply = await llm.chat("conv-retry", "hello", (), clean_ctx)
+    assert isinstance(reply, Ok)
+    assert reply.value.text == "recovered"
+    assert delays == [0.25, 0.5]
+    assert [entry.event for entry in logger.entries] == [
+        "llm_retry",
+        "llm_retry",
+        "chat_completed",
+    ]
+    for retry_entry in logger.entries[:2]:
+        assert retry_entry.conversation_id == "conv-retry"
+        assert retry_entry.model == model.model_name
+        assert retry_entry.duration_ms is not None
+        assert retry_entry.duration_ms >= 0
+        assert "sk-leak" not in retry_entry.message
+    assert logger.entries[0].detail == "attempt=1/3"
+    assert logger.entries[1].detail == "attempt=2/3"
+    assert logger.entries[2].input_tokens == 11
+    assert logger.entries[2].output_tokens == 5
+    assert logger.entries[2].cache_read_tokens == 3
+    await llm.aclose()
+
+
+@pytest.mark.anyio
+async def test_llm_timeout_non_retryable_and_transient_exhaustion(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db", tmp_path / "core.md")
+    now = _now()
+    clean_ctx = assemble_context(DEFAULT_PERSONA, MemoryBlocks(), (), now=now)
+
+    async def slow(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        await asyncio.sleep(1.0)
+        return ModelResponse(parts=[TextPart("late")])
+
+    timeout_delays: list[float] = []
+
+    async def record_timeout_sleep(seconds: float) -> None:
+        timeout_delays.append(seconds)
+
+    timeout_logger = _SpyLogger()
+    timeout_llm = Llm(
+        FunctionModel(slow),
+        store=store,
+        logger=timeout_logger,
+        timeout_seconds=0.02,
+        max_retries=1,
+        retry_base_delay=0.1,
+        sleep=record_timeout_sleep,
+    )
+    timed_out = await timeout_llm.chat("conv-timeout", "hi", (), clean_ctx)
+    assert_err(timed_out, kind=AppErrorKind.LLM, message_contains="timed out")
+    assert timeout_delays == [0.1]
+    assert [entry.event for entry in timeout_logger.entries] == [
+        "llm_retry",
+        "llm_failed",
+    ]
+    assert timeout_logger.entries[0].error_type == "TimeoutError"
+    assert timeout_logger.entries[1].detail == "attempts=2"
+    assert timeout_logger.entries[1].conversation_id == "conv-timeout"
+
+    def bad_request(_messages: list[ModelMessage], _info: AgentInfo) -> ModelResponse:
+        raise ModelHTTPError(400, "mock-model", "bad request sk-leak")
+
+    no_retry_delays: list[float] = []
+
+    async def record_no_retry_sleep(seconds: float) -> None:
+        no_retry_delays.append(seconds)
+
+    bad_logger = _SpyLogger()
+    bad_llm = Llm(
+        FunctionModel(bad_request),
+        store=store,
+        logger=bad_logger,
+        redactions=(SecretStr("sk-leak"),),
+        max_retries=2,
+        sleep=record_no_retry_sleep,
+    )
+    rejected = await bad_llm.chat("default", "hi", (), clean_ctx)
+    assert_err(rejected, kind=AppErrorKind.LLM, message_contains="Chat failed")
+    assert isinstance(rejected, Err)
+    assert "sk-leak" not in rejected.error.message
+    assert no_retry_delays == []
+    assert [entry.event for entry in bad_logger.entries] == ["llm_failed"]
+    assert bad_logger.entries[0].detail == "attempts=1"
+
+    for transient in (
+        ConnectionError("reset sk-leak"),
+        httpx2.ConnectError("connect sk-leak"),
+        ModelConnectionError("mock-model", "dropped sk-leak"),
+        ModelHTTPError(408, "mock-model", "request timeout sk-leak"),
+        ModelHTTPError(429, "mock-model", "too many requests sk-leak"),
+    ):
+        seen_delays: list[float] = []
+
+        async def collect_sleep(
+            seconds: float, target: list[float] = seen_delays
+        ) -> None:
+            target.append(seconds)
+
+        def fail_with(
+            _messages: list[ModelMessage],
+            _info: AgentInfo,
+            exc: Exception = transient,
+        ) -> ModelResponse:
+            raise exc
+
+        transient_llm = Llm(
+            FunctionModel(fail_with),
+            store=store,
+            logger=_SpyLogger(),
+            redactions=(SecretStr("sk-leak"),),
+            max_retries=1,
+            retry_base_delay=0.2,
+            sleep=collect_sleep,
+        )
+        err = await transient_llm.evaluate_event(_envelope(), clean_ctx.stable_prefix)
+        assert_err(
+            err, kind=AppErrorKind.LLM, message_contains="Event evaluation failed"
+        )
+        assert isinstance(err, Err)
+        assert "sk-leak" not in err.error.message
+        assert seen_delays == [0.2]
+
+
+@pytest.mark.anyio
+async def test_llm_from_settings_disables_sdk_retries_and_applies_timeout(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db", tmp_path / "core.md")
+    logger = _SpyLogger()
+    clean_ctx = assemble_context(DEFAULT_PERSONA, MemoryBlocks(), (), now=_now())
+    state = {"calls": 0, "delay": 0.0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            _ = self.rfile.read(int(self.headers.get("content-length", "0")))
+            state["calls"] += 1
+            if state["delay"] > 0:
+                time.sleep(state["delay"])
+            body = json.dumps({"error": {"message": "server error"}}).encode("utf-8")
+            self.send_response(500)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = int(server.server_address[1])
+        settings = load_settings(
+            env={
+                "LLM_API_KEY": "sk-test",
+                "LLM_MODEL": "mock-model",
+                "LLM_BASE_URL": f"http://127.0.0.1:{port}/v1",
+                "LLM_TIMEOUT_SECONDS": "0.1",
+                "LLM_MAX_RETRIES": "0",
+            }
+        )
+        assert isinstance(settings, Ok)
+        built = Llm.from_settings(
+            settings.value, store=store, logger=logger, base_env={}
+        )
+        assert isinstance(built, Ok)
+        llm = built.value
+        try:
+            err = await llm.chat("default", "hi", (), clean_ctx)
+            assert_err(err, kind=AppErrorKind.LLM, message_contains="500")
+            assert state["calls"] == 1
+
+            state["delay"] = 0.3
+            timed_out = await llm.chat("default", "hi", (), clean_ctx)
+            assert_err(timed_out, kind=AppErrorKind.LLM, message_contains="timed out")
+        finally:
+            await llm.aclose()
+    finally:
+        server.shutdown()
+        server.server_close()

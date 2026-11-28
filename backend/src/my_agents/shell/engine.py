@@ -1,5 +1,6 @@
 import asyncio
 from collections.abc import AsyncGenerator, Callable, Sequence
+from contextlib import suppress
 from datetime import UTC, datetime
 from typing import Protocol, assert_never
 from uuid import uuid7
@@ -93,6 +94,7 @@ class CharacterEngine:
         self._subscribers: dict[str, set[asyncio.Queue[TimelineItem | None]]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
         self._event_semaphore = asyncio.Semaphore(settings.event_max_concurrency)
+        self._turn_tasks: set[asyncio.Task[Result[TurnOutcome, AppError]]] = set()
 
     def _lock_for(self, conversation_id: str) -> asyncio.Lock:
         lock = self._locks.get(conversation_id)
@@ -181,6 +183,20 @@ class CharacterEngine:
         normalized = text.strip()
         if not normalized:
             return Err(AppError(AppErrorKind.VALIDATION, "Message must not be empty."))
+        task = asyncio.create_task(self._submit_message(conversation_id, normalized))
+        self._turn_tasks.add(task)
+        task.add_done_callback(self._turn_tasks.discard)
+        try:
+            return await task
+        except asyncio.CancelledError:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+            raise
+
+    async def _submit_message(
+        self, conversation_id: str, normalized: str
+    ) -> Result[TurnOutcome, AppError]:
         async with self._lock_for(conversation_id):
             now = self._clock()
             bumped = await self._call_store(
@@ -199,35 +215,48 @@ class CharacterEngine:
             )
             if is_err(history):
                 return history
+            user_entries: tuple[MessageEntry, ...] = (
+                ("user", MessageOrigin.USER, normalized, None),
+            )
+            saved_user = await self._call_store(
+                lambda: self._store.append_messages(conversation_id, user_entries, now)
+            )
+            if is_err(saved_user):
+                return saved_user
+            self._publish(_message_item(saved_user.value[0]))
             reply = await self._llm.chat(
                 conversation_id, normalized, history.value, assembled
             )
             if is_err(reply):
                 return reply
-            entries: tuple[MessageEntry, ...] = (
-                ("user", MessageOrigin.USER, normalized, None),
+            reply_now = self._clock()
+            reply_entries: tuple[MessageEntry, ...] = (
                 ("assistant", MessageOrigin.REPLY, reply.value.text, None),
             )
-            saved = await self._call_store(
-                lambda: self._store.append_messages(conversation_id, entries, now)
+            saved_reply = await self._call_store(
+                lambda: self._store.append_messages(
+                    conversation_id, reply_entries, reply_now
+                )
             )
-            if is_err(saved):
-                return saved
+            if is_err(saved_reply):
+                return saved_reply
             surfaced = assembled.rendered_event_ids
             if surfaced and is_err(
                 await self._call_store(
-                    lambda: self._store.mark_surfaced(conversation_id, surfaced, now)
+                    lambda: self._store.mark_surfaced(
+                        conversation_id, surfaced, reply_now
+                    )
                 )
             ):
                 return Err(
                     AppError(AppErrorKind.STORAGE, "Could not mark ambient events.")
                 )
-            self._publish(_message_item(saved.value[-1]))
+            self._publish(_message_item(saved_reply.value[0]))
             return Ok(
                 TurnOutcome(
                     conversation_id,
                     reply.value.text,
-                    saved.value[-1].message_id,
+                    saved_reply.value[0].message_id,
                     surfaced,
                     reply.value.memory_updates,
                 )
@@ -423,12 +452,15 @@ class CharacterEngine:
         return self._store.reset_conversation(conversation_id)
 
     async def aclose(self) -> None:
-        tasks = tuple(self._tasks)
+        tasks: tuple[
+            asyncio.Task[None] | asyncio.Task[Result[TurnOutcome, AppError]], ...
+        ] = (*self._tasks, *self._turn_tasks)
         for task in tasks:
             task.cancel()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._tasks.clear()
+        self._turn_tasks.clear()
         for group in self._subscribers.values():
             for queue in group:
                 if queue.full():

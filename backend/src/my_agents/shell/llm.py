@@ -1,14 +1,24 @@
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack
 from dataclasses import asdict, dataclass
 from typing import Annotated, Literal, assert_never
 from uuid import uuid4
 
+import httpx2
 from flow_res import Err, Ok, Result
+from openai import AsyncOpenAI
 from pydantic import Field
 from pydantic_ai import Agent, AgentRunResult, FunctionToolset, Tool, UsageLimits
+from pydantic_ai.exceptions import (
+    ModelConnectionError,
+    ModelHTTPError,
+    ModelRateLimitError,
+    ModelServerError,
+    ModelUnavailableError,
+)
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -45,6 +55,26 @@ from my_agents.shell.settings import Settings
 from my_agents.shell.store import Store
 
 _REQUEST_LIMITS = UsageLimits(request_limit=6, tool_calls_limit=8)
+_DEFAULT_TIMEOUT_SECONDS = 60.0
+_DEFAULT_MAX_RETRIES = 2
+_DEFAULT_RETRY_BASE_DELAY = 0.5
+_TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
+    TimeoutError,
+    ConnectionError,
+    httpx2.TransportError,
+    ModelConnectionError,
+    ModelRateLimitError,
+    ModelServerError,
+    ModelUnavailableError,
+)
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    if isinstance(exc, _TRANSIENT_EXCEPTIONS):
+        return True
+    if isinstance(exc, ModelHTTPError):
+        return exc.status_code in {408, 429} or exc.status_code >= 500
+    return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -158,11 +188,20 @@ class Llm:
         logger: IAppLogger,
         external_toolsets: Sequence[AbstractToolset[None]] = (),
         redactions: Sequence[SecretStr] = (),
+        timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
+        max_retries: int = _DEFAULT_MAX_RETRIES,
+        retry_base_delay: float = _DEFAULT_RETRY_BASE_DELAY,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self._store = store
         self._external_toolsets = tuple(external_toolsets)
         self._logger = logger
         self._redactions: tuple[SecretStr, ...] = tuple(redactions)
+        self._model_name: str = model.model_name
+        self._timeout_seconds = timeout_seconds
+        self._max_retries = max_retries
+        self._retry_base_delay = retry_base_delay
+        self._sleep = sleep
         self._stack: AsyncExitStack | None = None
         self._chat: Agent[None, str] = Agent(model)
         self._evaluator: Agent[None, EventDecision] = Agent(
@@ -192,12 +231,15 @@ class Llm:
         if model_name is None:
             return Err(AppError(AppErrorKind.VALIDATION, "LLM_MODEL is required."))
         redactions += (api_key,)
+        # Disable SDK-level retries so LLM_MAX_RETRIES is the sole retry control and avoids multiplicative retries.
+        client = AsyncOpenAI(
+            base_url=settings.llm_base_url,
+            api_key=api_key.get_secret_value(),
+            max_retries=0,
+        )
         model = OpenAIChatModel(
             model_name,
-            provider=OpenAIProvider(
-                base_url=settings.llm_base_url,
-                api_key=api_key.get_secret_value(),
-            ),
+            provider=OpenAIProvider(openai_client=client),
         )
         return Ok(
             cls(
@@ -206,6 +248,8 @@ class Llm:
                 logger=logger,
                 external_toolsets=toolsets,
                 redactions=redactions,
+                timeout_seconds=settings.llm_timeout_seconds,
+                max_retries=settings.llm_max_retries,
             )
         )
 
@@ -242,26 +286,69 @@ class Llm:
         self,
         label: str,
         event: str,
+        conversation_id: str,
         invoke: Callable[[], Awaitable[AgentRunResult[T]]],
     ) -> Result[T, AppError]:
-        try:
-            result = await invoke()
-        except Exception as exc:
-            return Err(
-                AppError(
-                    AppErrorKind.LLM,
-                    self.redact(f"{label} failed: {exc}"),
+        started = time.monotonic()
+        attempt = 0
+        while True:
+            try:
+                async with asyncio.timeout(self._timeout_seconds):
+                    result = await invoke()
+            except Exception as exc:
+                duration_ms = round((time.monotonic() - started) * 1000.0, 2)
+                if attempt < self._max_retries and _is_transient_error(exc):
+                    delay = self._retry_base_delay * (2**attempt)
+                    self._logger.log(
+                        LogEntry(
+                            LogLevel.INFO,
+                            "llm_retry",
+                            self.redact(f"{label} transient error, retrying: {exc}"),
+                            error_type=type(exc).__name__,
+                            detail=f"attempt={attempt + 1}/{self._max_retries + 1}",
+                            duration_ms=duration_ms,
+                            conversation_id=conversation_id,
+                            model=self._model_name,
+                        )
+                    )
+                    attempt += 1
+                    await self._sleep(delay)
+                    continue
+                if isinstance(exc, TimeoutError):
+                    detail = str(exc) or f"timed out after {self._timeout_seconds}s"
+                else:
+                    detail = str(exc)
+                message = self.redact(f"{label} failed: {detail}")
+                self._logger.log(
+                    LogEntry(
+                        LogLevel.ERROR,
+                        "llm_failed",
+                        message,
+                        error_type=type(exc).__name__,
+                        detail=f"attempts={attempt + 1}",
+                        duration_ms=duration_ms,
+                        conversation_id=conversation_id,
+                        model=self._model_name,
+                    )
+                )
+                return Err(AppError(AppErrorKind.LLM, message))
+            duration_ms = round((time.monotonic() - started) * 1000.0, 2)
+            usage = result.usage
+            self._logger.log(
+                LogEntry(
+                    LogLevel.INFO,
+                    event,
+                    "llm call completed",
+                    detail=f"cache_read_tokens={usage.cache_read_tokens}",
+                    duration_ms=duration_ms,
+                    conversation_id=conversation_id,
+                    model=self._model_name,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_read_tokens=usage.cache_read_tokens,
                 )
             )
-        self._logger.log(
-            LogEntry(
-                LogLevel.INFO,
-                event,
-                "llm call completed",
-                detail=f"cache_read_tokens={result.usage.cache_read_tokens}",
-            )
-        )
-        return Ok(result.output)
+            return Ok(result.output)
 
     async def chat(
         self,
@@ -275,6 +362,7 @@ class Llm:
         result = await self._run(
             "Chat",
             "chat_completed",
+            conversation_id,
             lambda: self._chat.run(
                 user_text,
                 message_history=_history(history),
@@ -298,6 +386,7 @@ class Llm:
         return await self._run(
             "Event evaluation",
             "event_evaluated",
+            envelope.conversation_id,
             lambda: self._evaluator.run(
                 build_event_prompt(envelope, uuid4().hex),
                 instructions=stable_prefix,

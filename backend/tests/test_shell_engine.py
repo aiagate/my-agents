@@ -63,6 +63,7 @@ class _FakeLlm:
         self.eval_started: asyncio.Event | None = None
         self.chat_calls = 0
         self.last_context: AssembledContext | None = None
+        self.last_history: tuple[ChatMessage, ...] = ()
         self.eval_error_raises: Exception | None = None
         self.active_evals = 0
         self.max_active_evals = 0
@@ -82,7 +83,8 @@ class _FakeLlm:
         history: Sequence[ChatMessage],
         context: AssembledContext,
     ) -> Result[ChatReply, AppError]:
-        del conversation_id, user_text, history
+        del conversation_id, user_text
+        self.last_history = tuple(history)
         self.last_context = context
         self.chat_calls += 1
         if self.chat_started is not None:
@@ -198,6 +200,10 @@ class _FaultStore(Store):
         entries: Sequence[MessageEntry],
         now: datetime,
     ) -> Result[tuple[ChatMessage, ...], AppError]:
+        if any(role == "assistant" for role, *_ in entries):
+            reply_failure = self.failures.get("append_messages_reply")
+            if reply_failure is not None:
+                return Err(reply_failure)
         failure = self.failures.get("append_messages")
         if failure is not None:
             return Err(failure)
@@ -335,7 +341,7 @@ async def test_engine_chat_events_sse_snapshots_and_reset(tmp_path: Path) -> Non
     async def consume() -> None:
         async for item in engine.subscribe("default"):
             streamed.append(item)
-            if len(streamed) >= 4:
+            if len(streamed) >= 6:
                 return
 
     subscriber = asyncio.create_task(consume())
@@ -383,10 +389,16 @@ async def test_engine_chat_events_sse_snapshots_and_reset(tmp_path: Path) -> Non
     assert [item.kind for item in streamed] == [
         TimelineKind.TURN,
         TimelineKind.TURN,
+        TimelineKind.TURN,
         TimelineKind.EVENT,
         TimelineKind.TURN,
+        TimelineKind.TURN,
     ]
-    assert streamed[1].origin is MessageOrigin.PROACTIVE
+    assert streamed[0].origin is MessageOrigin.USER
+    assert streamed[1].origin is MessageOrigin.REPLY
+    assert streamed[2].origin is MessageOrigin.PROACTIVE
+    assert streamed[4].origin is MessageOrigin.USER
+    assert streamed[5].origin is MessageOrigin.REPLY
 
     timeline = engine.get_timeline("default", limit=50)
     assert isinstance(timeline, Ok)
@@ -439,7 +451,8 @@ async def test_engine_concurrency_queue_overflow_and_task_cancellation(
     for idx in range(66):
         await engine.submit_message("overflow", f"msg-{idx}")
     first_kept = await asyncio.wait_for(sub_task, timeout=5)
-    assert first_kept.content == "reply text"
+    assert first_kept.content == "msg-0"
+    assert first_kept.origin is MessageOrigin.USER
     await stream.aclose()
 
     sub_task2 = asyncio.create_task(engine.subscribe("cancel").__anext__())
@@ -600,6 +613,14 @@ async def test_engine_worker_failure_and_store_error_propagation(
     )
     store.failures.clear()
 
+    store.failures["append_messages_reply"] = err
+    assert_err(
+        await engine.submit_message("default", "user saved only"),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
+
     llm.chat_result = Err(AppError(AppErrorKind.LLM, "chat err"))
     assert_err(
         await engine.submit_message("default", "hi"),
@@ -705,8 +726,11 @@ async def test_engine_proactive_channel_delivery_and_item_ids(
     await asyncio.sleep(0)
     reply = await engine.submit_message("push:demo", "ありがとう")
     assert isinstance(reply, Ok)
-    item = await asyncio.wait_for(pending, timeout=5)
-    assert item.item_id == reply.value.message_id
+    user_item = await asyncio.wait_for(pending, timeout=5)
+    reply_item = await asyncio.wait_for(stream.__anext__(), timeout=5)
+    assert (user_item.origin, user_item.content) == (MessageOrigin.USER, "ありがとう")
+    assert reply_item.item_id == reply.value.message_id
+    assert reply_item.origin is MessageOrigin.REPLY
     await stream.aclose()
 
     await engine.aclose()
@@ -914,7 +938,8 @@ async def test_engine_queue_overflow_sends_sentinel_and_aclose_terminates(
     for index in range(66):
         assert isinstance(await engine.submit_message("overflow", f"msg-{index}"), Ok)
     first = await asyncio.wait_for(first_pending, timeout=5)
-    assert first.content == "reply text"
+    assert first.content == "msg-0"
+    assert first.origin is MessageOrigin.USER
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(stream.__anext__(), timeout=5)
     await stream.aclose()
@@ -994,8 +1019,8 @@ async def test_engine_subscriber_cleanup_survives_shared_and_full_queues(
     second_item = asyncio.create_task(second.__anext__())
     await asyncio.sleep(0)
     assert isinstance(await engine.submit_message("default", "hello"), Ok)
-    assert (await first_item).content == "reply text"
-    assert (await second_item).content == "reply text"
+    assert (await first_item).content == "hello"
+    assert (await second_item).content == "hello"
     for index in range(66):
         assert isinstance(await engine.submit_message("default", f"shared-{index}"), Ok)
     with pytest.raises(StopAsyncIteration):
@@ -1006,9 +1031,11 @@ async def test_engine_subscriber_cleanup_survives_shared_and_full_queues(
     full = engine.subscribe("full")
     pending = asyncio.create_task(full.__anext__())
     await asyncio.sleep(0)
-    for index in range(65):
+    assert isinstance(await engine.submit_message("full", "seed"), Ok)
+    assert (await pending).content == "seed"
+    assert (await full.__anext__()).content == "reply text"
+    for index in range(32):
         assert isinstance(await engine.submit_message("full", f"msg-{index}"), Ok)
-    assert (await pending).content == "reply text"
     await engine.aclose()
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(full.__anext__(), timeout=5)
@@ -1156,3 +1183,101 @@ async def test_engine_uses_configured_timezone_for_context_and_quiet_hours(
         "quiet_hours",
     )
     await engine.aclose()
+
+
+@pytest.mark.anyio
+async def test_engine_persists_and_publishes_user_message_before_llm_without_history_duplication(
+    tmp_path: Path,
+) -> None:
+    engine, store, llm, _logger = _make_engine(tmp_path)
+    assert isinstance(store.insert_event(_note_record("evt_pending", 0)), Ok)
+
+    stream = engine.subscribe("default")
+    pending_sse = asyncio.create_task(stream.__anext__())
+    await asyncio.sleep(0)
+
+    llm.chat_started = asyncio.Event()
+    llm.chat_gate = asyncio.Event()
+    llm.chat_result = Err(AppError(AppErrorKind.LLM, "upstream down"))
+
+    turn1 = asyncio.create_task(engine.submit_message("default", "first user msg"))
+    await llm.chat_started.wait()
+
+    # Before LLM completes, user utterance must already be durable, streamed, and excluded from history.
+    assert llm.last_history == ()
+    persisted_during = store.recent_messages("default", limit=10)
+    assert isinstance(persisted_during, Ok)
+    assert [(m.origin, m.content) for m in persisted_during.value] == [
+        (MessageOrigin.USER, "first user msg")
+    ]
+    sse_user = await asyncio.wait_for(pending_sse, timeout=5)
+    assert (sse_user.origin, sse_user.content) == (MessageOrigin.USER, "first user msg")
+
+    llm.chat_gate.set()
+    res1 = await turn1
+    assert_err(res1, kind=AppErrorKind.LLM, message_contains="upstream down")
+
+    persisted_after_fail = store.recent_messages("default", limit=10)
+    assert isinstance(persisted_after_fail, Ok)
+    assert [(m.origin, m.content) for m in persisted_after_fail.value] == [
+        (MessageOrigin.USER, "first user msg")
+    ]
+    note_row = store.get_event("evt_pending")
+    assert isinstance(note_row, Ok)
+    assert note_row.value is not None
+    assert note_row.value.surfaced_at is None
+
+    llm.chat_gate = None
+    llm.chat_started = None
+    llm.chat_result = Ok(ChatReply("second reply", ()))
+    res2 = await engine.submit_message("default", "second user msg")
+    assert isinstance(res2, Ok)
+    assert [(m.origin, m.content) for m in llm.last_history] == [
+        (MessageOrigin.USER, "first user msg")
+    ]
+    assert res2.value.surfaced_event_ids == ("evt_pending",)
+
+    res3 = await engine.submit_message("default", "third user msg")
+    assert isinstance(res3, Ok)
+    assert [(m.origin, m.content) for m in llm.last_history] == [
+        (MessageOrigin.USER, "first user msg"),
+        (MessageOrigin.USER, "second user msg"),
+        (MessageOrigin.REPLY, "second reply"),
+    ]
+    await stream.aclose()
+    await engine.aclose()
+
+
+@pytest.mark.anyio
+async def test_engine_tracks_in_flight_turns_on_aclose_and_caller_cancel(
+    tmp_path: Path,
+) -> None:
+    engine, store, llm, _logger = _make_engine(tmp_path / "aclose")
+    llm.chat_started = asyncio.Event()
+    llm.chat_gate = asyncio.Event()
+    in_flight = asyncio.create_task(engine.submit_message("default", "in flight"))
+    await llm.chat_started.wait()
+    await engine.aclose()
+    assert llm.closed is True
+    with pytest.raises(asyncio.CancelledError):
+        await in_flight
+    persisted = store.recent_messages("default", limit=10)
+    assert isinstance(persisted, Ok)
+    assert [(m.origin, m.content) for m in persisted.value] == [
+        (MessageOrigin.USER, "in flight")
+    ]
+
+    engine2, store2, llm2, _logger2 = _make_engine(tmp_path / "cancel")
+    llm2.chat_started = asyncio.Event()
+    llm2.chat_gate = asyncio.Event()
+    cancelled_turn = asyncio.create_task(engine2.submit_message("default", "cancel me"))
+    await llm2.chat_started.wait()
+    cancelled_turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await cancelled_turn
+    persisted2 = store2.recent_messages("default", limit=10)
+    assert isinstance(persisted2, Ok)
+    assert [(m.origin, m.content) for m in persisted2.value] == [
+        (MessageOrigin.USER, "cancel me")
+    ]
+    await engine2.aclose()

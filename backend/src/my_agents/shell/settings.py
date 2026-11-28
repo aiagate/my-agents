@@ -101,6 +101,8 @@ class Settings(BaseModel):
     timezone: Annotated[str, BeforeValidator(_timezone)] = DEFAULT_TIMEZONE
     event_max_concurrency: Annotated[int, Field(gt=0)] = 4
     recent_messages_limit: Annotated[int, Field(gt=0)] = 30
+    llm_timeout_seconds: Annotated[float, Field(gt=0, allow_inf_nan=False)] = 60.0
+    llm_max_retries: Annotated[int, Field(ge=0)] = 2
     log_path: Annotated[Path | None, BeforeValidator(_optional_path)] = None
     web_dist_dir: Annotated[Path | None, BeforeValidator(_optional_path)] = None
     vapid_private_key: Annotated[SecretStr | None, BeforeValidator(_blank_to_none)] = (

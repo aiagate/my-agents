@@ -62,6 +62,8 @@ from my_agents.shell.store import Store
 
 MAX_BODY_BYTES = 64 * 1024
 _SSE_HEADERS = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+_DEFAULT_SSE_RETRY_MS = 3000
+_DEFAULT_SSE_KEEPALIVE_SECONDS = 15.0
 
 
 _BASE64URL = re.compile(r"^[A-Za-z0-9_-]+={0,2}$")
@@ -298,53 +300,65 @@ async def _stream(
     engine: CharacterEngine,
     conversation_id: str,
     after_id: str | None,
+    *,
+    keepalive_seconds: float = _DEFAULT_SSE_KEEPALIVE_SECONDS,
+    retry_ms: int = _DEFAULT_SSE_RETRY_MS,
 ) -> AsyncGenerator[str]:
-    if after_id is None:
-        async for item in engine.subscribe(conversation_id):
-            yield _sse(item)
-        return
     subscription = engine.subscribe(conversation_id)
-    pending = asyncio.create_task(anext(subscription))
-    last_id: str | None = after_id
+    pending: asyncio.Task[TimelineItem] | None = asyncio.create_task(
+        anext(subscription)
+    )
+    last_id = "" if after_id is None else after_id
     replayed_ids: set[str] = set()
     try:
-        replayed = await asyncio.to_thread(
-            engine.get_timeline,
-            conversation_id,
-            limit=200,
-            after_id=after_id,
-        )
-        if not is_err(replayed):
-            for item in replayed.value:
-                if last_id is None or item.item_id > last_id:
-                    last_id = item.item_id
-                replayed_ids.add(item.item_id)
-                yield _sse(item)
-        try:
-            item = await pending
-        except StopAsyncIteration:
-            return
+        yield f"retry: {retry_ms}\n\n"
+        if after_id is not None:
+            replayed = await asyncio.to_thread(
+                engine.get_timeline,
+                conversation_id,
+                limit=200,
+                after_id=after_id,
+            )
+            if not is_err(replayed):
+                for item in replayed.value:
+                    if item.item_id > last_id:
+                        last_id = item.item_id
+                    replayed_ids.add(item.item_id)
+                    yield _sse(item)
         while True:
+            if pending is None:
+                pending = asyncio.create_task(anext(subscription))
+            # Use asyncio.wait instead of wait_for so a keepalive timeout never
+            # cancels the underlying anext(subscription) coroutine and closes it.
+            done, _ = await asyncio.wait((pending,), timeout=keepalive_seconds)
+            if not done:
+                yield ": keepalive\n\n"
+                continue
+            current = pending
+            pending = None
+            try:
+                item = current.result()
+            except StopAsyncIteration:
+                return
+            if after_id is None:
+                yield _sse(item)
+                continue
             skip = (
                 item.item_id in replayed_ids
                 or item.item_id == last_id
-                or (after_id is not None and item.item_id <= after_id)
+                or item.item_id <= after_id
             )
             if not skip:
-                if last_id is None or item.item_id > last_id:
+                if item.item_id > last_id:
                     last_id = item.item_id
                     yield _sse(item, include_id=True)
                 else:
                     yield _sse(item, include_id=False)
-            try:
-                item = await anext(subscription)
-            except StopAsyncIteration:
-                return
     finally:
-        if not pending.done():
+        if pending is not None:
             pending.cancel()
-        with suppress(asyncio.CancelledError, StopAsyncIteration):
-            await pending
+            with suppress(asyncio.CancelledError, StopAsyncIteration):
+                await pending
         await subscription.aclose()
 
 
@@ -353,6 +367,7 @@ def create_app(
     push: WebPushService,
     *,
     web_dist_dir: Path | None = None,
+    sse_keepalive_seconds: float = _DEFAULT_SSE_KEEPALIVE_SECONDS,
 ) -> Starlette:
     async def health(_request: Request) -> JSONResponse:
         return JSONResponse({"status": "ok", "service": "my-agents"})
@@ -398,7 +413,12 @@ def create_app(
             except ValueError:
                 return JSONResponse({"error": "invalid_since"}, status_code=400)
         return StreamingResponse(
-            _stream(engine, conversation_id, after_id),
+            _stream(
+                engine,
+                conversation_id,
+                after_id,
+                keepalive_seconds=sse_keepalive_seconds,
+            ),
             media_type="text/event-stream",
             headers=_SSE_HEADERS,
         )

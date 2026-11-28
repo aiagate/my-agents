@@ -494,12 +494,24 @@ def test_stream_endpoint_emits_sse_frames(tmp_path: Path) -> None:
         time.sleep(0.1)
         chat = client.post("/chat", json={"conversation_id": "sse", "message": "hello"})
         assert chat.status_code == HTTPStatus.OK
-        line = next(item for item in response.iter_lines() if item.startswith("data: "))
+        lines = response.iter_lines()
+        seen_retry = False
+        payloads: list[dict[str, object]] = []
+        for raw_line in lines:
+            if raw_line == "retry: 3000":
+                seen_retry = True
+            elif raw_line.startswith("data: "):
+                payloads.append(json.loads(raw_line.removeprefix("data: ")))
+                if len(payloads) >= 2:
+                    break
 
-    payload = json.loads(line.removeprefix("data: "))
-    assert payload["kind"] == "turn"
-    assert payload["conversation_id"] == "sse"
-    assert payload["content"] == "server reply"
+    assert seen_retry is True
+    assert [
+        (p["kind"], p["conversation_id"], p["origin"], p["content"]) for p in payloads
+    ] == [
+        ("turn", "sse", "user", "hello"),
+        ("turn", "sse", "reply", "server reply"),
+    ]
 
 
 def test_lifespan_start_failure_logs_and_serve_delegates_to_uvicorn(
@@ -994,11 +1006,12 @@ def test_stream_replays_cursor_and_continues_live(tmp_path: Path) -> None:
                 json={"conversation_id": "replay", "message": "three"},
             )
             assert chat_response.status_code == HTTPStatus.OK
-            replayed = _data_items(response, 3)
+            replayed = _data_items(response, 4)
         assert replayed[0]["item_id"] == timeline[2]["item_id"]
         assert replayed[1]["item_id"] == timeline[3]["item_id"]
-        assert replayed[2]["item_id"] == chat_response.json()["message_id"]
-        assert (replayed[2]["content"], replayed[2]["origin"]) == (
+        assert (replayed[2]["content"], replayed[2]["origin"]) == ("three", "user")
+        assert replayed[3]["item_id"] == chat_response.json()["message_id"]
+        assert (replayed[3]["content"], replayed[3]["origin"]) == (
             "server reply",
             "reply",
         )
@@ -1082,9 +1095,10 @@ async def test_stream_helper_deduplicates_replay_and_handles_errors() -> None:
     frames = [
         frame async for frame in stream_fn(duplicate_engine, "default", first.item_id)
     ]
-    assert len(frames) == 2
-    assert f"id: {first.item_id}" in frames[0]
-    assert f"id: {second.item_id}" in frames[1]
+    assert frames[0] == "retry: 3000\n\n"
+    assert len(frames) == 3
+    assert f"id: {first.item_id}" in frames[1]
+    assert f"id: {second.item_id}" in frames[2]
 
     error_engine = _ScriptedEngine(
         Err(AppError(AppErrorKind.STORAGE, "replay failed")), (second,)
@@ -1092,8 +1106,9 @@ async def test_stream_helper_deduplicates_replay_and_handles_errors() -> None:
     error_frames = [
         frame async for frame in stream_fn(error_engine, "default", first.item_id)
     ]
-    assert len(error_frames) == 1
-    assert error_frames[0].startswith(f"id: {second.item_id}\n")
+    assert error_frames[0] == "retry: 3000\n\n"
+    assert len(error_frames) == 2
+    assert error_frames[1].startswith(f"id: {second.item_id}\n")
 
     stopped_frames = [
         frame
@@ -1101,13 +1116,15 @@ async def test_stream_helper_deduplicates_replay_and_handles_errors() -> None:
             _ScriptedEngine(Ok((first,)), ()), "default", first.item_id
         )
     ]
-    assert len(stopped_frames) == 1
+    assert stopped_frames[0] == "retry: 3000\n\n"
+    assert len(stopped_frames) == 2
 
     cancellable = stream_fn(
         _ScriptedEngine(Ok((first,)), (), asyncio.Event()),
         "default",
         first.item_id,
     )
+    assert await anext(cancellable) == "retry: 3000\n\n"
     assert (await anext(cancellable)).startswith("id: ")
     await cancellable.aclose()
 
@@ -1141,14 +1158,90 @@ async def test_stream_helper_skips_equal_and_marks_late_events_without_id() -> N
     )
     engine = _ScriptedEngine(Ok(()), (third, first, second, third))
     frames = [frame async for frame in stream_fn(engine, "default", first.item_id)]
-    assert len(frames) == 2
-    assert frames[0].startswith(f"id: {third.item_id}\n")
-    assert frames[1].startswith("data: ")
-    assert f"id: {second.item_id}" not in frames[1]
+    assert frames[0] == "retry: 3000\n\n"
+    assert len(frames) == 3
+    assert frames[1].startswith(f"id: {third.item_id}\n")
+    assert frames[2].startswith("data: ")
+    assert f"id: {second.item_id}" not in frames[2]
 
     no_cursor = [frame async for frame in stream_fn(engine, "default", None)]
-    assert len(no_cursor) == 4
-    assert all(frame.startswith("id: ") for frame in no_cursor)
+    assert no_cursor[0] == "retry: 3000\n\n"
+    assert len(no_cursor) == 5
+    assert all(frame.startswith("id: ") for frame in no_cursor[1:])
+
+
+@pytest.mark.anyio
+async def test_stream_emits_retry_and_keepalive_without_dropping_subscription(
+    tmp_path: Path,
+) -> None:
+    server_module = importlib.import_module("my_agents.shell.server")
+    stream_name = "_stream"
+    stream_fn = getattr(server_module, stream_name)
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    item = TimelineItem(
+        TimelineKind.TURN,
+        "default",
+        "live after keepalive",
+        now,
+        item_id="01960000-0000-7000-8000-000000000010",
+    )
+    gate = asyncio.Event()
+    gen = stream_fn(
+        _ScriptedEngine(Ok(()), (item,), wait=gate),
+        "default",
+        None,
+        keepalive_seconds=0.02,
+        retry_ms=2500,
+    )
+    assert await anext(gen) == "retry: 2500\n\n"
+    assert await asyncio.wait_for(anext(gen), timeout=1.0) == ": keepalive\n\n"
+    gate.set()
+    live = await asyncio.wait_for(anext(gen), timeout=1.0)
+    assert live.startswith(f"id: {item.item_id}\n")
+    with pytest.raises(StopAsyncIteration):
+        await asyncio.wait_for(anext(gen), timeout=1.0)
+
+    idle_gen = stream_fn(
+        _ScriptedEngine(Ok(()), (), wait=asyncio.Event()),
+        "default",
+        None,
+        keepalive_seconds=0.02,
+    )
+    assert await anext(idle_gen) == "retry: 3000\n\n"
+    assert await asyncio.wait_for(anext(idle_gen), timeout=1.0) == ": keepalive\n\n"
+    await idle_gen.aclose()
+
+    engine, push, _store, _llm, _logger = _build_engine(tmp_path / "ka")
+    with (
+        TestClient(create_app(engine, push, sse_keepalive_seconds=0.02)) as client,
+        client.stream("GET", "/stream?conversation_id=ka") as response,
+    ):
+        assert response.status_code == HTTPStatus.OK
+        seen_retry = False
+        seen_keepalive = False
+        lines = response.iter_lines()
+        for raw_line in lines:
+            if raw_line == "retry: 3000":
+                seen_retry = True
+            elif raw_line == ": keepalive":
+                seen_keepalive = True
+                break
+        assert seen_retry is True
+        assert seen_keepalive is True
+        chat = client.post(
+            "/chat", json={"conversation_id": "ka", "message": "after keepalive"}
+        )
+        assert chat.status_code == HTTPStatus.OK
+        live_items: list[dict[str, object]] = []
+        for raw_line in lines:
+            if raw_line.startswith("data: "):
+                live_items.append(json.loads(raw_line.removeprefix("data: ")))
+                if len(live_items) >= 2:
+                    break
+        assert [entry["content"] for entry in live_items] == [
+            "after keepalive",
+            "server reply",
+        ]
 
 
 def test_conversation_id_validation_across_routes(tmp_path: Path) -> None:

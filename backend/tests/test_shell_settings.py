@@ -36,6 +36,8 @@ def test_load_settings_defaults_env_file_and_precedence(tmp_path: Path) -> None:
     assert cfg.web_dist_dir is None
     assert cfg.vapid_private_key is None
     assert cfg.vapid_subject is None
+    assert cfg.llm_timeout_seconds == 60.0
+    assert cfg.llm_max_retries == 2
 
     env_file = tmp_path / ".env"
     env_file.write_text(
@@ -258,3 +260,27 @@ def test_load_settings_reports_every_invalid_field() -> None:
     )
     assert "Invalid setting 'RECENT_MESSAGES_LIMIT'" in error.message
     assert "; " in error.message
+
+
+def test_settings_llm_timeout_and_retries_validation() -> None:
+    custom = load_settings(env={"LLM_TIMEOUT_SECONDS": "12.5", "LLM_MAX_RETRIES": "0"})
+    assert isinstance(custom, Ok)
+    assert (custom.value.llm_timeout_seconds, custom.value.llm_max_retries) == (12.5, 0)
+
+    higher = load_settings(env={"LLM_TIMEOUT_SECONDS": "5", "LLM_MAX_RETRIES": "4"})
+    assert isinstance(higher, Ok)
+    assert (higher.value.llm_timeout_seconds, higher.value.llm_max_retries) == (5.0, 4)
+
+    for bad_timeout in ("0", "-1.5", "nan", "inf", "bad"):
+        assert_err(
+            load_settings(env={"LLM_TIMEOUT_SECONDS": bad_timeout}),
+            kind=AppErrorKind.VALIDATION,
+            message_contains="LLM_TIMEOUT_SECONDS",
+        )
+
+    for bad_retries in ("-1", "bad"):
+        assert_err(
+            load_settings(env={"LLM_MAX_RETRIES": bad_retries}),
+            kind=AppErrorKind.VALIDATION,
+            message_contains="LLM_MAX_RETRIES",
+        )

@@ -222,6 +222,7 @@ class Store:
         self._memory = memory_path
         self._schema_statements = tuple(schema_statements)
         self._init_error: AppError | None = None
+        self._initialized: bool = False
         if db_path.exists():
             self._init_error = self._prepare()
 
@@ -243,9 +244,7 @@ class Store:
             connection.execute("PRAGMA busy_timeout = 5000")
             if readonly:
                 _require_supported_version(connection)
-            else:
-                with suppress(sqlite3.OperationalError):
-                    connection.execute("PRAGMA journal_mode = WAL")
+            elif not self._initialized:
                 self._initialize(connection)
         except BaseException:
             connection.close()
@@ -253,6 +252,7 @@ class Store:
         return connection
 
     def _initialize(self, connection: sqlite3.Connection) -> None:
+        created = False
         connection.execute("BEGIN IMMEDIATE")
         try:
             row = connection.execute(
@@ -262,7 +262,8 @@ class Store:
             ).fetchone()
             version = int(row[0])
             _check_version(version, int(row[1]))
-            if version != CURRENT_SCHEMA_VERSION:
+            created = version != CURRENT_SCHEMA_VERSION
+            if created:
                 for statement in self._schema_statements:
                     connection.execute(statement)
                 connection.execute(f"PRAGMA user_version = {CURRENT_SCHEMA_VERSION}")
@@ -271,6 +272,11 @@ class Store:
             with suppress(sqlite3.Error):
                 connection.execute("ROLLBACK")
             raise
+        # SQLite forbids switching journal_mode inside an open transaction, and WAL persists in the DB header.
+        if created:
+            with suppress(sqlite3.OperationalError):
+                connection.execute("PRAGMA journal_mode = WAL")
+        self._initialized = True
 
     def _read[T](
         self, operation: Callable[[sqlite3.Connection], T], *, empty: T
@@ -292,6 +298,7 @@ class Store:
             return Err(self._init_error)
         try:
             with closing(self._open(readonly=False)) as connection, connection:
+                connection.execute("BEGIN IMMEDIATE")
                 return Ok(operation(connection))
         except _NotFoundError as exc:
             return Err(AppError(AppErrorKind.NOT_FOUND, str(exc)))

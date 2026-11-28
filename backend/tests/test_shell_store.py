@@ -1185,3 +1185,54 @@ def test_store_finalize_event_daily_cap_resets_at_timezone_midnight(
         state_after.value.proactive_day,
         state_after.value.proactive_count_today,
     ) == ("2026-05-02", 1)
+
+
+def test_store_sets_wal_once_on_creation_and_skips_on_subsequent_writes(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "wal.db"
+    mem_path = tmp_path / "core.md"
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs) -> sqlite3.Connection:
+        connection = real_connect(*args, **kwargs)
+        connection.set_trace_callback(statements.append)
+        return connection
+
+    with patch("sqlite3.connect", side_effect=traced_connect):
+        store = Store(db_path, mem_path)
+        assert isinstance(store.ensure_conversation("default", _t(0)), Ok)
+        assert isinstance(store.bump_epoch("default", _t(1)), Ok)
+        assert isinstance(
+            store.append_messages(
+                "default", (("user", MessageOrigin.USER, "first", None),), _t(2)
+            ),
+            Ok,
+        )
+        assert isinstance(
+            store.append_messages(
+                "default", (("assistant", MessageOrigin.REPLY, "second", None),), _t(3)
+            ),
+            Ok,
+        )
+
+    wal_writes = [sql for sql in statements if "journal_mode" in sql.lower()]
+    assert len(wal_writes) == 1
+
+    with closing(sqlite3.connect(db_path)) as conn:
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+    statements.clear()
+    with patch("sqlite3.connect", side_effect=traced_connect):
+        reopened = Store(db_path, mem_path)
+        assert isinstance(reopened.bump_epoch("default", _t(4)), Ok)
+        assert isinstance(
+            reopened.append_messages(
+                "default", (("user", MessageOrigin.USER, "third", None),), _t(5)
+            ),
+            Ok,
+        )
+
+    reopened_wal = [sql for sql in statements if "journal_mode" in sql.lower()]
+    assert reopened_wal == []
