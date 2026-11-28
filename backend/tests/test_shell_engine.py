@@ -23,17 +23,15 @@ from my_agents.core.types import (
     EventStatus,
     MemoryBlocks,
     MessageOrigin,
+    ProactiveNotice,
     ProactivePolicy,
-    PushPayload,
-    PushSubscription,
     SecretStr,
     TimelineItem,
     TimelineKind,
 )
-from my_agents.shell.engine import CharacterEngine
+from my_agents.shell.engine import CharacterEngine, ProactiveChannel
 from my_agents.shell.llm import ChatReply
 from my_agents.shell.logger import IAppLogger, LogEntry
-from my_agents.shell.push import ProactiveDeliverer
 from my_agents.shell.settings import Settings, load_settings
 from my_agents.shell.store import EventCommit, MessageEntry, Store
 from tests.helpers import assert_err
@@ -103,19 +101,14 @@ class _FakeLlm:
         return self.eval_result
 
 
-class _FakeDeliverer:
-    def __init__(self, public: str | None = "test-public-key") -> None:
-        self._public = public
-        self.payloads: list[PushPayload] = []
+class _FakeChannel:
+    def __init__(self) -> None:
+        self.notices: list[ProactiveNotice] = []
         self.closed = False
         self.failure: Exception | None = None
 
-    @property
-    def public_key(self) -> str | None:
-        return self._public
-
-    async def deliver(self, payload: PushPayload) -> None:
-        self.payloads.append(payload)
+    async def deliver(self, notice: ProactiveNotice) -> None:
+        self.notices.append(notice)
         if self.failure is not None:
             raise self.failure
 
@@ -269,7 +262,7 @@ def _settings(tmp_path: Path, **overrides: str) -> Settings:
 def _make_engine(
     tmp_path: Path,
     *,
-    deliverer: ProactiveDeliverer | None = None,
+    proactive_channel: ProactiveChannel | None = None,
     redactions: Sequence[SecretStr] = (),
     **overrides: str,
 ) -> tuple[CharacterEngine, _FaultStore, _FakeLlm, _SpyLogger]:
@@ -291,7 +284,7 @@ def _make_engine(
         DEFAULT_PERSONA,
         logger,
         clock=clock,
-        deliverer=deliverer,
+        proactive_channel=proactive_channel,
         redactions=redactions,
     )
     return engine, store, llm, logger
@@ -634,28 +627,17 @@ async def test_engine_worker_failure_and_store_error_propagation(
 
 
 @pytest.mark.anyio
-async def test_engine_push_delivery_subscriptions_and_item_ids(
+async def test_engine_proactive_channel_delivery_and_item_ids(
     tmp_path: Path,
 ) -> None:
-    deliverer = _FakeDeliverer()
-    engine, store, llm, _logger = _make_engine(tmp_path, deliverer=deliverer)
-    assert engine.push_public_key == "test-public-key"
+    channel = _FakeChannel()
+    engine, store, llm, _logger = _make_engine(tmp_path, proactive_channel=channel)
 
-    subscription = PushSubscription(
-        endpoint="https://push.example.com/1",
-        p256dh="p256dh",
-        auth=SecretStr("auth"),
-        created_at=datetime(2026, 5, 1, tzinfo=UTC),
-        conversation_id="push:demo",
-    )
-    assert isinstance(engine.save_push_subscription(subscription), Ok)
-    assert engine.delete_push_subscription("https://push.example.com/1") == Ok(True)
-    assert engine.delete_push_subscription("https://push.example.com/1") == Ok(False)
-
+    long_message = "キッチンの温度が上がっています。" + ("詳細。" * 80)
     llm.eval_result = Ok(
         EventDecision(
             action=EventAction.SPEAK,
-            message="キッチンの温度が上がっています。",
+            message=long_message,
             note="urgent",
             reason="alarm",
         )
@@ -666,20 +648,9 @@ async def test_engine_push_delivery_subscriptions_and_item_ids(
     assert isinstance(receipt, Ok)
     await _wait_settled(store, receipt.value.event_id)
     for _ in range(200):
-        if deliverer.payloads:
+        if channel.notices:
             break
         await asyncio.sleep(0.01)
-
-    assert deliverer.payloads == [
-        PushPayload(
-            conversation_id="push:demo",
-            title=DEFAULT_PERSONA.name,
-            body="キッチンの温度が上がっています。",
-            url="/?c=push%3Ademo",
-            tag=f"proactive:{receipt.value.event_id}",
-            event_id=receipt.value.event_id,
-        )
-    ]
 
     timeline = engine.get_timeline("push:demo", limit=20)
     assert isinstance(timeline, Ok)
@@ -688,13 +659,22 @@ async def test_engine_push_delivery_subscriptions_and_item_ids(
     ]
     assert len(message_items) == 1
     assert UUID(message_items[0].item_id).version == 7
+    assert channel.notices == [
+        ProactiveNotice(
+            conversation_id="push:demo",
+            speaker_name=DEFAULT_PERSONA.name,
+            content=long_message,
+            event_id=receipt.value.event_id,
+            created_at=message_items[0].created_at,
+        )
+    ]
 
     conversations = engine.list_conversations()
     assert isinstance(conversations, Ok)
     summary = conversations.value[0]
     assert summary.conversation_id == "push:demo"
     assert (summary.message_count, summary.event_count) == (1, 1)
-    assert summary.last_message_preview == "キッチンの温度が上がっています。"
+    assert summary.last_message_preview == long_message[:120]
     assert summary.last_message_origin is MessageOrigin.PROACTIVE
 
     stream = engine.subscribe("push:demo")
@@ -707,17 +687,16 @@ async def test_engine_push_delivery_subscriptions_and_item_ids(
     await stream.aclose()
 
     await engine.aclose()
-    assert deliverer.closed is True
+    assert channel.closed is True
 
 
 @pytest.mark.anyio
-async def test_engine_push_delivery_failure_is_logged_without_failing_event(
+async def test_engine_proactive_delivery_failure_is_logged_without_failing_event(
     tmp_path: Path,
 ) -> None:
-    deliverer = _FakeDeliverer(public=None)
-    deliverer.failure = RuntimeError("push boom")
-    engine, store, llm, logger = _make_engine(tmp_path, deliverer=deliverer)
-    assert engine.push_public_key is None
+    channel = _FakeChannel()
+    channel.failure = RuntimeError("delivery boom")
+    engine, store, llm, logger = _make_engine(tmp_path, proactive_channel=channel)
     llm.eval_result = Ok(
         EventDecision(
             action=EventAction.SPEAK,
@@ -732,7 +711,7 @@ async def test_engine_push_delivery_failure_is_logged_without_failing_event(
     assert isinstance(receipt, Ok)
     await _wait_settled(store, receipt.value.event_id)
     for _ in range(200):
-        if any(entry.event == "push_delivery_failed" for entry in logger.entries):
+        if any(entry.event == "proactive_delivery_failed" for entry in logger.entries):
             break
         await asyncio.sleep(0.01)
 
@@ -740,20 +719,19 @@ async def test_engine_push_delivery_failure_is_logged_without_failing_event(
     assert isinstance(loaded, Ok)
     assert loaded.value is not None
     assert loaded.value.status is EventStatus.COMPLETED
-    push_errors = [
-        entry for entry in logger.entries if entry.event == "push_delivery_failed"
+    delivery_errors = [
+        entry for entry in logger.entries if entry.event == "proactive_delivery_failed"
     ]
-    assert len(push_errors) == 1
-    assert "push boom" in push_errors[0].message
-    assert push_errors[0].error_type == "PUSH_FAILED"
+    assert len(delivery_errors) == 1
+    assert "delivery boom" in delivery_errors[0].message
+    assert delivery_errors[0].error_type == "PROACTIVE_DELIVERY_FAILED"
     assert not any(entry.event == "event_worker_failed" for entry in logger.entries)
     await engine.aclose()
 
 
 @pytest.mark.anyio
-async def test_engine_timeline_cursor_and_default_deliverer(tmp_path: Path) -> None:
+async def test_engine_timeline_cursor_and_no_proactive_channel(tmp_path: Path) -> None:
     engine, _store, _llm, _logger = _make_engine(tmp_path)
-    assert engine.push_public_key is None
     for text in ("first", "second", "third"):
         assert isinstance(await engine.submit_message("default", text), Ok)
 
@@ -928,11 +906,13 @@ async def test_engine_queue_overflow_sends_sentinel_and_aclose_terminates(
 
 
 @pytest.mark.anyio
-async def test_engine_redacts_failure_reasons_and_push_errors(tmp_path: Path) -> None:
-    deliverer = _FakeDeliverer()
+async def test_engine_redacts_failure_reasons_and_proactive_delivery_errors(
+    tmp_path: Path,
+) -> None:
+    channel = _FakeChannel()
     engine, store, llm, logger = _make_engine(
         tmp_path,
-        deliverer=deliverer,
+        proactive_channel=channel,
         redactions=(SecretStr("leak-secret"),),
     )
     llm.eval_error_raises = RuntimeError("worker boom leak-secret")
@@ -961,22 +941,22 @@ async def test_engine_redacts_failure_reasons_and_push_errors(tmp_path: Path) ->
             reason="alarm",
         )
     )
-    deliverer.failure = RuntimeError("push boom leak-secret")
+    channel.failure = RuntimeError("delivery boom leak-secret")
     speaking = await engine.ingest_event(
         "default", {"name": "alarm.high", "idempotency_key": "redact-2"}
     )
     assert isinstance(speaking, Ok)
     await _wait_settled(store, speaking.value.event_id)
     for _ in range(200):
-        if any(entry.event == "push_delivery_failed" for entry in logger.entries):
+        if any(entry.event == "proactive_delivery_failed" for entry in logger.entries):
             break
         await asyncio.sleep(0.01)
-    push_errors = [
-        entry for entry in logger.entries if entry.event == "push_delivery_failed"
+    delivery_errors = [
+        entry for entry in logger.entries if entry.event == "proactive_delivery_failed"
     ]
-    assert push_errors
-    assert all("leak-secret" not in entry.message for entry in push_errors)
-    assert all("***" in entry.message for entry in push_errors)
+    assert delivery_errors
+    assert all("leak-secret" not in entry.message for entry in delivery_errors)
+    assert all("***" in entry.message for entry in delivery_errors)
     await engine.aclose()
 
 

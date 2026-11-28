@@ -2,7 +2,6 @@ import asyncio
 from collections.abc import AsyncGenerator, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Protocol, assert_never
-from urllib.parse import quote
 from uuid import uuid7
 from weakref import WeakValueDictionary
 
@@ -31,8 +30,7 @@ from my_agents.core.types import (
     MemoryBlocks,
     MemorySnapshot,
     MessageOrigin,
-    PushPayload,
-    PushSubscription,
+    ProactiveNotice,
     SecretStr,
     TimelineItem,
     TimelineKind,
@@ -41,7 +39,6 @@ from my_agents.core.types import (
 )
 from my_agents.shell.llm import ChatReply
 from my_agents.shell.logger import IAppLogger, LogEntry, LogLevel
-from my_agents.shell.push import NoopDeliverer, ProactiveDeliverer
 from my_agents.shell.settings import Settings
 from my_agents.shell.store import MessageEntry, Store
 
@@ -64,6 +61,12 @@ class EngineLlm(Protocol):
     ) -> Result[EventDecision, AppError]: ...
 
 
+class ProactiveChannel(Protocol):
+    async def deliver(self, notice: ProactiveNotice) -> None: ...
+
+    async def aclose(self) -> None: ...
+
+
 class CharacterEngine:
     def __init__(
         self,
@@ -74,7 +77,7 @@ class CharacterEngine:
         logger: IAppLogger,
         *,
         clock: Callable[[], datetime] | None = None,
-        deliverer: ProactiveDeliverer | None = None,
+        proactive_channel: ProactiveChannel | None = None,
         redactions: Sequence[SecretStr] = (),
     ) -> None:
         self._store = store
@@ -83,7 +86,7 @@ class CharacterEngine:
         self._persona = persona
         self._logger = logger
         self._clock = clock or (lambda: datetime.now(UTC))
-        self._deliverer = deliverer or NoopDeliverer()
+        self._proactive_channel = proactive_channel
         self._redactions: tuple[SecretStr, ...] = tuple(redactions)
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._subscribers: dict[str, set[asyncio.Queue[TimelineItem | None]]] = {}
@@ -99,10 +102,6 @@ class CharacterEngine:
     @property
     def logger(self) -> IAppLogger:
         return self._logger
-
-    @property
-    def push_public_key(self) -> str | None:
-        return self._deliverer.public_key
 
     async def _call_store[T](
         self, operation: Callable[[], Result[T, AppError]]
@@ -278,7 +277,7 @@ class CharacterEngine:
             if is_err(decision):
                 await self._fail(envelope, decision.error.message)
                 return
-            push_payload: PushPayload | None = None
+            notice: ProactiveNotice | None = None
             async with self._lock_for(envelope.conversation_id):
                 now = self._clock()
                 committed = await self._call_store(
@@ -297,28 +296,27 @@ class CharacterEngine:
                 result = committed.value
                 if result.action is EventAction.SPEAK and result.message is not None:
                     self._publish(_message_item(result.message))
-                    push_payload = PushPayload(
+                    notice = ProactiveNotice(
                         conversation_id=envelope.conversation_id,
-                        title=self._persona.name,
-                        body=result.message.content[:200],
-                        url=f"/?c={quote(envelope.conversation_id, safe='')}",
-                        tag=f"proactive:{envelope.event_id}",
+                        speaker_name=self._persona.name,
+                        content=result.message.content,
                         event_id=envelope.event_id,
+                        created_at=result.message.created_at,
                     )
                 else:
                     self._publish(_event_item(result.record))
-            if push_payload is not None:
+            if notice is not None and self._proactive_channel is not None:
                 try:
-                    await self._deliverer.deliver(push_payload)
+                    await self._proactive_channel.deliver(notice)
                 except Exception as exc:
                     self._logger.log(
                         LogEntry(
                             LogLevel.ERROR,
-                            "push_delivery_failed",
+                            "proactive_delivery_failed",
                             redact_secrets(
                                 f"{type(exc).__name__}: {exc}", self._redactions
                             ),
-                            "PUSH_FAILED",
+                            "PROACTIVE_DELIVERY_FAILED",
                         )
                     )
         except Exception as exc:
@@ -353,14 +351,6 @@ class CharacterEngine:
         self, *, limit: int = 100
     ) -> Result[tuple[ConversationSummary, ...], AppError]:
         return self._store.list_conversations(limit=limit)
-
-    def save_push_subscription(
-        self, subscription: PushSubscription
-    ) -> Result[None, AppError]:
-        return self._store.upsert_push_subscription(subscription)
-
-    def delete_push_subscription(self, endpoint: str) -> Result[bool, AppError]:
-        return self._store.delete_push_subscription(endpoint)
 
     def get_event(self, event_id: str) -> Result[EventRecord | None, AppError]:
         return self._store.get_event(event_id)
@@ -421,7 +411,8 @@ class CharacterEngine:
                 queue.put_nowait(None)
         self._subscribers.clear()
         await self._llm.aclose()
-        await self._deliverer.aclose()
+        if self._proactive_channel is not None:
+            await self._proactive_channel.aclose()
 
 
 def _message_item(message: ChatMessage) -> TimelineItem:

@@ -10,6 +10,7 @@ from unittest.mock import patch
 from uuid import UUID
 
 from flow_res import Err, Ok
+from pydantic import SecretStr
 
 from my_agents.core.types import (
     AppError,
@@ -22,10 +23,9 @@ from my_agents.core.types import (
     MemoryBlocks,
     MessageOrigin,
     ProactivePolicy,
-    PushSubscription,
-    SecretStr,
     TimelineKind,
 )
+from my_agents.shell.push import PushSubscription
 from my_agents.shell.store import CURRENT_SCHEMA_VERSION, Store
 from tests.helpers import assert_err
 

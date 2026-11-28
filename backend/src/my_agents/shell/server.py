@@ -43,7 +43,6 @@ from my_agents.core.types import (
     AppErrorKind,
     CharacterPersona,
     MemorySnapshot,
-    PushSubscription,
     TimelineItem,
 )
 from my_agents.shell.engine import CharacterEngine
@@ -57,7 +56,7 @@ from my_agents.shell.logger import (
     write_stderr,
     write_stdout,
 )
-from my_agents.shell.push import WebPushDeliverer
+from my_agents.shell.push import PushSubscription, WebPushService
 from my_agents.shell.settings import Settings, load_persona, load_settings
 from my_agents.shell.store import Store
 
@@ -351,6 +350,7 @@ async def _stream(
 
 def create_app(
     engine: CharacterEngine,
+    push: WebPushService,
     *,
     web_dist_dir: Path | None = None,
 ) -> Starlette:
@@ -473,7 +473,7 @@ def create_app(
         return JSONResponse({"deleted_messages": result.value})
 
     async def vapid_public_key(_request: Request) -> JSONResponse:
-        return JSONResponse({"public_key": engine.push_public_key})
+        return JSONResponse({"public_key": push.public_key})
 
     async def subscribe_push(request: Request) -> Response:
         raw = await _body(request)
@@ -485,7 +485,7 @@ def create_app(
                 {"error": "invalid_subscription"},
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             )
-        result = await asyncio.to_thread(engine.save_push_subscription, subscription)
+        result = await asyncio.to_thread(push.save_subscription, subscription)
         if is_err(result):
             return _error(result.error)
         return JSONResponse(
@@ -503,7 +503,7 @@ def create_app(
                 {"error": "invalid_endpoint"},
                 status_code=HTTPStatus.UNPROCESSABLE_ENTITY,
             )
-        result = await asyncio.to_thread(engine.delete_push_subscription, endpoint)
+        result = await asyncio.to_thread(push.delete_subscription, endpoint)
         if is_err(result):
             return _error(result.error)
         return JSONResponse({"deleted": result.value})
@@ -584,13 +584,14 @@ def create_app(
 
 def serve(
     engine: CharacterEngine,
+    push: WebPushService,
     host: str,
     port: int,
     *,
     web_dist_dir: Path | None = None,
 ) -> None:
     uvicorn.run(
-        create_app(engine, web_dist_dir=web_dist_dir),
+        create_app(engine, push, web_dist_dir=web_dist_dir),
         host=host,
         port=port,
         log_level="warning",
@@ -620,30 +621,31 @@ def _web_dist_dir(settings: Settings) -> Path | None:
     return default if (default / "index.html").is_file() else None
 
 
-def _engine(
+def _runtime(
     settings: Settings,
     persona: CharacterPersona,
     logger: IAppLogger,
     *,
     base_env: Mapping[str, str],
     redactions: Sequence[SecretStr] = (),
-) -> CharacterEngine:
+) -> tuple[CharacterEngine, WebPushService]:
     store = Store(settings.db_path, settings.core_memory_path)
     llm = Llm.from_settings(settings, store=store, logger=logger, base_env=base_env)
     if is_err(llm):
         raise RuntimeError(llm.error.message)
-    deliverer = WebPushDeliverer.from_settings(settings, store=store, logger=logger)
-    if is_err(deliverer):
-        raise RuntimeError(deliverer.error.message)
-    return CharacterEngine(
+    push = WebPushService.from_settings(settings, store=store, logger=logger)
+    if is_err(push):
+        raise RuntimeError(push.error.message)
+    engine = CharacterEngine(
         store,
         llm.value,
         settings,
         persona,
         logger,
-        deliverer=deliverer.value,
+        proactive_channel=push.value.channel,
         redactions=redactions,
     )
+    return engine, push.value
 
 
 def run_server(
@@ -668,7 +670,7 @@ def run_server(
             write_error(f"Error: {persona.error.message}")
             return 1
         try:
-            engine = _engine(
+            engine, push = _runtime(
                 settings,
                 persona.value,
                 logger,
@@ -683,6 +685,7 @@ def run_server(
         )
         serve(
             engine,
+            push,
             settings.server_host,
             settings.server_port,
             web_dist_dir=_web_dist_dir(settings),

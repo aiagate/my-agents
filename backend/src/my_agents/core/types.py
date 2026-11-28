@@ -20,9 +20,8 @@ __all__ = [
     "MemorySnapshot",
     "MessageOrigin",
     "PolicyOutcome",
+    "ProactiveNotice",
     "ProactivePolicy",
-    "PushPayload",
-    "PushSubscription",
     "Role",
     "SecretStr",
     "TimelineItem",
@@ -255,30 +254,20 @@ class PolicyOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class ProactiveNotice:
+    conversation_id: str
+    speaker_name: str
+    content: str
+    event_id: str
+    created_at: AwareDatetime
+
+
+@dataclass(frozen=True, slots=True)
 class ProactivePolicy:
     daily_cap: int
     quiet_hours_start_utc: int
     quiet_hours_end_utc: int
     user_active_minutes: int
-
-
-@dataclass(frozen=True, slots=True)
-class PushSubscription:
-    endpoint: str
-    p256dh: str
-    auth: SecretStr
-    created_at: AwareDatetime
-    conversation_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class PushPayload:
-    conversation_id: str
-    title: str
-    body: str
-    url: str
-    tag: str
-    event_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

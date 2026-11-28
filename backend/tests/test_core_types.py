@@ -22,9 +22,8 @@ from my_agents.core.types import (
     MemorySnapshot,
     MessageOrigin,
     PolicyOutcome,
+    ProactiveNotice,
     ProactivePolicy,
-    PushPayload,
-    PushSubscription,
     TimelineItem,
     TimelineKind,
     TurnOutcome,
@@ -208,7 +207,7 @@ def test_snapshot_and_record_models_construct_cleanly() -> None:
     assert rendered.pending_event_count == 4
 
 
-def test_conversation_summary_push_models_and_item_ids_are_immutable() -> None:
+def test_conversation_summary_proactive_notice_and_item_ids_are_immutable() -> None:
     now = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
     summary = ConversationSummary(
         conversation_id="default",
@@ -220,35 +219,34 @@ def test_conversation_summary_push_models_and_item_ids_are_immutable() -> None:
         last_message_preview="latest",
         last_message_origin=MessageOrigin.PROACTIVE,
     )
-    subscription = PushSubscription(
-        endpoint="https://push.example.com/1",
-        p256dh="p256dh-value",
-        auth=SecretStr("auth-secret"),
-        created_at=now,
+    notice = ProactiveNotice(
         conversation_id="default",
-    )
-    payload = PushPayload(
-        conversation_id="default",
-        title="Sora",
-        body="hello",
-        url="/?c=default",
-        tag="proactive:evt_1",
+        speaker_name="Sora",
+        content="hello",
         event_id="evt_1",
+        created_at=now,
     )
     item = TimelineItem(TimelineKind.TURN, "default", "hello", now, item_id=_MESSAGE_ID)
 
     assert summary.last_message_origin is MessageOrigin.PROACTIVE
-    assert subscription.conversation_id == "default"
-    assert subscription.auth.get_secret_value() == "auth-secret"
-    assert "auth-secret" not in repr(subscription)
-    assert (payload.tag, payload.event_id) == ("proactive:evt_1", "evt_1")
+    assert (
+        notice.speaker_name,
+        notice.content,
+        notice.event_id,
+        notice.created_at,
+    ) == (
+        "Sora",
+        "hello",
+        "evt_1",
+        now,
+    )
     assert item.item_id == _MESSAGE_ID
     assert TimelineItem(TimelineKind.EVENT, "default", "x", now, _EVENT_ID).item_id == (
         _EVENT_ID
     )
     mutation: str = "mutated"
     field_name = "conversation_id"
-    for frozen in (summary, subscription, payload, item):
+    for frozen in (summary, notice, item):
         with pytest.raises(
             (AttributeError, TypeError), match="cannot assign|read-only"
         ):
@@ -259,6 +257,9 @@ def test_all_exports_only_public_symbols() -> None:
     module = __import__("my_agents.core.types", fromlist=["__all__"])
     assert exported == sorted(exported)
     assert "SecretStr" in exported
+    assert "ProactiveNotice" in exported
+    assert "PushPayload" not in exported
+    assert "PushSubscription" not in exported
     assert all(not name.startswith("_") for name in exported)
     for name in exported:
         assert hasattr(module, name), name

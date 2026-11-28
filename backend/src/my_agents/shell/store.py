@@ -33,10 +33,10 @@ from my_agents.core.types import (
     MemoryBlocks,
     MessageOrigin,
     ProactivePolicy,
-    PushSubscription,
     Role,
     TimelineItem,
 )
+from my_agents.shell.push import PushSubscription
 
 type MessageEntry = tuple[Role, MessageOrigin, str, str | None]
 CURRENT_SCHEMA_VERSION = 4

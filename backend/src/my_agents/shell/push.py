@@ -3,53 +3,74 @@ import binascii
 import json
 import time
 from base64 import urlsafe_b64decode, urlsafe_b64encode
+from dataclasses import dataclass
 from typing import Protocol
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 import httpx2
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
 from flow_res import Err, Ok, Result
+from pydantic import AwareDatetime
 from webpush import WebPush
 from webpush.types import WebPushKeys, WebPushSubscription
 
 from my_agents.core.types import (
     AppError,
     AppErrorKind,
-    PushPayload,
-    PushSubscription,
+    ProactiveNotice,
     SecretStr,
     redact_secrets,
 )
 from my_agents.shell.logger import IAppLogger, LogEntry, LogLevel
 from my_agents.shell.settings import Settings
-from my_agents.shell.store import Store
 
 _PUSH_TIMEOUT_SECONDS = 10.0
 _PUSH_TTL_SECONDS = 60
 _VAPID_EXPIRATION_SECONDS = 12 * 60 * 60
 
 
-class ProactiveDeliverer(Protocol):
-    @property
-    def public_key(self) -> str | None: ...
+@dataclass(frozen=True, slots=True)
+class PushSubscription:
+    endpoint: str
+    p256dh: str
+    auth: SecretStr
+    created_at: AwareDatetime
+    conversation_id: str | None = None
 
-    async def deliver(self, payload: PushPayload) -> None: ...
 
-    async def aclose(self) -> None: ...
+@dataclass(frozen=True, slots=True)
+class PushPayload:
+    conversation_id: str
+    title: str
+    body: str
+    url: str
+    tag: str
+    event_id: str
+
+    @classmethod
+    def from_notice(cls, notice: ProactiveNotice) -> PushPayload:
+        return cls(
+            conversation_id=notice.conversation_id,
+            title=notice.speaker_name,
+            body=notice.content[:200],
+            url=f"/?c={quote(notice.conversation_id, safe='')}",
+            tag=f"proactive:{notice.event_id}",
+            event_id=notice.event_id,
+        )
 
 
-class NoopDeliverer:
-    @property
-    def public_key(self) -> str | None:
-        return None
+class PushSubscriptionStore(Protocol):
+    def upsert_push_subscription(
+        self, subscription: PushSubscription
+    ) -> Result[None, AppError]: ...
 
-    async def deliver(self, payload: PushPayload) -> None:
-        del payload
+    def delete_push_subscription(self, endpoint: str) -> Result[bool, AppError]: ...
 
-    async def aclose(self) -> None:
-        return
+    def list_push_subscriptions(
+        self, *, conversation_id: str | None = None
+    ) -> Result[tuple[PushSubscription, ...], AppError]: ...
 
 
 def _validation(message: str) -> AppError:
@@ -120,7 +141,7 @@ class WebPushDeliverer:
         private_key: ec.EllipticCurvePrivateKey,
         subject: str,
         public_key: str,
-        store: Store,
+        store: PushSubscriptionStore,
         logger: IAppLogger,
         http_client: httpx2.AsyncClient,
     ) -> None:
@@ -147,14 +168,14 @@ class WebPushDeliverer:
         cls,
         settings: Settings,
         *,
-        store: Store,
+        store: PushSubscriptionStore,
         logger: IAppLogger,
         http_client: httpx2.AsyncClient | None = None,
-    ) -> Result[ProactiveDeliverer, AppError]:
+    ) -> Result[WebPushDeliverer | None, AppError]:
         secret = settings.vapid_private_key
         subject = settings.vapid_subject
         if secret is None and subject is None:
-            return Ok(NoopDeliverer())
+            return Ok(None)
         if secret is None:
             return Err(
                 _validation(
@@ -188,17 +209,17 @@ class WebPushDeliverer:
         )
 
     @property
-    def public_key(self) -> str | None:
+    def public_key(self) -> str:
         return self._public_key
 
     def _authorization(self, endpoint: str) -> str:
         token = _sign_vapid(self._private_key, self._subject, endpoint)
         return f"vapid t={token}, k={self._public_key}"
 
-    async def deliver(self, payload: PushPayload) -> None:
+    async def deliver(self, notice: ProactiveNotice) -> None:
         listed = await asyncio.to_thread(
             self._store.list_push_subscriptions,
-            conversation_id=payload.conversation_id,
+            conversation_id=notice.conversation_id,
         )
         if isinstance(listed, Err):
             self._logger.log(
@@ -210,6 +231,7 @@ class WebPushDeliverer:
                 )
             )
             return
+        payload = PushPayload.from_notice(notice)
         body = json.dumps(
             {
                 "title": payload.title,
@@ -272,3 +294,48 @@ class WebPushDeliverer:
 
     async def aclose(self) -> None:
         await self._http_client.aclose()
+
+
+class WebPushService:
+    def __init__(
+        self,
+        store: PushSubscriptionStore,
+        deliverer: WebPushDeliverer | None = None,
+    ) -> None:
+        self._store = store
+        self._deliverer = deliverer
+
+    @classmethod
+    def from_settings(
+        cls,
+        settings: Settings,
+        *,
+        store: PushSubscriptionStore,
+        logger: IAppLogger,
+        http_client: httpx2.AsyncClient | None = None,
+    ) -> Result[WebPushService, AppError]:
+        deliverer = WebPushDeliverer.from_settings(
+            settings,
+            store=store,
+            logger=logger,
+            http_client=http_client,
+        )
+        if isinstance(deliverer, Err):
+            return deliverer
+        return Ok(cls(store, deliverer.value))
+
+    @property
+    def public_key(self) -> str | None:
+        return None if self._deliverer is None else self._deliverer.public_key
+
+    @property
+    def channel(self) -> WebPushDeliverer | None:
+        return self._deliverer
+
+    def save_subscription(
+        self, subscription: PushSubscription
+    ) -> Result[None, AppError]:
+        return self._store.upsert_push_subscription(subscription)
+
+    def delete_subscription(self, endpoint: str) -> Result[bool, AppError]:
+        return self._store.delete_push_subscription(endpoint)

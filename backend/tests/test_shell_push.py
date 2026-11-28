@@ -13,12 +13,16 @@ from flow_res import Err, Ok, Result
 from my_agents.core.types import (
     AppError,
     AppErrorKind,
-    PushPayload,
-    PushSubscription,
+    ProactiveNotice,
     SecretStr,
 )
 from my_agents.shell.logger import IAppLogger, LogEntry
-from my_agents.shell.push import NoopDeliverer, WebPushDeliverer
+from my_agents.shell.push import (
+    PushPayload,
+    PushSubscription,
+    WebPushDeliverer,
+    WebPushService,
+)
 from my_agents.shell.settings import Settings, load_settings
 from my_agents.shell.store import Store
 from tests.helpers import assert_err
@@ -141,14 +145,19 @@ def _deliverer(
     return result.value, store, logger
 
 
-def _payload() -> PushPayload:
-    return PushPayload(
-        conversation_id="default",
-        title="Sora",
-        body="urgent",
-        url="/?c=default",
-        tag="proactive:evt_1",
-        event_id="evt_1",
+def _notice(
+    conversation_id: str = "default",
+    *,
+    speaker_name: str = "Sora",
+    content: str = "urgent",
+    event_id: str = "evt_1",
+) -> ProactiveNotice:
+    return ProactiveNotice(
+        conversation_id=conversation_id,
+        speaker_name=speaker_name,
+        content=content,
+        event_id=event_id,
+        created_at=datetime(2026, 5, 1, 10, 0, tzinfo=UTC),
     )
 
 
@@ -161,43 +170,76 @@ def _token_payload(authorization: str) -> dict[str, object]:
     return {str(key): value for key, value in parsed.items()}
 
 
+def test_push_models_are_immutable_and_build_payload_from_notice() -> None:
+    now = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
+    subscription = PushSubscription(
+        endpoint="https://push.example.com/1",
+        p256dh="p256dh-value",
+        auth=SecretStr("auth-secret"),
+        created_at=now,
+        conversation_id="default",
+    )
+    notice = _notice("push:demo", content="x" * 250, event_id="evt_99")
+    payload = PushPayload.from_notice(notice)
+
+    assert subscription.conversation_id == "default"
+    assert subscription.auth.get_secret_value() == "auth-secret"
+    assert "auth-secret" not in repr(subscription)
+    assert payload == PushPayload(
+        conversation_id="push:demo",
+        title="Sora",
+        body="x" * 200,
+        url="/?c=push%3Ademo",
+        tag="proactive:evt_99",
+        event_id="evt_99",
+    )
+
+    mutation: str = "mutated"
+    field_name = "conversation_id"
+    for frozen in (subscription, payload):
+        with pytest.raises(
+            (AttributeError, TypeError), match="cannot assign|read-only"
+        ):
+            setattr(frozen, field_name, mutation)
+
+
 @pytest.mark.anyio
-async def test_noop_deliverer_and_default_client(tmp_path: Path) -> None:
-    noop = NoopDeliverer()
-    assert noop.public_key is None
-    await noop.deliver(_payload())
-    await noop.aclose()
+async def test_web_push_service_and_default_client(tmp_path: Path) -> None:
+    unconfigured = _settings(tmp_path / "unconfigured")
+    unconfigured_store = Store(unconfigured.db_path, unconfigured.core_memory_path)
+    noop_deliverer = WebPushDeliverer.from_settings(
+        unconfigured, store=unconfigured_store, logger=_SpyLogger()
+    )
+    assert noop_deliverer == Ok(None)
+
+    service_res = WebPushService.from_settings(
+        unconfigured, store=unconfigured_store, logger=_SpyLogger()
+    )
+    assert isinstance(service_res, Ok)
+    assert service_res.value.public_key is None
+    assert service_res.value.channel is None
+    sub = _subscription()
+    assert service_res.value.save_subscription(sub) == Ok(None)
+    assert service_res.value.delete_subscription(sub.endpoint) == Ok(True)
+    assert service_res.value.delete_subscription(sub.endpoint) == Ok(False)
 
     private = _vapid_private()
     settings = _settings(
-        tmp_path,
+        tmp_path / "configured",
         VAPID_PRIVATE_KEY=private,
         VAPID_SUBJECT="mailto:ops@example.com",
     )
-    configured = WebPushDeliverer.from_settings(
+    store = Store(settings.db_path, settings.core_memory_path)
+    configured = WebPushService.from_settings(
         settings,
-        store=Store(settings.db_path, settings.core_memory_path),
+        store=store,
         logger=_SpyLogger(),
     )
     assert isinstance(configured, Ok)
-    assert isinstance(configured.value, WebPushDeliverer)
+    assert isinstance(configured.value.channel, WebPushDeliverer)
     assert configured.value.public_key == _expected_public(private)
-    await configured.value.aclose()
-
-
-@pytest.mark.anyio
-async def test_from_settings_returns_noop_when_unconfigured(tmp_path: Path) -> None:
-    settings = _settings(tmp_path)
-    result = WebPushDeliverer.from_settings(
-        settings,
-        store=Store(settings.db_path, settings.core_memory_path),
-        logger=_SpyLogger(),
-    )
-    assert isinstance(result, Ok)
-    assert isinstance(result.value, NoopDeliverer)
-    assert result.value.public_key == NoopDeliverer().public_key
-    await result.value.deliver(_payload())
-    await result.value.aclose()
+    assert configured.value.channel.public_key == _expected_public(private)
+    await configured.value.channel.aclose()
 
 
 @pytest.mark.parametrize(
@@ -226,9 +268,10 @@ def test_from_settings_rejects_partial_or_invalid_configuration(
     tmp_path: Path, overrides: dict[str, str], message: str
 ) -> None:
     settings = _settings(tmp_path, **overrides)
-    result = WebPushDeliverer.from_settings(
+    store = Store(settings.db_path, settings.core_memory_path)
+    result = WebPushService.from_settings(
         settings,
-        store=Store(settings.db_path, settings.core_memory_path),
+        store=store,
         logger=_SpyLogger(),
     )
     error = assert_err(result, kind=AppErrorKind.VALIDATION, message_contains=message)
@@ -259,7 +302,9 @@ def test_from_settings_rejects_non_ec_material(tmp_path: Path) -> None:
 
 
 @pytest.mark.anyio
-async def test_deliver_encrypts_and_uses_webpush_headers(tmp_path: Path) -> None:
+async def test_deliver_encrypts_truncates_and_uses_webpush_headers(
+    tmp_path: Path,
+) -> None:
     calls = _Calls()
     client = _client(calls)
     deliverer, store, _logger = _deliverer(tmp_path, client)
@@ -271,12 +316,12 @@ async def test_deliver_encrypts_and_uses_webpush_headers(tmp_path: Path) -> None
         Ok,
     )
 
-    await deliverer.deliver(_payload())
+    await deliverer.deliver(_notice(content="x" * 1000))
 
     assert len(calls.requests) == 2
     for url, content, headers in calls.requests:
         assert url.startswith("https://push.example.com/")
-        assert content
+        assert 0 < len(content) < 600
         assert headers["content-encoding"] == "aes128gcm"
         assert headers["ttl"] == "60"
         assert headers["authorization"].startswith("vapid t=")
@@ -298,13 +343,14 @@ async def test_deliver_https_subject_signs_its_own_vapid_token(tmp_path: Path) -
     )
     assert isinstance(store.upsert_push_subscription(_subscription()), Ok)
 
-    await deliverer.deliver(_payload())
+    await deliverer.deliver(_notice())
 
     authorization = calls.requests[0][2]["authorization"]
     payload = _token_payload(authorization)
     assert payload["sub"] == "https://example.com/contact"
     assert payload["aud"] == "https://push.example.com"
     assert authorization.endswith(f", k={deliverer.public_key}")
+    await deliverer.aclose()
 
 
 @pytest.mark.anyio
@@ -323,12 +369,13 @@ async def test_deliver_logs_subscription_read_failure(tmp_path: Path) -> None:
     assert isinstance(result, Ok)
     assert isinstance(result.value, WebPushDeliverer)
 
-    await result.value.deliver(_payload())
+    await result.value.deliver(_notice())
 
     assert calls.requests == []
     assert logger.entries[0].event == "push_delivery_failed"
     assert logger.entries[0].error_type == "PUSH_FAILED"
     assert "subscription read failed" in logger.entries[0].message
+    await result.value.aclose()
 
 
 @pytest.mark.anyio
@@ -340,7 +387,7 @@ async def test_deliver_prunes_expired_subscriptions(
     deliverer, store, logger = _deliverer(tmp_path, _client(calls, status=status))
     assert isinstance(store.upsert_push_subscription(_subscription()), Ok)
 
-    await deliverer.deliver(_payload())
+    await deliverer.deliver(_notice())
 
     remaining = store.list_push_subscriptions()
     assert isinstance(remaining, Ok)
@@ -349,6 +396,7 @@ async def test_deliver_prunes_expired_subscriptions(
     assert logger.entries[0].event == "push_subscription_pruned"
     assert "https://push.example.com" in logger.entries[0].message
     assert "/sub/1" not in logger.entries[0].message
+    await deliverer.aclose()
 
 
 @pytest.mark.anyio
@@ -367,7 +415,7 @@ async def test_deliver_logs_non_2xx_failure_and_continues(
         Ok,
     )
 
-    await deliverer.deliver(_payload())
+    await deliverer.deliver(_notice())
 
     assert len(calls.requests) == 1
     failures = [
@@ -379,6 +427,7 @@ async def test_deliver_logs_non_2xx_failure_and_continues(
     assert "auth-secret" not in failures[0].message
     assert failures[1].error_type == "PUSH_FAILED"
     assert f"HTTP {status}" not in failures[1].message
+    await deliverer.aclose()
 
 
 @pytest.mark.anyio
@@ -390,12 +439,13 @@ async def test_deliver_prune_log_keeps_port_and_drops_credentials(
     deliverer, store, logger = _deliverer(tmp_path, _client(calls, status=410))
     assert isinstance(store.upsert_push_subscription(_subscription(endpoint)), Ok)
 
-    await deliverer.deliver(_payload())
+    await deliverer.deliver(_notice())
 
     assert logger.entries[0].event == "push_subscription_pruned"
     assert logger.entries[0].message == "https://push.example.com:8443"
     assert "user" not in logger.entries[0].message
     assert "pass" not in logger.entries[0].message
+    await deliverer.aclose()
 
 
 @pytest.mark.anyio
@@ -407,8 +457,9 @@ async def test_deliver_catches_transport_errors_per_subscription(
     deliverer, store, logger = _deliverer(tmp_path, client)
     assert isinstance(store.upsert_push_subscription(_subscription()), Ok)
 
-    await deliverer.deliver(_payload())
+    await deliverer.deliver(_notice())
 
     assert len(calls.requests) == 1
     assert logger.entries[0].event == "push_delivery_failed"
     assert "OSError: offline" in logger.entries[0].message
+    await deliverer.aclose()

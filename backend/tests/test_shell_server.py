@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import quote
 
+import httpx2
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ec
@@ -29,15 +30,13 @@ from my_agents.core.types import (
     EventEnvelope,
     EventRecord,
     MemoryBlocks,
-    PushPayload,
-    PushSubscription,
     TimelineItem,
     TimelineKind,
 )
 from my_agents.shell.engine import CharacterEngine
 from my_agents.shell.llm import ChatReply
 from my_agents.shell.logger import IAppLogger, LogEntry
-from my_agents.shell.push import ProactiveDeliverer
+from my_agents.shell.push import PushSubscription, WebPushService
 from my_agents.shell.server import (
     MAX_BODY_BYTES,
     create_app,
@@ -166,22 +165,6 @@ class _FakeLlm:
         return self.eval_result
 
 
-class _KeyDeliverer:
-    def __init__(self, public: str | None = None) -> None:
-        self._public = public
-        self.closed = False
-
-    @property
-    def public_key(self) -> str | None:
-        return self._public
-
-    async def deliver(self, payload: PushPayload) -> None:
-        del payload
-
-    async def aclose(self) -> None:
-        self.closed = True
-
-
 class _FaultStore(Store):
     def __init__(
         self,
@@ -228,12 +211,21 @@ class _FaultStore(Store):
         return super().reset_conversation(conversation_id)
 
 
-def _build_engine(tmp_path: Path, *, deliverer: ProactiveDeliverer | None = None):
-    settings = load_settings(env={"DATA_DIR": str(tmp_path)})
+def _build_engine(
+    tmp_path: Path,
+    *,
+    http_client: httpx2.AsyncClient | None = None,
+    **overrides: str,
+):
+    settings = load_settings(env={"DATA_DIR": str(tmp_path), **overrides})
     assert isinstance(settings, Ok)
     store = _FaultStore(settings.value.db_path, settings.value.core_memory_path)
     llm = _FakeLlm()
     logger = _SpyLogger()
+    push = WebPushService.from_settings(
+        settings.value, store=store, logger=logger, http_client=http_client
+    )
+    assert isinstance(push, Ok)
     engine = CharacterEngine(
         store,
         llm,
@@ -241,9 +233,9 @@ def _build_engine(tmp_path: Path, *, deliverer: ProactiveDeliverer | None = None
         DEFAULT_PERSONA,
         logger,
         clock=lambda: datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
-        deliverer=deliverer,
+        proactive_channel=push.value.channel,
     )
-    return engine, store, llm, logger
+    return engine, push.value, store, llm, logger
 
 
 def _assert_error(
@@ -265,13 +257,13 @@ def _assert_error(
 def test_health_index_events_chat_timeline_context_memory_and_reset(
     tmp_path: Path,
 ) -> None:
-    engine, store, _llm, _logger = _build_engine(tmp_path)
+    engine, push, store, _llm, _logger = _build_engine(tmp_path)
     assert isinstance(
         store.update_memory(lambda _blocks: Ok(MemoryBlocks(user="green tea"))),
         Ok,
     )
 
-    with TestClient(create_app(engine)) as client:
+    with TestClient(create_app(engine, push)) as client:
         assert client.get("/health").json() == {"status": "ok", "service": "my-agents"}
         index = client.get("/")
         assert index.status_code == HTTPStatus.NOT_FOUND
@@ -387,8 +379,8 @@ def test_health_index_events_chat_timeline_context_memory_and_reset(
 
 
 def test_http_guards_and_validation_errors_include_json_bodies(tmp_path: Path) -> None:
-    engine, _store, _llm, _logger = _build_engine(tmp_path)
-    with TestClient(create_app(engine)) as client:
+    engine, push, _store, _llm, _logger = _build_engine(tmp_path)
+    with TestClient(create_app(engine, push)) as client:
         _assert_error(
             client.post("/events", content=b"{"),
             status=HTTPStatus.BAD_REQUEST,
@@ -477,10 +469,10 @@ def test_http_guards_and_validation_errors_include_json_bodies(tmp_path: Path) -
 def test_every_app_error_kind_maps_to_status_and_body(
     tmp_path: Path, kind: AppErrorKind, status: int
 ) -> None:
-    engine, _store, llm, _logger = _build_engine(tmp_path)
+    engine, push, _store, llm, _logger = _build_engine(tmp_path)
     llm.chat_result = Err(AppError(kind, f"{kind.value} boom"))
 
-    with TestClient(create_app(engine)) as client:
+    with TestClient(create_app(engine, push)) as client:
         response = client.post("/chat", json={"message": "hello"})
 
     _assert_error(
@@ -492,9 +484,9 @@ def test_every_app_error_kind_maps_to_status_and_body(
 
 
 def test_stream_endpoint_emits_sse_frames(tmp_path: Path) -> None:
-    engine, _store, _llm, _logger = _build_engine(tmp_path)
+    engine, push, _store, _llm, _logger = _build_engine(tmp_path)
     with (
-        TestClient(create_app(engine)) as client,
+        TestClient(create_app(engine, push)) as client,
         client.stream("GET", "/stream?conversation_id=sse") as response,
     ):
         assert response.status_code == HTTPStatus.OK
@@ -513,10 +505,13 @@ def test_stream_endpoint_emits_sse_frames(tmp_path: Path) -> None:
 def test_lifespan_start_failure_logs_and_serve_delegates_to_uvicorn(
     tmp_path: Path,
 ) -> None:
-    engine, _store, llm, logger = _build_engine(tmp_path)
+    engine, push, _store, llm, logger = _build_engine(tmp_path)
     llm.start_result = Err(AppError(AppErrorKind.LLM, "mcp fail"))
 
-    with pytest.raises(RuntimeError, match="mcp fail"), TestClient(create_app(engine)):
+    with (
+        pytest.raises(RuntimeError, match="mcp fail"),
+        TestClient(create_app(engine, push)),
+    ):
         pass
     assert logger.entries[0].event == "server_start_failed"
 
@@ -528,7 +523,7 @@ def test_lifespan_start_failure_logs_and_serve_delegates_to_uvicorn(
             calls.append((app, host, port, log_level, timeout_graceful_shutdown))
         ),
     ):
-        serve(engine, "127.0.0.1", 8123)
+        serve(engine, push, "127.0.0.1", 8123)
     assert calls[0][1:] == ("127.0.0.1", 8123, "warning", 5)
 
 
@@ -577,10 +572,12 @@ def test_main_reports_log_path_open_failure(tmp_path: Path, capsys) -> None:
 def test_main_uses_log_path_and_starts_the_server(tmp_path: Path) -> None:
     log_path = tmp_path / "run.jsonl"
     outputs: list[str] = []
-    calls: list[tuple[object, str, int, dict[str, object]]] = []
+    calls: list[tuple[object, object, str, int, dict[str, object]]] = []
 
-    def fake_serve(engine: object, host: str, port: int, **options: object) -> None:
-        calls.append((engine, host, port, options))
+    def fake_serve(
+        engine: object, push: object, host: str, port: int, **options: object
+    ) -> None:
+        calls.append((engine, push, host, port, options))
 
     with patch("my_agents.shell.server.serve", side_effect=fake_serve):
         assert (
@@ -599,8 +596,9 @@ def test_main_uses_log_path_and_starts_the_server(tmp_path: Path) -> None:
         )
 
     assert outputs == ["my-agents listening on http://0.0.0.0:9001"]
-    assert calls[0][1:3] == ("0.0.0.0", 9001)
-    assert calls[0][3] == {"web_dist_dir": tmp_path / "dist"}
+    assert isinstance(calls[0][1], WebPushService)
+    assert calls[0][2:4] == ("0.0.0.0", 9001)
+    assert calls[0][4] == {"web_dist_dir": tmp_path / "dist"}
     assert log_path.read_text(encoding="utf-8") == ""
 
 
@@ -669,8 +667,8 @@ def test_web_dist_serving_static_assets_and_guards(tmp_path: Path) -> None:
     secret.write_text("do not serve", encoding="utf-8")
     (dist / "leak.txt").symlink_to(secret)
 
-    engine, _store, _llm, _logger = _build_engine(tmp_path / "data")
-    with TestClient(create_app(engine, web_dist_dir=dist)) as client:
+    engine, push, _store, _llm, _logger = _build_engine(tmp_path / "data")
+    with TestClient(create_app(engine, push, web_dist_dir=dist)) as client:
         index = client.get("/")
         assert index.status_code == HTTPStatus.OK
         assert index.text == "<html>app shell</html>"
@@ -698,18 +696,18 @@ def test_web_dist_serving_static_assets_and_guards(tmp_path: Path) -> None:
     empty = tmp_path / "empty-dist"
     empty.mkdir()
     (empty / "asset.js").write_text("x", encoding="utf-8")
-    with TestClient(create_app(engine, web_dist_dir=empty)) as client:
+    with TestClient(create_app(engine, push, web_dist_dir=empty)) as client:
         missing_index = client.get("/")
         assert missing_index.status_code == HTTPStatus.NOT_FOUND
         assert missing_index.json()["error"] == "web_ui_not_built"
 
 
 def test_push_endpoints_validate_register_and_delete(tmp_path: Path) -> None:
-    engine, store, _llm, _logger = _build_engine(tmp_path / "push")
+    engine, push, store, _llm, _logger = _build_engine(tmp_path / "push")
     valid_keys = _valid_keys()
     valid_p256dh = valid_keys["p256dh"]
     valid_auth = valid_keys["auth"]
-    with TestClient(create_app(engine)) as client:
+    with TestClient(create_app(engine, push)) as client:
         vapid = client.get("/push/vapid-public-key")
         assert vapid.json() == {"public_key": None}
 
@@ -913,29 +911,40 @@ def test_push_endpoints_validate_register_and_delete(tmp_path: Path) -> None:
         store.failures.clear()
 
 
-def test_push_vapid_key_enabled_with_deliverer(tmp_path: Path) -> None:
-    deliverer = _KeyDeliverer("public-key")
-    engine, _store, _llm, _logger = _build_engine(
-        tmp_path / "vapid", deliverer=deliverer
+def test_push_vapid_key_enabled_with_service(tmp_path: Path) -> None:
+    private = _b64url(
+        ec.generate_private_key(ec.SECP256R1())
+        .private_numbers()
+        .private_value.to_bytes(32, "big")
     )
-    with TestClient(create_app(engine)) as client:
+    http_client = httpx2.AsyncClient(
+        transport=httpx2.MockTransport(lambda _request: httpx2.Response(201))
+    )
+    engine, push, _store, _llm, _logger = _build_engine(
+        tmp_path / "vapid",
+        http_client=http_client,
+        VAPID_PRIVATE_KEY=private,
+        VAPID_SUBJECT="mailto:ops@example.com",
+    )
+    assert push.public_key is not None
+    with TestClient(create_app(engine, push)) as client:
         response = client.get("/push/vapid-public-key")
-        assert response.json() == {"public_key": "public-key"}
-    assert deliverer.closed is True
+        assert response.json() == {"public_key": push.public_key}
+    assert http_client.is_closed is True
 
 
 def test_conversations_endpoint_propagates_storage_errors(tmp_path: Path) -> None:
-    engine, store, _llm, _logger = _build_engine(tmp_path / "conv")
+    engine, push, store, _llm, _logger = _build_engine(tmp_path / "conv")
     store.failures["list_conversations"] = AppError(AppErrorKind.STORAGE, "list failed")
-    with TestClient(create_app(engine)) as client:
+    with TestClient(create_app(engine, push)) as client:
         response = client.get("/conversations")
     assert response.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
     assert response.json()["message"] == "list failed"
 
 
 def test_stream_rejects_invalid_cursors(tmp_path: Path) -> None:
-    engine, _store, _llm, _logger = _build_engine(tmp_path / "cursor")
-    with TestClient(create_app(engine)) as client:
+    engine, push, _store, _llm, _logger = _build_engine(tmp_path / "cursor")
+    with TestClient(create_app(engine, push)) as client:
         for raw in (
             "nope",
             "",
@@ -961,8 +970,8 @@ def _data_items(response, count: int) -> list[dict[str, object]]:
 
 
 def test_stream_replays_cursor_and_continues_live(tmp_path: Path) -> None:
-    engine, _store, _llm, _logger = _build_engine(tmp_path / "replay")
-    with TestClient(create_app(engine)) as client:
+    engine, push, _store, _llm, _logger = _build_engine(tmp_path / "replay")
+    with TestClient(create_app(engine, push)) as client:
         for text in ("one", "two"):
             assert (
                 client.post(
@@ -1143,9 +1152,9 @@ async def test_stream_helper_skips_equal_and_marks_late_events_without_id() -> N
 
 
 def test_conversation_id_validation_across_routes(tmp_path: Path) -> None:
-    engine, _store, _llm, _logger = _build_engine(tmp_path / "ids")
+    engine, push, _store, _llm, _logger = _build_engine(tmp_path / "ids")
     bad_values = ("x" * 129, "bad\x01id", "bad\x7fid")
-    with TestClient(create_app(engine)) as client:
+    with TestClient(create_app(engine, push)) as client:
         for value in bad_values:
             for path in ("/timeline", "/context", "/memory"):
                 response = client.get(path, params={"conversation_id": value})
