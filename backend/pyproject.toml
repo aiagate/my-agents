@@ -1,0 +1,129 @@
+[project]
+name = "my-agents"
+version = "0.1.0"
+description = "Headless character AI engine with event-driven handoff and MCP tool integration"
+readme = "../README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastmcp-slim[client]>=4.2.6",
+    "flow-res>=0.2.0",
+    "httpx2>=2.16.2",
+    "pydantic-ai-slim[openai,web,mcp]>=2.71.0",
+    "python-dotenv>=1.2.4",
+    "starlette>=1.10.0",
+    "uvicorn>=0.54.0",
+    "webpush>=1.0.6",
+]
+
+[project.scripts]
+my-agents = "my_agents:main"
+
+[dependency-groups]
+dev = [
+    "anyio>=4.16.0",
+    "fastmcp-slim[server]>=4.2.6",
+    "pytest>=9.2.0",
+    "pytest-cov>=7.1.0",
+    "ruff>=0.17.6",
+    "ty==0.0.108",
+]
+
+[build-system]
+requires = ["uv_build>=0.13.5,<0.14.0"]
+build-backend = "uv_build"
+
+[tool.ruff]
+line-length = 88
+target-version = "py314"
+
+[tool.ruff.lint]
+preview = true
+explicit-preview-rules = true
+select = [
+    "E",       # pycodestyle errors
+    "W",       # pycodestyle warnings
+    "F",       # pyflakes
+    "I",       # isort
+    "B",       # flake8-bugbear
+    "C4",      # flake8-comprehensions
+    "UP",      # pyupgrade
+    "ARG",     # flake8-unused-arguments
+    "ASYNC",   # flake8-async
+    "DTZ",     # flake8-datetimez
+    "ERA001",  # eradicate commented-out code
+    "PT",      # flake8-pytest-style
+    "PTH",     # flake8-use-pathlib
+    "SIM",     # flake8-simplify
+    "SLF001",  # flake8-self private member access
+    "T201",    # flake8-print
+    "TID251",  # flake8-tidy-imports banned-api
+    "PGH003",  # require specific error codes on type: ignore
+    "PGH004",  # require specific rule codes on noqa
+    "RUF100",  # unused noqa directives
+    "PLC2701", # import-private-name
+]
+ignore = [
+    # reason=E501 is delegated to ruff format so long lines stay formatter-owned; expires=2027-11-27; approved-by=human
+    "E501",
+]
+
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"__future__.annotations".msg = "Do not use 'from __future__ import annotations' on Python 3.14+ (PEP 649 is standard)."
+"typing.Any".msg = "Avoid typing.Any; use concrete types, TypeVar, or None/object. Do not blindly replace contravariant generic parameters (e.g. Agent[None, str] deps) with object."
+"typing_extensions.Any".msg = "Avoid typing_extensions.Any; use concrete types, TypeVar, or None/object."
+"typing.cast".msg = "typing.cast is banned; narrow types or fix the annotation instead."
+"typing_extensions.cast".msg = "typing_extensions.cast is banned; narrow types or fix the annotation instead."
+"os.putenv".msg = "Do not mutate the process environment with os.putenv; inject configuration instead (PL015)."
+"os.unsetenv".msg = "Do not mutate the process environment with os.unsetenv; inject configuration instead (PL015)."
+
+[tool.ruff.lint.flake8-pytest-style]
+raises-require-match-for = [
+    "BaseException",
+    "Exception",
+    "ValueError",
+    "OSError",
+    "RuntimeError",
+    "TypeError",
+    "KeyError",
+    "LookupError",
+    "AttributeError",
+    "pydantic.ValidationError",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.ty.environment]
+python-version = "3.14"
+root = ["./src", "."]
+
+[tool.ty.src]
+include = ["./src/my_agents", "./tests", "./tools"]
+
+[tool.ty.terminal]
+error-on-warning = true
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = ["-v", "--cov=my_agents"]
+
+[tool.coverage.run]
+source = ["src/my_agents"]
+branch = true
+omit = [
+    # reason=entrypoint re-exports main and is exercised through shell tests; expires=2027-11-27; approved-by=human
+    "src/my_agents/__init__.py",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 100
+exclude_also = [
+    # reason=assert_never calls are type-level exhaustiveness guards; expires=2027-11-27; approved-by=human
+    "assert_never\\(",
+]

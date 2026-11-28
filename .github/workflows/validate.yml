@@ -43,7 +43,22 @@ jobs:
           version: '0.13.5'
       - name: Install Python
         run: uv python install 3.14
+      - name: Sync backend dependencies
+        working-directory: backend
+        run: uv sync --locked
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
       - name: Lint and type-check
         run: sh .githooks/pre-commit
       - name: Test
+        working-directory: backend
         run: uv run --locked python -m pytest
+      - name: E2E
+        working-directory: backend
+        run: uv run --locked python tools/e2e_event_chat.py

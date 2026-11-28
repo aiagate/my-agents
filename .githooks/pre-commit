@@ -1,6 +1,9 @@
 #!/usr/bin/env sh
 set -eu
 
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_root/backend"
+
 if uv run --locked python --version >/dev/null 2>&1; then
     run() { uv run --locked "$@"; }
 elif [ -x "$PWD/.venv/bin/ruff" ]; then
@@ -8,7 +11,7 @@ elif [ -x "$PWD/.venv/bin/ruff" ]; then
     export PATH
     run() { "$@"; }
 else
-    echo "Error: neither uv run --locked nor .venv/bin is usable" >&2
+    echo "Error: neither uv run --locked nor backend/.venv/bin is usable" >&2
     exit 1
 fi
 
@@ -16,3 +19,14 @@ run ruff check .
 run ruff format --check .
 run ty check
 run python -m tools.project_lint
+
+if [ ! -d "$repo_root/web/node_modules" ]; then
+    echo "Error: web/node_modules is missing. Run 'cd web && npm ci' first." >&2
+    exit 1
+fi
+(
+    cd "$repo_root/web"
+    npm run typecheck
+    npm test
+    npm run build
+)
