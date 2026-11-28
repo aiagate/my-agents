@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from zoneinfo import ZoneInfo
 
 from flow_res import Ok
 
@@ -83,6 +84,12 @@ def test_edit_memory_rejects_empty_missing_ambiguous_and_oversized_inputs() -> N
     )
 
 
-def test_format_prompt_date_uses_utc() -> None:
+def test_format_prompt_date_uses_utc_by_default_and_respects_timezone() -> None:
     value = datetime(2026, 5, 1, 20, 0, tzinfo=UTC)
     assert format_prompt_date(value) == "2026-05-01"
+
+    tokyo = ZoneInfo("Asia/Tokyo")
+    before_midnight = datetime(2026, 5, 1, 14, 59, tzinfo=UTC)
+    after_midnight = datetime(2026, 5, 1, 15, 0, tzinfo=UTC)
+    assert format_prompt_date(before_midnight, tokyo) == "2026-05-01"
+    assert format_prompt_date(after_midnight, tokyo) == "2026-05-02"

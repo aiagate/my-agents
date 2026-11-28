@@ -112,8 +112,8 @@ async def test_concurrent_proactive_events_respect_daily_cap_atomically(
     store = Store(tmp_path / "state.db", tmp_path / "core.md")
     policy = ProactivePolicy(
         daily_cap=1,
-        quiet_hours_start_utc=0,
-        quiet_hours_end_utc=0,
+        quiet_hours_start=0,
+        quiet_hours_end=0,
         user_active_minutes=0,
     )
     now = _now()

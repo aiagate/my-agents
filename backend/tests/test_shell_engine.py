@@ -8,7 +8,7 @@ from uuid import UUID
 import pytest
 from flow_res import Err, Ok, Result
 
-from my_agents.core.context import AssembledContext
+from my_agents.core.context import MAX_CONTEXT_EVENTS, AssembledContext
 from my_agents.core.types import (
     DEFAULT_PERSONA,
     AppError,
@@ -33,7 +33,7 @@ from my_agents.shell.engine import CharacterEngine, ProactiveChannel
 from my_agents.shell.llm import ChatReply
 from my_agents.shell.logger import IAppLogger, LogEntry
 from my_agents.shell.settings import Settings, load_settings
-from my_agents.shell.store import EventCommit, MessageEntry, Store
+from my_agents.shell.store import EventCommit, MessageEntry, PendingEvent, Store
 from tests.helpers import assert_err
 
 
@@ -64,6 +64,9 @@ class _FakeLlm:
         self.chat_calls = 0
         self.last_context: AssembledContext | None = None
         self.eval_error_raises: Exception | None = None
+        self.active_evals = 0
+        self.max_active_evals = 0
+        self.eval_entered: list[str] = []
         self.closed = False
 
     async def start(self) -> Result[None, AppError]:
@@ -91,14 +94,20 @@ class _FakeLlm:
     async def evaluate_event(
         self, envelope: EventEnvelope, stable_prefix: str
     ) -> Result[EventDecision, AppError]:
-        del envelope, stable_prefix
-        if self.eval_started is not None:
-            self.eval_started.set()
-        if self.eval_gate is not None:
-            await self.eval_gate.wait()
-        if self.eval_error_raises is not None:
-            raise self.eval_error_raises
-        return self.eval_result
+        del stable_prefix
+        self.active_evals += 1
+        self.max_active_evals = max(self.max_active_evals, self.active_evals)
+        self.eval_entered.append(envelope.event_id)
+        try:
+            if self.eval_started is not None:
+                self.eval_started.set()
+            if self.eval_gate is not None:
+                await self.eval_gate.wait()
+            if self.eval_error_raises is not None:
+                raise self.eval_error_raises
+            return self.eval_result
+        finally:
+            self.active_evals -= 1
 
 
 class _FakeChannel:
@@ -149,8 +158,14 @@ class _FaultStore(Store):
             return Err(failure)
         return super().read_memory()
 
+    def list_received_events(self) -> Result[tuple[PendingEvent, ...], AppError]:
+        failure = self.failures.get("list_received_events")
+        if failure is not None:
+            return Err(failure)
+        return super().list_received_events()
+
     def list_pending_notes(
-        self, conversation_id: str, *, limit: int = 5
+        self, conversation_id: str, *, limit: int = MAX_CONTEXT_EVENTS
     ) -> Result[tuple[tuple[EventRecord, ...], int], AppError]:
         failure = self.failures.get("list_pending_notes")
         if failure is not None:
@@ -189,12 +204,12 @@ class _FaultStore(Store):
         return super().append_messages(conversation_id, entries, now)
 
     def mark_surfaced(
-        self, event_ids: Sequence[str], now: datetime
+        self, conversation_id: str, event_ids: Sequence[str], now: datetime
     ) -> Result[None, AppError]:
         failure = self.failures.get("mark_surfaced")
         if failure is not None:
             return Err(failure)
-        return super().mark_surfaced(event_ids, now)
+        return super().mark_surfaced(conversation_id, event_ids, now)
 
     def insert_event(self, record: EventRecord) -> Result[EventRecord, AppError]:
         failure = self.failures.get("insert_event")
@@ -249,8 +264,8 @@ def _settings(tmp_path: Path, **overrides: str) -> Settings:
     loaded = load_settings(
         env={
             "DATA_DIR": str(tmp_path),
-            "PROACTIVE_QUIET_HOURS_START_UTC": "0",
-            "PROACTIVE_QUIET_HOURS_END_UTC": "0",
+            "PROACTIVE_QUIET_HOURS_START": "0",
+            "PROACTIVE_QUIET_HOURS_END": "0",
             "PROACTIVE_USER_ACTIVE_MINUTES": "0",
             **overrides,
         }
@@ -502,6 +517,14 @@ async def test_engine_worker_failure_and_store_error_propagation(
         kind=AppErrorKind.VALIDATION,
         message_contains="Invalid event field",
     )
+
+    store.failures["list_received_events"] = err
+    assert_err(
+        await engine.start(),
+        kind=AppErrorKind.STORAGE,
+        message_contains="io fail",
+    )
+    store.failures.clear()
 
     store.failures["ensure_conversation"] = err
     assert_err(
@@ -990,3 +1013,146 @@ async def test_engine_subscriber_cleanup_survives_shared_and_full_queues(
     with pytest.raises(StopAsyncIteration):
         await asyncio.wait_for(full.__anext__(), timeout=5)
     await full.aclose()
+
+
+@pytest.mark.anyio
+async def test_engine_recovers_orphaned_received_events_on_start(
+    tmp_path: Path,
+) -> None:
+    engine1, store1, llm1, _ = _make_engine(tmp_path)
+    llm1.eval_started = asyncio.Event()
+    llm1.eval_gate = asyncio.Event()
+
+    r_ok = await engine1.ingest_event(
+        "conv_ok", {"name": "alarm.high", "idempotency_key": "rec-ok"}
+    )
+    r_conflict = await engine1.ingest_event(
+        "conv_conflict", {"name": "alarm.high", "idempotency_key": "rec-conflict"}
+    )
+    assert isinstance(r_ok, Ok)
+    assert isinstance(r_conflict, Ok)
+    await llm1.eval_started.wait()
+    await engine1.aclose()
+
+    for event_id in (r_ok.value.event_id, r_conflict.value.event_id):
+        loaded = store1.get_event(event_id)
+        assert isinstance(loaded, Ok)
+        assert loaded.value is not None
+        assert loaded.value.status is EventStatus.RECEIVED
+
+    engine2, store2, llm2, _ = _make_engine(tmp_path)
+    llm2.eval_result = Ok(
+        EventDecision(
+            action=EventAction.SPEAK,
+            message="再開通知です。",
+            note="recovered",
+            reason="alarm",
+        )
+    )
+    llm2.eval_started = asyncio.Event()
+    llm2.eval_gate = asyncio.Event()
+
+    assert isinstance(await engine2.start(), Ok)
+    await llm2.eval_started.wait()
+    assert isinstance(await engine2.submit_message("conv_conflict", "割り込み"), Ok)
+    llm2.eval_gate.set()
+
+    await _wait_settled(store2, r_ok.value.event_id, r_conflict.value.event_id)
+    ok_record = store2.get_event(r_ok.value.event_id)
+    conflict_record = store2.get_event(r_conflict.value.event_id)
+    assert isinstance(ok_record, Ok)
+    assert ok_record.value is not None
+    assert (ok_record.value.status, ok_record.value.action) == (
+        EventStatus.COMPLETED,
+        EventAction.SPEAK,
+    )
+    assert isinstance(conflict_record, Ok)
+    assert conflict_record.value is not None
+    assert (
+        conflict_record.value.status,
+        conflict_record.value.action,
+        conflict_record.value.reason,
+    ) == (EventStatus.COMPLETED, EventAction.NOTE, "epoch_conflict")
+    await engine2.aclose()
+
+
+@pytest.mark.anyio
+async def test_engine_limits_concurrent_event_evaluations(tmp_path: Path) -> None:
+    engine, store, llm, _ = _make_engine(tmp_path, EVENT_MAX_CONCURRENCY="2")
+    llm.eval_gate = asyncio.Event()
+
+    event_ids: list[str] = []
+    for idx in range(5):
+        receipt = await engine.ingest_event(
+            f"conv-{idx}",
+            {"name": "email.received", "idempotency_key": f"k-{idx}"},
+        )
+        assert isinstance(receipt, Ok)
+        event_ids.append(receipt.value.event_id)
+
+    for _ in range(200):
+        if len(llm.eval_entered) >= 2:
+            break
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.05)
+
+    assert llm.active_evals == 2
+    assert llm.max_active_evals == 2
+    assert len(llm.eval_entered) == 2
+
+    llm.eval_gate.set()
+    await _wait_settled(store, *event_ids)
+    assert llm.active_evals == 0
+    assert llm.max_active_evals == 2
+    assert len(llm.eval_entered) == 5
+    await engine.aclose()
+
+
+@pytest.mark.anyio
+async def test_engine_uses_configured_timezone_for_context_and_quiet_hours(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(
+        tmp_path,
+        TIMEZONE="Asia/Tokyo",
+        PROACTIVE_QUIET_HOURS_START="22",
+        PROACTIVE_QUIET_HOURS_END="7",
+    )
+    store = Store(settings.db_path, settings.core_memory_path)
+    llm = _FakeLlm()
+    llm.eval_result = Ok(
+        EventDecision(
+            action=EventAction.SPEAK,
+            message="深夜のお知らせです。",
+            note="midnight",
+            reason="urgent",
+        )
+    )
+    jst_midnight = datetime(2026, 5, 1, 15, 0, tzinfo=UTC)
+    engine = CharacterEngine(
+        store,
+        llm,
+        settings,
+        DEFAULT_PERSONA,
+        _SpyLogger(),
+        clock=lambda: jst_midnight,
+    )
+
+    snap = await engine.context_snapshot("default")
+    assert isinstance(snap, Ok)
+    assert snap.value.dynamic_section == "## 今日\n\n2026-05-02"
+
+    receipt = await engine.ingest_event(
+        "default", {"name": "alarm.high", "idempotency_key": "jst-quiet"}
+    )
+    assert isinstance(receipt, Ok)
+    await _wait_settled(store, receipt.value.event_id)
+
+    loaded = store.get_event(receipt.value.event_id)
+    assert isinstance(loaded, Ok)
+    assert loaded.value is not None
+    assert (loaded.value.action, loaded.value.reason) == (
+        EventAction.NOTE,
+        "quiet_hours",
+    )
+    await engine.aclose()

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from typing import Literal, assert_never
 
 from flow_res import Err, Ok, Result
@@ -74,5 +74,5 @@ def edit_memory(
             assert_never(action)
 
 
-def format_prompt_date(value: datetime) -> str:
-    return value.astimezone(UTC).strftime("%Y-%m-%d")
+def format_prompt_date(value: datetime, tz: tzinfo = UTC) -> str:
+    return value.astimezone(tz).strftime("%Y-%m-%d")

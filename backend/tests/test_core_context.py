@@ -1,6 +1,12 @@
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo
 
-from my_agents.core.context import assemble_context, stable_prefix_sha256
+from my_agents.core.context import (
+    MAX_CONTEXT_EVENTS,
+    assemble_context,
+    stable_prefix_sha256,
+)
 from my_agents.core.types import (
     DEFAULT_PERSONA,
     EventAction,
@@ -120,6 +126,7 @@ def test_assemble_context_accounts_for_omission_suffix_in_budget() -> None:
 
 
 def test_assemble_context_caps_rendering_and_reports_total_pending() -> None:
+    assert MAX_CONTEXT_EVENTS == 5
     now = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
     events = tuple(
         _event(index, EventAction.NOTE, note=f"note {index}") for index in range(1, 8)
@@ -159,3 +166,25 @@ def test_assemble_context_reports_pending_when_nothing_renders() -> None:
     assert ctx.omitted_events == 4
     assert ctx.rendered_event_ids == ()
     assert ctx.pending_event_count == 4
+
+
+def test_assemble_context_renders_dates_in_configured_timezone() -> None:
+    tokyo = ZoneInfo("Asia/Tokyo")
+    now = datetime(2026, 5, 1, 15, 0, tzinfo=UTC)
+    event = replace(
+        _event(1, EventAction.NOTE, note="jst note"),
+        occurred_at=now,
+        received_at=now,
+    )
+    utc_ctx = assemble_context(DEFAULT_PERSONA, MemoryBlocks(), (event,), now=now)
+    jst_ctx = assemble_context(
+        DEFAULT_PERSONA, MemoryBlocks(), (event,), now=now, tz=tokyo
+    )
+
+    assert utc_ctx.dynamic_section == "## 今日\n\n2026-05-01"
+    assert "at 2026-05-01" in utc_ctx.event_section
+    assert jst_ctx.dynamic_section == "## 今日\n\n2026-05-02"
+    assert "at 2026-05-02" in jst_ctx.event_section
+    assert stable_prefix_sha256(utc_ctx.stable_prefix) == stable_prefix_sha256(
+        jst_ctx.stable_prefix
+    )

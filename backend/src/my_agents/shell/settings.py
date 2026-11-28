@@ -2,6 +2,7 @@ import json
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import dotenv_values
 from flow_res import Err, Ok, Result
@@ -25,6 +26,20 @@ from my_agents.core.types import (
 from my_agents.shell.mcp import McpServerSpec, parse_mcp_servers
 
 DEFAULT_LLM_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_TIMEZONE = "UTC"
+
+
+def _timezone(value: object) -> str:
+    if value is None:
+        return DEFAULT_TIMEZONE
+    if not isinstance(value, str):
+        raise ValueError("Timezone must be an IANA timezone name.")
+    name = value.strip() or DEFAULT_TIMEZONE
+    try:
+        ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise ValueError(f"Unknown IANA timezone: {name!r}") from exc
+    return name
 
 
 def _optional_path(value: object) -> Path | None:
@@ -80,9 +95,11 @@ class Settings(BaseModel):
     server_host: str = "127.0.0.1"
     server_port: Annotated[int, Field(ge=0, le=65535)] = 8080
     proactive_daily_cap: Annotated[int, Field(ge=0)] = 5
-    proactive_quiet_hours_start_utc: Annotated[int, Field(ge=0, le=23)] = 22
-    proactive_quiet_hours_end_utc: Annotated[int, Field(ge=0, le=23)] = 7
+    proactive_quiet_hours_start: Annotated[int, Field(ge=0, le=23)] = 22
+    proactive_quiet_hours_end: Annotated[int, Field(ge=0, le=23)] = 7
     proactive_user_active_minutes: Annotated[int, Field(ge=0)] = 10
+    timezone: Annotated[str, BeforeValidator(_timezone)] = DEFAULT_TIMEZONE
+    event_max_concurrency: Annotated[int, Field(gt=0)] = 4
     recent_messages_limit: Annotated[int, Field(gt=0)] = 30
     log_path: Annotated[Path | None, BeforeValidator(_optional_path)] = None
     web_dist_dir: Annotated[Path | None, BeforeValidator(_optional_path)] = None
@@ -100,12 +117,17 @@ class Settings(BaseModel):
         return self.data_dir / "core.md"
 
     @property
+    def tzinfo(self) -> ZoneInfo:
+        return ZoneInfo(self.timezone)
+
+    @property
     def proactive_policy(self) -> ProactivePolicy:
         return ProactivePolicy(
             daily_cap=self.proactive_daily_cap,
-            quiet_hours_start_utc=self.proactive_quiet_hours_start_utc,
-            quiet_hours_end_utc=self.proactive_quiet_hours_end_utc,
+            quiet_hours_start=self.proactive_quiet_hours_start,
+            quiet_hours_end=self.proactive_quiet_hours_end,
             user_active_minutes=self.proactive_user_active_minutes,
+            tz=self.tzinfo,
         )
 
     @property

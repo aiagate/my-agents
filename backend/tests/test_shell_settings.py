@@ -1,11 +1,15 @@
 import json
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+import pytest
 from flow_res import Ok
+from pydantic import ValidationError
 
 from my_agents.core.types import DEFAULT_PERSONA, AppErrorKind
 from my_agents.shell.settings import (
     DEFAULT_LLM_BASE_URL,
+    DEFAULT_TIMEZONE,
     Settings,
     load_persona,
     load_settings,
@@ -23,6 +27,10 @@ def test_load_settings_defaults_env_file_and_precedence(tmp_path: Path) -> None:
     assert cfg.data_dir == Path.cwd() / "data"
     assert cfg.db_path == cfg.data_dir / "state.db"
     assert cfg.core_memory_path == cfg.data_dir / "core.md"
+    assert cfg.timezone == DEFAULT_TIMEZONE
+    assert cfg.tzinfo == ZoneInfo("UTC")
+    assert cfg.proactive_policy.tz == ZoneInfo("UTC")
+    assert cfg.event_max_concurrency == 4
     assert isinstance(cfg.mcp_servers, Ok)
     assert cfg.mcp_servers.value == ()
     assert cfg.web_dist_dir is None
@@ -62,26 +70,68 @@ def test_settings_validators_overrides_and_errors(tmp_path: Path) -> None:
             "PERSONA_PATH": None,
             "LLM_BASE_URL": None,
             "LLM_API_KEY": "   ",
-            "PROACTIVE_QUIET_HOURS_START_UTC": 21,
-            "PROACTIVE_QUIET_HOURS_END_UTC": 6,
+            "PROACTIVE_QUIET_HOURS_START": 21,
+            "PROACTIVE_QUIET_HOURS_END": 6,
             "PROACTIVE_USER_ACTIVE_MINUTES": 12,
+            "TIMEZONE": "Asia/Tokyo",
+            "EVENT_MAX_CONCURRENCY": 2,
         }
     )
     assert validated.data_dir == tmp_path
     assert validated.db_path == tmp_path / "state.db"
     assert validated.llm_base_url == DEFAULT_LLM_BASE_URL
     assert validated.llm_api_key is None
+    assert validated.event_max_concurrency == 2
     assert (
         validated.proactive_policy.daily_cap,
-        validated.proactive_policy.quiet_hours_start_utc,
-        validated.proactive_policy.quiet_hours_end_utc,
+        validated.proactive_policy.quiet_hours_start,
+        validated.proactive_policy.quiet_hours_end,
         validated.proactive_policy.user_active_minutes,
-    ) == (5, 21, 6, 12)
+        validated.proactive_policy.tz,
+    ) == (5, 21, 6, 12, ZoneInfo("Asia/Tokyo"))
 
     assert_err(
         load_settings(env={"SERVER_PORT": "not-an-int"}),
         kind=AppErrorKind.VALIDATION,
         message_contains="SERVER_PORT",
+    )
+
+
+def test_settings_validates_timezone_and_event_max_concurrency() -> None:
+    blank_tz = load_settings(env={"TIMEZONE": "   "})
+    assert isinstance(blank_tz, Ok)
+    assert blank_tz.value.timezone == "UTC"
+    assert blank_tz.value.tzinfo == ZoneInfo("UTC")
+
+    none_tz = Settings.model_validate({"TIMEZONE": None})
+    assert none_tz.timezone == "UTC"
+
+    jst = load_settings(env={"TIMEZONE": "Asia/Tokyo"})
+    assert isinstance(jst, Ok)
+    assert jst.value.timezone == "Asia/Tokyo"
+    assert jst.value.tzinfo == ZoneInfo("Asia/Tokyo")
+
+    assert_err(
+        load_settings(env={"TIMEZONE": "Invalid/Zone"}),
+        kind=AppErrorKind.VALIDATION,
+        message_contains="Unknown IANA timezone",
+    )
+    with pytest.raises(ValidationError, match="Timezone must be an IANA timezone name"):
+        Settings.model_validate({"TIMEZONE": 123})
+
+    concurrency = load_settings(env={"EVENT_MAX_CONCURRENCY": "8"})
+    assert isinstance(concurrency, Ok)
+    assert concurrency.value.event_max_concurrency == 8
+
+    assert_err(
+        load_settings(env={"EVENT_MAX_CONCURRENCY": "0"}),
+        kind=AppErrorKind.VALIDATION,
+        message_contains="EVENT_MAX_CONCURRENCY",
+    )
+    assert_err(
+        load_settings(env={"EVENT_MAX_CONCURRENCY": "-1"}),
+        kind=AppErrorKind.VALIDATION,
+        message_contains="EVENT_MAX_CONCURRENCY",
     )
 
 

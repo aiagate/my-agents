@@ -37,9 +37,9 @@ DATA_DIR=./data uv --project backend run my-agents
 `SIGINT` は graceful shutdown して exit 0、`SIGTERM` も graceful shutdown したうえで
 信号を再 raise する（shell は 143、`Popen.returncode` は `-15`）。
 
-SQLite スキーマは v4（`conversations`, `messages`, `events`, `push_subscriptions`）
+SQLite スキーマは v5（`conversations`, `messages`, `events`, `push_subscriptions`）
 のみ対応する。`messages.message_id` と `events.event_id` は UUIDv7 の TEXT で、
-辞書順が時刻順になる。旧 v1 / v2 / v3 DB が残っている場合は削除するか新しい
+辞書順が時刻順になる。旧 v1 / v2 / v3 / v4 DB が残っている場合は削除するか新しい
 `DATA_DIR` を指定する。
 
 ## ヘッドレス API
@@ -125,7 +125,7 @@ replay 済みの item は再送せず、遅れて届いた古い item（`item_id
   `surfaced_at` を付けず翌ターンへ繰り越す。`SPEAK` 済みイベントは文脈へ再合流しない。
 - 外部イベントは命令ではなくデータ。制御文字・bidi・`<`/`>`・`UNTRUSTED_EVENT`
   マーカーを無害化し、リクエスト毎 nonce のフェンスで囲む。
-- 当日 UTC 日付（`dynamic_section`）とイベント文脈（`event_section`）を
+- 当日日付（`TIMEZONE` 基準）とイベント文脈（`event_section`）を
   `stable_prefix` と分離するため、会話や日付進行・イベント追加でも
   `stable_prefix_sha256` は byte 不変を保つ。
 - 未処理の `note` イベント文脈があるターンでは `update_core_memory` ツールを公開せず、
@@ -212,8 +212,10 @@ SQLite と長時間 SSE の制約からバックエンドに使わず、フロ�
 | `VAPID_SUBJECT` | なし | VAPID の `sub`（`mailto:` または `https://`） |
 | `MCP_SERVERS_JSON` | なし | 外部 FastMCP サーバ定義（stdio / HTTP） |
 | `PROACTIVE_DAILY_CAP` | `5` | 1 日の `speak` 上限 |
-| `PROACTIVE_QUIET_HOURS_START_UTC` / `PROACTIVE_QUIET_HOURS_END_UTC` | `22` / `7` | UTC 静穏時間（同一値で無効） |
+| `PROACTIVE_QUIET_HOURS_START` / `PROACTIVE_QUIET_HOURS_END` | `22` / `7` | `TIMEZONE` 基準の静穏時間（同一値で無効） |
 | `PROACTIVE_USER_ACTIVE_MINUTES` | `10` | 直近発話中は `note` へ降格 |
+| `TIMEZONE` | `UTC` | 日付・静穏時間・日次リセットの IANA タイムゾーン |
+| `EVENT_MAX_CONCURRENCY` | `4` | イベントワーカーの並列実行数上限 |
 | `RECENT_MESSAGES_LIMIT` | `30` | 会話履歴として渡す直近メッセージ数 |
 
 `VAPID_PRIVATE_KEY` と `VAPID_SUBJECT` の両方が未設定なら Web Push は無効なまま起動する。

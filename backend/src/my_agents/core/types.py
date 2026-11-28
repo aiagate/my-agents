@@ -33,6 +33,7 @@ __all__ = [
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
+from datetime import UTC, tzinfo
 from enum import StrEnum
 from typing import Literal, assert_never
 
@@ -265,9 +266,10 @@ class ProactiveNotice:
 @dataclass(frozen=True, slots=True)
 class ProactivePolicy:
     daily_cap: int
-    quiet_hours_start_utc: int
-    quiet_hours_end_utc: int
+    quiet_hours_start: int
+    quiet_hours_end: int
     user_active_minutes: int
+    tz: tzinfo = UTC
 
 
 @dataclass(frozen=True, slots=True)

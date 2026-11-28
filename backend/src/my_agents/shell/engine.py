@@ -8,6 +8,7 @@ from weakref import WeakValueDictionary
 from flow_res import Err, Ok, Result, is_err
 
 from my_agents.core.context import (
+    MAX_CONTEXT_EVENTS,
     AssembledContext,
     assemble_context,
     stable_prefix_sha256,
@@ -91,6 +92,7 @@ class CharacterEngine:
         self._locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._subscribers: dict[str, set[asyncio.Queue[TimelineItem | None]]] = {}
         self._tasks: set[asyncio.Task[None]] = set()
+        self._event_semaphore = asyncio.Semaphore(settings.event_max_concurrency)
 
     def _lock_for(self, conversation_id: str) -> asyncio.Lock:
         lock = self._locks.get(conversation_id)
@@ -108,8 +110,21 @@ class CharacterEngine:
     ) -> Result[T, AppError]:
         return await asyncio.to_thread(operation)
 
+    def _spawn_event_task(self, envelope: EventEnvelope, received_epoch: int) -> None:
+        task = asyncio.create_task(self._process_event(envelope, received_epoch))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
     async def start(self) -> Result[None, AppError]:
-        return await self._llm.start()
+        started = await self._llm.start()
+        if is_err(started):
+            return started
+        pending = await self._call_store(self._store.list_received_events)
+        if is_err(pending):
+            return pending
+        for item in pending.value:
+            self._spawn_event_task(item.envelope, item.epoch)
+        return Ok(None)
 
     def _publish(self, item: TimelineItem) -> None:
         for queue in tuple(self._subscribers.get(item.conversation_id, set())):
@@ -143,7 +158,9 @@ class CharacterEngine:
         if is_err(memory):
             return memory
         pending = await self._call_store(
-            lambda: self._store.list_pending_notes(conversation_id, limit=5)
+            lambda: self._store.list_pending_notes(
+                conversation_id, limit=MAX_CONTEXT_EVENTS
+            )
         )
         if is_err(pending):
             return pending
@@ -153,6 +170,7 @@ class CharacterEngine:
             memory.value,
             events,
             now=now,
+            tz=self._settings.tzinfo,
             pending_event_count=total_pending,
         )
         return Ok((assembled, memory.value))
@@ -197,7 +215,9 @@ class CharacterEngine:
                 return saved
             surfaced = assembled.rendered_event_ids
             if surfaced and is_err(
-                await self._call_store(lambda: self._store.mark_surfaced(surfaced, now))
+                await self._call_store(
+                    lambda: self._store.mark_surfaced(conversation_id, surfaced, now)
+                )
             ):
                 return Err(
                     AppError(AppErrorKind.STORAGE, "Could not mark ambient events.")
@@ -257,70 +277,76 @@ class CharacterEngine:
             return Ok(
                 EventReceipt(inserted.value.event_id, True, inserted.value.status)
             )
-        task = asyncio.create_task(self._process_event(envelope, ensured.value.epoch))
-        self._tasks.add(task)
-        task.add_done_callback(self._tasks.discard)
+        self._spawn_event_task(envelope, ensured.value.epoch)
         return Ok(EventReceipt(envelope.event_id, False, EventStatus.RECEIVED))
 
     async def _process_event(
         self, envelope: EventEnvelope, received_epoch: int
     ) -> None:
-        try:
-            memory = await self._call_store(self._store.read_memory)
-            if is_err(memory):
-                await self._fail(envelope, memory.error.message)
-                return
-            stable_prefix = assemble_context(
-                self._persona, memory.value, (), now=self._clock()
-            ).stable_prefix
-            decision = await self._llm.evaluate_event(envelope, stable_prefix)
-            if is_err(decision):
-                await self._fail(envelope, decision.error.message)
-                return
-            notice: ProactiveNotice | None = None
-            async with self._lock_for(envelope.conversation_id):
-                now = self._clock()
-                committed = await self._call_store(
-                    lambda: self._store.finalize_event(
-                        envelope.conversation_id,
-                        envelope.event_id,
-                        decision.value,
-                        received_epoch=received_epoch,
-                        now=now,
-                        policy=self._settings.proactive_policy,
-                    )
-                )
-                if is_err(committed):
-                    await self._fail(envelope, committed.error.message)
+        async with self._event_semaphore:
+            try:
+                memory = await self._call_store(self._store.read_memory)
+                if is_err(memory):
+                    await self._fail(envelope, memory.error.message)
                     return
-                result = committed.value
-                if result.action is EventAction.SPEAK and result.message is not None:
-                    self._publish(_message_item(result.message))
-                    notice = ProactiveNotice(
-                        conversation_id=envelope.conversation_id,
-                        speaker_name=self._persona.name,
-                        content=result.message.content,
-                        event_id=envelope.event_id,
-                        created_at=result.message.created_at,
-                    )
-                else:
-                    self._publish(_event_item(result.record))
-            if notice is not None and self._proactive_channel is not None:
-                try:
-                    await self._proactive_channel.deliver(notice)
-                except Exception as exc:
-                    self._logger.log(
-                        LogEntry(
-                            LogLevel.ERROR,
-                            "proactive_delivery_failed",
-                            redact_secrets(
-                                f"{type(exc).__name__}: {exc}", self._redactions
-                            ),
-                            "PROACTIVE_DELIVERY_FAILED",
+                stable_prefix = assemble_context(
+                    self._persona,
+                    memory.value,
+                    (),
+                    now=self._clock(),
+                    tz=self._settings.tzinfo,
+                ).stable_prefix
+                decision = await self._llm.evaluate_event(envelope, stable_prefix)
+                if is_err(decision):
+                    await self._fail(envelope, decision.error.message)
+                    return
+                notice: ProactiveNotice | None = None
+                async with self._lock_for(envelope.conversation_id):
+                    now = self._clock()
+                    committed = await self._call_store(
+                        lambda: self._store.finalize_event(
+                            envelope.conversation_id,
+                            envelope.event_id,
+                            decision.value,
+                            received_epoch=received_epoch,
+                            now=now,
+                            policy=self._settings.proactive_policy,
                         )
                     )
-        except Exception as exc:
-            await self._fail(envelope, f"{type(exc).__name__}: {exc}")
+                    if is_err(committed):
+                        await self._fail(envelope, committed.error.message)
+                        return
+                    result = committed.value
+                    if (
+                        result.action is EventAction.SPEAK
+                        and result.message is not None
+                    ):
+                        self._publish(_message_item(result.message))
+                        notice = ProactiveNotice(
+                            conversation_id=envelope.conversation_id,
+                            speaker_name=self._persona.name,
+                            content=result.message.content,
+                            event_id=envelope.event_id,
+                            created_at=result.message.created_at,
+                        )
+                    else:
+                        self._publish(_event_item(result.record))
+                if notice is not None and self._proactive_channel is not None:
+                    try:
+                        await self._proactive_channel.deliver(notice)
+                    except Exception as exc:
+                        self._logger.log(
+                            LogEntry(
+                                LogLevel.ERROR,
+                                "proactive_delivery_failed",
+                                redact_secrets(
+                                    f"{type(exc).__name__}: {exc}", self._redactions
+                                ),
+                                "PROACTIVE_DELIVERY_FAILED",
+                            )
+                        )
+            except Exception as exc:
+                await self._fail(envelope, f"{type(exc).__name__}: {exc}")
 
     async def _fail(self, envelope: EventEnvelope, reason: str) -> None:
         message = sanitize_single_line(redact_secrets(reason, self._redactions))[:500]

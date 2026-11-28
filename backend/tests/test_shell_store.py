@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 from flow_res import Err, Ok
 from pydantic import SecretStr
@@ -26,7 +27,7 @@ from my_agents.core.types import (
     TimelineKind,
 )
 from my_agents.shell.push import PushSubscription
-from my_agents.shell.store import CURRENT_SCHEMA_VERSION, Store
+from my_agents.shell.store import CURRENT_SCHEMA_VERSION, PendingEvent, Store
 from tests.helpers import assert_err
 
 
@@ -86,6 +87,7 @@ def test_uninitialized_store_reads_empty_without_creating_files(tmp_path: Path) 
     state = store.get_state("default")
     msgs = store.recent_messages("default", limit=10)
     pending = store.list_pending_notes("default")
+    received = store.list_received_events()
     timeline = store.list_timeline("default")
     event = store.get_event("evt_1")
     event_in = store.get_event_in("default", "evt_1")
@@ -97,6 +99,7 @@ def test_uninitialized_store_reads_empty_without_creating_files(tmp_path: Path) 
     assert isinstance(msgs, Ok)
     assert msgs.value == ()
     assert pending == Ok(((), 0))
+    assert received == Ok(())
     assert timeline == Ok(())
     assert isinstance(event, Ok)
     assert event.value is None
@@ -268,8 +271,8 @@ def test_store_events_idempotency_finalize_fail_and_surfacing(tmp_path: Path) ->
         "epoch_conflict",
     )
 
-    assert isinstance(store.mark_surfaced((), _t(9)), Ok)
-    assert isinstance(store.mark_surfaced(("evt_note",), _t(9)), Ok)
+    assert isinstance(store.mark_surfaced("default", (), _t(9)), Ok)
+    assert isinstance(store.mark_surfaced("default", ("evt_note",), _t(9)), Ok)
     note_row = store.get_event("evt_note")
     assert isinstance(note_row, Ok)
     assert note_row.value is not None
@@ -520,7 +523,7 @@ def test_mid_ddl_failure_rolls_back_atomically_and_recovers(tmp_path: Path) -> N
     assert version == CURRENT_SCHEMA_VERSION
 
 
-def test_v4_database_missing_table_returns_storage_error_without_recreating(
+def test_v5_database_missing_table_returns_storage_error_without_recreating(
     tmp_path: Path,
 ) -> None:
     db_path = tmp_path / "state.db"
@@ -547,7 +550,7 @@ def test_v4_database_missing_table_returns_storage_error_without_recreating(
     assert tables == {"conversations", "messages", "push_subscriptions"}
 
 
-def test_initialized_v4_database_skips_ddl_on_normal_writes(tmp_path: Path) -> None:
+def test_initialized_v5_database_skips_ddl_on_normal_writes(tmp_path: Path) -> None:
     db_path = tmp_path / "state.db"
     store = Store(db_path, tmp_path / "core.md")
     assert isinstance(store.ensure_conversation("default", _t()), Ok)
@@ -798,7 +801,7 @@ def test_store_lists_pending_notes_with_total_count(tmp_path: Path) -> None:
     assert [event.event_id for event in limited.value[0]] == ["note_2", "note_1"]
     assert limited.value[1] == 3
 
-    assert isinstance(store.mark_surfaced(("note_2",), _t(8)), Ok)
+    assert isinstance(store.mark_surfaced("default", ("note_2",), _t(8)), Ok)
     after_surface = store.list_pending_notes("default")
     assert isinstance(after_surface, Ok)
     assert after_surface.value[1] == 2
@@ -1011,3 +1014,174 @@ def test_store_memory_preserves_custom_sections_and_preamble(tmp_path: Path) -> 
     assert "## arc\nnew arc" in rendered
     assert "## user\n" in rendered
     assert "## relationship\n" in rendered
+
+
+def test_store_creates_pending_notes_index_and_uses_it_in_query_plan(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "state.db"
+    store = Store(db_path, tmp_path / "core.md")
+    assert isinstance(store.ensure_conversation("default", _t(0)), Ok)
+    with closing(sqlite3.connect(db_path)) as conn:
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            )
+        }
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN "
+            "SELECT * FROM events "
+            "WHERE conversation_id = ? AND action = 'note' AND surfaced_at IS NULL "
+            "ORDER BY occurred_at DESC, event_id DESC LIMIT ?",
+            ("default", 5),
+        ).fetchall()
+    assert {"events_pending_notes", "events_received"} <= indexes
+    assert any("events_pending_notes" in str(row[-1]) for row in plan), plan
+
+
+def test_store_mark_surfaced_scopes_updates_to_conversation(tmp_path: Path) -> None:
+    store = Store(tmp_path / "state.db", tmp_path / "core.md")
+    assert isinstance(
+        store.insert_event(
+            replace(
+                _record("evt_a", conversation_id="conv_a", minutes=1),
+                status=EventStatus.COMPLETED,
+                action=EventAction.NOTE,
+                note="note a",
+            )
+        ),
+        Ok,
+    )
+    assert isinstance(
+        store.insert_event(
+            replace(
+                _record("evt_b", conversation_id="conv_b", minutes=2),
+                status=EventStatus.COMPLETED,
+                action=EventAction.NOTE,
+                note="note b",
+            )
+        ),
+        Ok,
+    )
+
+    assert isinstance(store.mark_surfaced("conv_a", ("evt_a", "evt_b"), _t(9)), Ok)
+
+    marked = store.get_event_in("conv_a", "evt_a")
+    untouched = store.get_event_in("conv_b", "evt_b")
+    pending_b = store.list_pending_notes("conv_b")
+    assert isinstance(marked, Ok)
+    assert marked.value is not None
+    assert marked.value.surfaced_at == _t(9)
+    assert isinstance(untouched, Ok)
+    assert untouched.value is not None
+    assert untouched.value.surfaced_at is None
+    assert isinstance(pending_b, Ok)
+    assert ([event.event_id for event in pending_b.value[0]], pending_b.value[1]) == (
+        ["evt_b"],
+        1,
+    )
+
+
+def test_store_list_received_events_returns_pending_envelopes_with_epochs(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db", tmp_path / "core.md")
+    assert isinstance(store.bump_epoch("conv_a", _t(0)), Ok)
+    assert isinstance(store.bump_epoch("conv_a", _t(0)), Ok)
+    assert isinstance(store.ensure_conversation("conv_b", _t(0)), Ok)
+
+    assert isinstance(
+        store.insert_event(_record("evt_2", conversation_id="conv_b", minutes=5)), Ok
+    )
+    assert isinstance(
+        store.insert_event(_record("evt_1", conversation_id="conv_a", minutes=1)), Ok
+    )
+    assert isinstance(
+        store.insert_event(
+            replace(
+                _record("evt_done", conversation_id="conv_a", minutes=2),
+                status=EventStatus.COMPLETED,
+                action=EventAction.NOTE,
+            )
+        ),
+        Ok,
+    )
+    assert isinstance(
+        store.insert_event(
+            replace(
+                _record("evt_failed", conversation_id="conv_b", minutes=3),
+                status=EventStatus.FAILED,
+                failure_reason="boom",
+            )
+        ),
+        Ok,
+    )
+
+    listed = store.list_received_events()
+    assert isinstance(listed, Ok)
+    assert len(listed.value) == 2
+    first, second = listed.value
+    assert isinstance(first, PendingEvent)
+    assert (first.envelope.event_id, first.envelope.conversation_id, first.epoch) == (
+        "evt_1",
+        "conv_a",
+        2,
+    )
+    assert first.envelope.occurred_at == _t(1)
+    assert first.envelope.payload_json == '{"subject":"hello"}'
+    assert (
+        second.envelope.event_id,
+        second.envelope.conversation_id,
+        second.epoch,
+    ) == ("evt_2", "conv_b", 0)
+
+
+def test_store_finalize_event_daily_cap_resets_at_timezone_midnight(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state.db", tmp_path / "core.md")
+    tokyo = ZoneInfo("Asia/Tokyo")
+    policy = ProactivePolicy(1, 0, 0, 0, tz=tokyo)
+    speak = EventDecision(
+        action=EventAction.SPEAK, message="通知です。", note="n", reason="alert"
+    )
+    before_midnight = datetime(2026, 5, 1, 14, 59, tzinfo=UTC)
+    same_jst_day = datetime(2026, 5, 1, 14, 59, 30, tzinfo=UTC)
+    after_midnight = datetime(2026, 5, 1, 15, 0, tzinfo=UTC)
+
+    for event_id in ("evt_1", "evt_2", "evt_3"):
+        assert isinstance(store.insert_event(_record(event_id)), Ok)
+
+    first = store.finalize_event(
+        "default", "evt_1", speak, received_epoch=0, now=before_midnight, policy=policy
+    )
+    assert isinstance(first, Ok)
+    assert first.value.action is EventAction.SPEAK
+    state_before = store.get_state("default")
+    assert isinstance(state_before, Ok)
+    assert (
+        state_before.value.proactive_day,
+        state_before.value.proactive_count_today,
+    ) == ("2026-05-01", 1)
+
+    capped = store.finalize_event(
+        "default", "evt_2", speak, received_epoch=0, now=same_jst_day, policy=policy
+    )
+    assert isinstance(capped, Ok)
+    assert (capped.value.action, capped.value.reason) == (
+        EventAction.NOTE,
+        "daily_cap",
+    )
+
+    reset = store.finalize_event(
+        "default", "evt_3", speak, received_epoch=0, now=after_midnight, policy=policy
+    )
+    assert isinstance(reset, Ok)
+    assert reset.value.action is EventAction.SPEAK
+    state_after = store.get_state("default")
+    assert isinstance(state_after, Ok)
+    assert (
+        state_after.value.proactive_day,
+        state_after.value.proactive_count_today,
+    ) == ("2026-05-02", 1)

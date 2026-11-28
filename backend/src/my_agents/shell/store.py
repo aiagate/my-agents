@@ -13,11 +13,13 @@ from uuid import uuid7
 from flow_res import Err, Ok, Result
 from pydantic import TypeAdapter
 
+from my_agents.core.context import MAX_CONTEXT_EVENTS
 from my_agents.core.events import (
     apply_policy,
     sanitize_single_line,
     sanitize_untrusted,
 )
+from my_agents.core.memory import format_prompt_date
 from my_agents.core.types import (
     AppError,
     AppErrorKind,
@@ -27,6 +29,7 @@ from my_agents.core.types import (
     ConversationSummary,
     EventAction,
     EventDecision,
+    EventEnvelope,
     EventRecord,
     EventStatus,
     MemoryBlock,
@@ -39,7 +42,7 @@ from my_agents.core.types import (
 from my_agents.shell.push import PushSubscription
 
 type MessageEntry = tuple[Role, MessageOrigin, str, str | None]
-CURRENT_SCHEMA_VERSION = 4
+CURRENT_SCHEMA_VERSION = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +52,12 @@ class EventCommit:
     note: str
     record: EventRecord
     message: ChatMessage | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PendingEvent:
+    envelope: EventEnvelope
+    epoch: int
 
 
 _SCHEMA_STATEMENTS: tuple[str, ...] = (
@@ -104,6 +113,15 @@ _SCHEMA_STATEMENTS: tuple[str, ...] = (
     ON events(conversation_id, received_at DESC)
     """,
     """
+    CREATE INDEX IF NOT EXISTS events_pending_notes
+    ON events(conversation_id, action, surfaced_at, occurred_at DESC, event_id DESC)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS events_received
+    ON events(received_at ASC, event_id ASC)
+    WHERE status = 'received'
+    """,
+    """
     CREATE TABLE IF NOT EXISTS push_subscriptions (
         endpoint TEXT PRIMARY KEY,
         p256dh TEXT NOT NULL,
@@ -126,6 +144,7 @@ def _storage(message: str) -> AppError:
 _STATE = TypeAdapter(ConversationState)
 _MESSAGE = TypeAdapter(ChatMessage)
 _EVENT = TypeAdapter(EventRecord)
+_PENDING = TypeAdapter(PendingEvent)
 _SUMMARY = TypeAdapter(ConversationSummary)
 _PUSH = TypeAdapter(PushSubscription)
 _TIMELINE = TypeAdapter(TimelineItem)
@@ -145,6 +164,12 @@ def _message(row: sqlite3.Row) -> ChatMessage:
 
 def _event(row: sqlite3.Row) -> EventRecord:
     return _EVENT.validate_python(dict(row))
+
+
+def _pending_event(row: sqlite3.Row) -> PendingEvent:
+    data = dict(row)
+    epoch = data.pop("epoch")
+    return _PENDING.validate_python({"envelope": data, "epoch": epoch})
 
 
 def _conversation_summary(row: sqlite3.Row) -> ConversationSummary:
@@ -495,7 +520,7 @@ class Store:
                     ("assistant", MessageOrigin.PROACTIVE, spoken, event_id),
                     now,
                 )
-                today = now.astimezone(UTC).date().isoformat()
+                today = format_prompt_date(now, policy.tz)
                 count = (
                     1
                     if state.proactive_day != today
@@ -565,8 +590,23 @@ class Store:
             empty=None,
         )
 
+    def list_received_events(self) -> Result[tuple[PendingEvent, ...], AppError]:
+        def run(connection: sqlite3.Connection) -> tuple[PendingEvent, ...]:
+            rows = connection.execute(
+                "SELECT e.event_id, e.conversation_id, e.name, e.source, "
+                "e.occurred_at, e.idempotency_key, e.payload_json, c.epoch "
+                "FROM events e "
+                "JOIN conversations c ON c.conversation_id = e.conversation_id "
+                "WHERE e.status = ? "
+                "ORDER BY e.received_at ASC, e.event_id ASC",
+                (EventStatus.RECEIVED.value,),
+            ).fetchall()
+            return tuple(_pending_event(row) for row in rows)
+
+        return self._read(run, empty=())
+
     def list_pending_notes(
-        self, conversation_id: str, *, limit: int = 5
+        self, conversation_id: str, *, limit: int = MAX_CONTEXT_EVENTS
     ) -> Result[tuple[tuple[EventRecord, ...], int], AppError]:
         def run(
             connection: sqlite3.Connection,
@@ -629,7 +669,7 @@ class Store:
         return self._read(run, empty=())
 
     def mark_surfaced(
-        self, event_ids: Sequence[str], now: datetime
+        self, conversation_id: str, event_ids: Sequence[str], now: datetime
     ) -> Result[None, AppError]:
         if not event_ids:
             return Ok(None)
@@ -637,8 +677,9 @@ class Store:
         def run(connection: sqlite3.Connection) -> None:
             markers = ", ".join("?" for _ in event_ids)
             connection.execute(
-                f"UPDATE events SET surfaced_at = ? WHERE event_id IN ({markers})",
-                (_stamp(now), *event_ids),
+                f"UPDATE events SET surfaced_at = ? "
+                f"WHERE conversation_id = ? AND event_id IN ({markers})",
+                (_stamp(now), conversation_id, *event_ids),
             )
 
         return self._write(run)

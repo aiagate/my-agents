@@ -16,6 +16,7 @@ from pydantic import (
     ValidationError,
 )
 
+from my_agents.core.memory import format_prompt_date
 from my_agents.core.types import (
     AppError,
     AppErrorKind,
@@ -151,7 +152,7 @@ def build_event_prompt(envelope: EventEnvelope, nonce: str) -> str:
 
 
 def _in_quiet_hours(now: datetime, policy: ProactivePolicy) -> bool:
-    start, end = policy.quiet_hours_start_utc, policy.quiet_hours_end_utc
+    start, end = policy.quiet_hours_start, policy.quiet_hours_end
     if start == end:
         return False
     if start < end:
@@ -173,7 +174,7 @@ def apply_policy(
     *,
     epoch_changed: bool,
 ) -> PolicyOutcome:
-    now = now.astimezone(UTC)
+    local_now = now.astimezone(policy.tz)
     match decision.action:
         case EventAction.IGNORE:
             return PolicyOutcome(EventAction.IGNORE, decision.reason)
@@ -184,13 +185,13 @@ def apply_policy(
                 return PolicyOutcome(EventAction.NOTE, "empty_message")
             if epoch_changed:
                 return PolicyOutcome(EventAction.NOTE, "epoch_conflict")
-            if _in_quiet_hours(now, policy):
+            if _in_quiet_hours(local_now, policy):
                 return PolicyOutcome(EventAction.NOTE, "quiet_hours")
             if _within_minutes(
-                state.last_user_activity_at, now, policy.user_active_minutes
+                state.last_user_activity_at, local_now, policy.user_active_minutes
             ):
                 return PolicyOutcome(EventAction.NOTE, "user_active_window")
-            today = now.date().isoformat()
+            today = format_prompt_date(local_now, policy.tz)
             if policy.daily_cap <= 0 or (
                 state.proactive_day == today
                 and state.proactive_count_today >= policy.daily_cap

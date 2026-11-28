@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from flow_res import Ok
 
@@ -176,8 +177,8 @@ def test_apply_policy_covers_actions_and_all_downgrade_gates() -> None:
     base_state = ConversationState("default", epoch=1)
     permissive = ProactivePolicy(
         daily_cap=5,
-        quiet_hours_start_utc=0,
-        quiet_hours_end_utc=0,
+        quiet_hours_start=0,
+        quiet_hours_end=0,
         user_active_minutes=0,
     )
 
@@ -344,4 +345,82 @@ def test_apply_policy_normalizes_now_to_utc() -> None:
             epoch_changed=False,
         ).reason
         == "daily_cap"
+    )
+
+
+def test_apply_policy_evaluates_quiet_hours_and_daily_cap_in_iana_timezone() -> None:
+    tokyo = ZoneInfo("Asia/Tokyo")
+    speak = EventDecision(
+        action=EventAction.SPEAK,
+        message="確認してください。",
+        note="alert",
+        reason="urgent",
+    )
+    state = ConversationState("default")
+    jst_quiet = ProactivePolicy(5, 22, 7, 0, tz=tokyo)
+
+    assert (
+        apply_policy(
+            speak,
+            state,
+            datetime(2026, 5, 1, 12, 59, tzinfo=UTC),
+            jst_quiet,
+            epoch_changed=False,
+        ).action
+        is EventAction.SPEAK
+    )
+    assert (
+        apply_policy(
+            speak,
+            state,
+            datetime(2026, 5, 1, 13, 0, tzinfo=UTC),
+            jst_quiet,
+            epoch_changed=False,
+        ).reason
+        == "quiet_hours"
+    )
+    assert (
+        apply_policy(
+            speak,
+            state,
+            datetime(2026, 5, 1, 21, 59, tzinfo=UTC),
+            jst_quiet,
+            epoch_changed=False,
+        ).reason
+        == "quiet_hours"
+    )
+    assert (
+        apply_policy(
+            speak,
+            state,
+            datetime(2026, 5, 1, 22, 0, tzinfo=UTC),
+            jst_quiet,
+            epoch_changed=False,
+        ).action
+        is EventAction.SPEAK
+    )
+
+    jst_cap = ProactivePolicy(5, 0, 0, 0, tz=tokyo)
+    capped = ConversationState(
+        "default", proactive_count_today=5, proactive_day="2026-05-01"
+    )
+    assert (
+        apply_policy(
+            speak,
+            capped,
+            datetime(2026, 5, 1, 14, 59, tzinfo=UTC),
+            jst_cap,
+            epoch_changed=False,
+        ).reason
+        == "daily_cap"
+    )
+    assert (
+        apply_policy(
+            speak,
+            capped,
+            datetime(2026, 5, 1, 15, 0, tzinfo=UTC),
+            jst_cap,
+            epoch_changed=False,
+        ).action
+        is EventAction.SPEAK
     )
